@@ -54,10 +54,12 @@ def _market_of(symbol: str) -> str:
 
 
 def load_price(symbol: str, start: str = "20240101",
-               end: Optional[str] = None) -> tuple[pd.DataFrame, bool]:
-    """返回 (df, offline)。offline=True 表示使用合成数据，不应据此产生真实信号。"""
+               end: Optional[str] = None,
+               force_offline: bool = False) -> tuple[pd.DataFrame, bool]:
+    """返回 (df, offline)。offline=True 表示使用合成数据，不应据此产生真实信号。
+    force_offline=True 时直接走合成兜底、不触网（用于沙箱 / 离线验证）。"""
     end = end or datetime.today().strftime("%Y%m%d")
-    if ak is not None:
+    if ak is not None and not force_offline:
         try:
             df = ak.stock_zh_a_hist(symbol=symbol, period="daily",
                                     start_date=start, end_date=end, adjust="qfq")

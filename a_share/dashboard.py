@@ -170,7 +170,7 @@ footer { color:#6b7888; font-size:12px; border-top:1px solid #2a3340;
 
 
 def render_dashboard(results, screener_result: dict = None,
-                     mode: str = "online") -> str:
+                     mode: str = "online", show_watchlist: bool = True) -> str:
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     badge_cls = "online" if mode == "online" else "offline"
     badge_txt = "联网真实信号" if mode == "online" else "离线合成·仅验证"
@@ -181,6 +181,13 @@ def render_dashboard(results, screener_result: dict = None,
         f'<section><h2>🔎 五板块自动选股推荐</h2>{scr}</section>'
         if scr else ""
     )
+    wl_section = (
+        "<section><h2>👁 自选股信号总览</h2>"
+        "<table><thead><tr><th>代码</th><th>名称</th><th>信号</th>"
+        "<th>综合分</th><th>最新价</th><th>四维</th><th>明细/规则</th></tr></thead>"
+        f"<tbody>{wl}</tbody></table></section>"
+        if show_watchlist else ""
+    )
     return (
         "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
@@ -190,13 +197,10 @@ def render_dashboard(results, screener_result: dict = None,
         f'<div class="meta">生成时间 {ts}'
         f'<span class="badge {badge_cls}">{badge_txt}</span></div>'
         f"{summary}</header>"
-        "<section><h2>👁 自选股信号总览</h2>"
-        "<table><thead><tr><th>代码</th><th>名称</th><th>信号</th>"
-        "<th>综合分</th><th>最新价</th><th>四维</th><th>明细/规则</th></tr></thead>"
-        f"<tbody>{wl}</tbody></table></section>"
+        f"{wl_section}"
         f"{scr_section}"
         "<footer>信号由量化引擎生成，仅供研究参考，不构成投资建议。"
-        "A股手动决策、手动下单、风险自担。重新运行 run_daily.py 可刷新本看板。</footer>"
+        "A股手动决策、手动下单、风险自担。在可视面板点击「运行」即可刷新本看板。</footer>"
         "</div></body></html>"
     )
 

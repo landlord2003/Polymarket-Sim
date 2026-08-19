@@ -128,14 +128,15 @@ def _market_score(df: pd.DataFrame) -> tuple:
 def screen_sector(label: str, candidates: list, top_n: int = 8,
                   offline: bool = False) -> tuple:
     """扫描单板块，返回 (TopN 行列表, offline)。"""
-    cons, off = get_constituents(label, candidates)
     if offline:
-        cons, off = OFFLINE_SAMPLES.get(label, cons), True
+        cons, off = OFFLINE_SAMPLES.get(label, [("000001", "样本A")]), True
+    else:
+        cons, off = get_constituents(label, candidates)
 
     rows = []
     for sym, nm in cons:
         from signal_engine import load_price
-        df, doff = load_price(sym)
+        df, doff = load_price(sym, force_offline=offline)
         if doff:
             off = True
         s_mkt, n_mkt = _market_score(df)

@@ -28,6 +28,7 @@
 | 个性化规则 | 编辑 `watchlist.json` 的 `rules` | 钢研布林下轨买点 / 元力建仓区间等已内置 |
 | 五板块自动选股 | `python a_share/run_daily.py --screener` | 新能源/新材料/AI/机器人/军工 扫描 TopN |
 | 加密模拟盘 | `python crypto/bot_dryrun.py --once` | CCXT 全自动闭环（dry-run 零资金） |
+| 可视面板 | `python a_share/webui.py` | 浏览器开 http://127.0.0.1:8787，页面内按钮启动扫描 |
 | Freqtrade 框架 | 见 `crypto/freqtrade/README.md` | 需另装 freqtrade + testnet 密钥 |
 
 ---
@@ -83,6 +84,12 @@ python a_share/run_daily.py --screener
 ```
 联网正常时，会对 `a_share/watchlist.json` 里的每只股票跑四维度打分、对五板块跑选股初筛，汇总后推送钉钉（配了 `.env` 的话）。
 
+### 第 6.5 步（推荐）：可视面板（webui，免敲命令行）
+```bash
+python a_share/webui.py
+```
+保持终端窗口开着（Ctrl+C 退出），浏览器打开 **http://127.0.0.1:8787**：点 **📊 日常盯盘** / **🔎 板块选股** / **🚀 全部运行**，勾 **离线验证** 先用合成数据跑顺、不联网不推送；勾 **推送钉钉** 且配好 `.env` 时推手机。扫描在后台线程跑（联网取数约 30–90 秒），页面每 2 秒自动轮询刷新。端口用 `QT_WEB_PORT` 环境变量改（默认 8787）。
+
 ### 第 7 步（可选）：加密模拟盘实跑
 ```bash
 # 默认 dry_run=true 零资金，验证整条链路（用合成/实时数据）
@@ -128,6 +135,7 @@ quant-trading/
 │   ├── screener.py        # 五板块自动选股初筛
 │   ├── notify.py          # 钉钉/企微推送（读 .env）
 │   ├── run_daily.py       # 每日编排入口（--screener 跑选股）
+│   ├── webui.py           # 本地可视面板（按钮启动扫描）
 │   └── backtest_skeleton.py  # backtrader 回测骨架
 ├── crypto/
 │   ├── bot_dryrun.py      # CCXT 全自动闭环（零资金 dry-run/testnet）

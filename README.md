@@ -11,7 +11,7 @@
 - ✅ **五板块自动选股**：新能源 / 新材料 / AI / 机器人 / 军工，循环扫描成分股 → 行情+量能初筛 → TopN 推荐（`screener.py`，`run_daily.py --screener`）
 - ✅ **给出交易策略信号**：行情 / 资金 / 板块 / 消息 四维度综合 → 买 / 持 / 卖，经风控闸门后推送钉钉/微信
 - ✅ **加密模拟盘全自动链路**：CCXT 取数→RSI/EMA信号→风控→testnet/dry-run 下单（`crypto/bot_dryrun.py`），零资金验证
-- ✅ **本地 HTML 看板**：`run_daily.py` 自动生成 `output/dashboard.html`，浏览器双击即看（深色/自包含/零依赖），含自选股信号表 + 五板块推荐
+- ✅ **可视面板 webui**：`python a_share/webui.py` 启动本地服务，浏览器开 `http://127.0.0.1:8787`，**页面内点按钮即可运行扫描**（日常盯盘/板块选股/全部运行），结果实时刷新；`run_daily.py` 仍可在命令行生成静态 `output/dashboard.html` 备用
 - ❌ **A股不自动下单**：需 QMT/PTrade（50万+ 门槛），本阶段信号推给你**手动执行**
 
 ## 目录结构
@@ -25,6 +25,7 @@ quant-trading/
 │   ├── screener.py         # 五板块自动选股初筛
 │   ├── notify.py           # 钉钉/企微推送（读 .env）
 │   ├── run_daily.py        # 每日信号扫描入口（--screener 跑选股）
+│   ├── webui.py            # 本地可视面板（页面内按钮启动扫描）
 │   └── backtest_skeleton.py# backtrader 回测骨架
 ├── crypto/                 # 加密线：CCXT + Freqtrade testnet（P3）
 │   ├── bot_dryrun.py       # CCXT 全自动闭环（零资金 dry-run/testnet）
@@ -57,6 +58,24 @@ python crypto/bot_dryrun.py --once              # 加密模拟盘一轮（dry-ru
 ```
 
 另一台电脑完整部署见 **[DEPLOY.md](./DEPLOY.md)**。
+
+## 可视面板（webui）—— 怎么看面板
+
+不想敲命令行？用面板：
+
+```bash
+python a_share/webui.py
+```
+
+启动后**保持这个终端窗口开着**（Ctrl+C 退出），浏览器打开 **http://127.0.0.1:8787**：
+
+- 顶部按钮：**📊 日常盯盘**（自选股信号）/ **🔎 板块选股**（五板块挖新标的）/ **🚀 全部运行** / 勾 **离线验证**（合成数据跑顺、不联网不推送）/ 勾 **推送钉钉**（联网且配 .env 时推手机）
+- 下方实时刷新信号看板；扫描在后台线程跑（联网取数约 30–90 秒），页面每 2 秒自动轮询
+- 端口可改环境变量 `QT_WEB_PORT`（默认 8787）
+
+> 全空仓时正好用：日常盯盘等你的买点（钢研回 18.45 布林买点、元力回 25.5 建仓区间），板块选股找新标的建仓。工具只给信号不替你买，手动在券商 App 下单。
+>
+> 想后台常驻（关终端不退）：`pythonw a_share/webui.py` 或 Windows 任务计划程序。
 
 ## 关键约束
 
