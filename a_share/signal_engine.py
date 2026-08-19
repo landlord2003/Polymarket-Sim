@@ -14,6 +14,12 @@ try:
 except Exception:  # pragma: no cover
     ak = None
 
+# 多源直连数据层（绕过 akshare 的限流/兼容问题，见 datasource.py 顶部说明）
+try:
+    from . import datasource as ds  # type: ignore
+except ImportError:  # 直接以脚本方式运行时
+    import datasource as ds  # type: ignore
+
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
@@ -41,6 +47,9 @@ class StockResult:
     risk_pass: bool = True
     risk_reason: str = "ok"
     last_price: Optional[float] = None
+    source: str = ""            # 真实数据来源，如「腾讯财经(前复权)」/「合成随机游走」
+    data_date: str = ""         # 最新K线日期，用于判断数据是否新鲜
+    pct_change: Optional[float] = None   # 当日涨跌幅 %
 
 
 def _market_of(symbol: str) -> str:
@@ -57,20 +66,33 @@ def load_price(symbol: str, start: str = "20240101",
                end: Optional[str] = None,
                force_offline: bool = False) -> tuple[pd.DataFrame, bool]:
     """返回 (df, offline)。offline=True 表示使用合成数据，不应据此产生真实信号。
-    force_offline=True 时直接走合成兜底、不触网（用于沙箱 / 离线验证）。"""
-    end = end or datetime.today().strftime("%Y%m%d")
-    if ak is not None and not force_offline:
+
+    force_offline=True 时直接走合成兜底、不触网（用于「离线验证」跑通链路）。
+
+    取数链路（2026-08-19 重构）：datasource.fetch_kline 多源兜底
+    腾讯前复权 → 东财前复权 → 新浪不复权，各源带 3 次重试。
+    真实来源写入 df.attrs['source']；若全部失败，失败原因写入
+    df.attrs['fallback_reason'] 并回退合成，**绝不静默伪装成真实行情**。
+    """
+    if not force_offline:
         try:
-            df = ak.stock_zh_a_hist(symbol=symbol, period="daily",
-                                    start_date=start, end_date=end, adjust="qfq")
-            df = df.rename(columns={"日期": "date", "开盘": "open", "收盘": "close",
-                                    "最高": "high", "最低": "low", "成交量": "volume"})
-            df["date"] = pd.to_datetime(df["date"])
-            df = df[["date", "open", "high", "low", "close", "volume"]]
-            df.set_index("date", inplace=True)
+            df = ds.fetch_kline(symbol)
+            if start:
+                try:
+                    df = df[df.index >= pd.to_datetime(start)]
+                except Exception:  # noqa: BLE001
+                    pass
+            if end:
+                try:
+                    df = df[df.index <= pd.to_datetime(end)]
+                except Exception:  # noqa: BLE001
+                    pass
             return df, False
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001
+            fallback_reason = str(e)
+    else:
+        fallback_reason = "force_offline（离线验证模式，主动不联网）"
+
     # 离线兜底：随机游走（仅用于验证引擎接线，非真实行情）
     rng = np.random.default_rng(abs(hash(symbol)) % (2**32))
     n = 250
@@ -84,6 +106,9 @@ def load_price(symbol: str, start: str = "20240101",
         "close": close,
         "volume": rng.integers(1_000_000, 5_000_000, n),
     }, index=dates)
+    df.attrs["source"] = "合成随机游走"
+    df.attrs["synthetic"] = True
+    df.attrs["fallback_reason"] = fallback_reason
     return df, True
 
 
@@ -135,60 +160,116 @@ def live_boll_lower(df: pd.DataFrame, window: int = 20, k: float = 2.0) -> Optio
         return None
 
 
-def dim_money(symbol: str) -> tuple[float, list]:
-    if ak is None:
-        return 0.0, ["资金模块未加载(离线)"]
+def money_proxy(df: pd.DataFrame, window: int = 5) -> tuple[float, list]:
+    """资金强度代理指标（纯本地计算，无需联网，永不缺失）。
+
+    东财资金流接口对同一 IP 有间歇性限流，取不到时用量价关系代理：
+    近 window 日「上涨日成交额」与「下跌日成交额」的净差 / 总成交额，
+    直观表达「钱在往里进还是往外出」，再叠加 MFI(14) 超买超卖修正。
+    """
     try:
-        df = ak.stock_individual_fund_flow(stock=symbol, market=_market_of(symbol))
-        col = "主力净流入-净额"
-        if col not in df.columns:
-            return 0.0, ["资金字段缺失"]
-        recent = df[col].head(5)
-        net = float(recent.sum())
+        if len(df) < 20:
+            return 0.0, ["资金代理：数据不足"]
+        close, high, low, vol = df["close"], df["high"], df["low"], df["volume"]
+        amount = ((high + low + close) / 3) * vol       # 近似成交额
+        chg = close.diff()
+        recent_amt = amount.iloc[-window:]
+        recent_chg = chg.iloc[-window:]
+        up_amt = float(recent_amt[recent_chg > 0].sum())
+        dn_amt = float(recent_amt[recent_chg < 0].sum())
+        total = up_amt + dn_amt
+        net_ratio = (up_amt - dn_amt) / total if total > 0 else 0.0
+
+        # MFI(14)
+        tp = (high + low + close) / 3
+        mf = tp * vol
+        tp_diff = tp.diff()
+        pos_mf = mf.where(tp_diff > 0, 0.0).rolling(14).sum()
+        neg_mf = mf.where(tp_diff < 0, 0.0).rolling(14).sum()
+        mfi = float((100 - 100 / (1 + pos_mf / (neg_mf + 1e-9))).iloc[-1])
+
+        score = net_ratio * 0.8
+        notes = [f"资金代理：近{window}日量价净比 {net_ratio:+.0%}，MFI {mfi:.0f}"]
+        if mfi < 20:
+            score += 0.3; notes.append("MFI超卖(抛压衰竭)")
+        elif mfi > 80:
+            score -= 0.3; notes.append("MFI超买(追高风险)")
+        return max(-1.0, min(1.0, score)), notes
+    except Exception as e:  # noqa: BLE001
+        return 0.0, [f"资金代理计算失败:{type(e).__name__}"]
+
+
+def dim_money(symbol: str, df: Optional[pd.DataFrame] = None) -> tuple[float, list]:
+    """资金维度：优先东财真实主力净流入，失败降级为本地量价代理指标。
+
+    降级后仍给出有效评分，并在备注明确标注「代理」，避免出现
+    「资金数据缺失」这种既没分数也没解释的黑洞。
+    """
+    try:
+        flows = ds.fetch_money_flow(symbol, limit=10)
+        recent = list(reversed(flows[-5:]))          # 最新在前
+        net = sum(recent)
         consec = 0
-        for v in recent.tolist():
+        for v in recent:
             if v > 0:
                 consec += 1
             else:
                 break
+        wan = net / 1e4
         if net > 0 and consec >= 3:
-            return 0.6, [f"主力连续{consec}日净流入"]
+            return 0.6, [f"主力连续{consec}日净流入(近5日{wan:+.0f}万)"]
         if net > 0:
-            return 0.3, ["主力净流入"]
-        return -0.5, ["主力净流出"]
-    except Exception as e:
-        return 0.0, [f"资金数据缺失:{e}"]
+            return 0.3, [f"主力净流入(近5日{wan:+.0f}万)"]
+        return -0.5, [f"主力净流出(近5日{wan:+.0f}万)"]
+    except Exception:  # noqa: BLE001
+        if df is not None:
+            score, notes = money_proxy(df)
+            return score, notes + ["(东财资金接口限流，已用本地代理)"]
+        return 0.0, ["资金数据不可用(接口限流且无K线可代理)"]
 
 
-def dim_sector(stock_df: pd.DataFrame) -> tuple[float, list]:
-    if ak is None:
-        return 0.0, ["板块模块未加载(离线)"]
+def dim_sector(stock_df: pd.DataFrame, offline: bool = False) -> tuple[float, list]:
+    """板块/相对强弱维度：个股20日涨幅 vs 沪深300（腾讯指数源）。
+
+    离线模式下不联网，降级为「个股自身20日动量」，并明确标注。
+    """
     try:
         close = stock_df["close"]
+        if len(close) < 21:
+            return 0.0, ["板块：K线不足20日"]
         ret_stock = float(close.iloc[-1] / close.iloc[-20] - 1)
-        idx = ak.stock_zh_index_daily(symbol="sh000300")
+        if offline:
+            return max(-1.0, min(1.0, ret_stock * 3)), [
+                f"个股20日动量{ret_stock:+.1%}（离线，无大盘对比）"]
+        idx = ds.fetch_index_kline("sh000300", days=60)
         ret_mkt = float(idx["close"].iloc[-1] / idx["close"].iloc[-20] - 1)
         diff = ret_stock - ret_mkt
+        tag = "跑赢" if diff > 0 else "跑输"
         return max(-1.0, min(1.0, diff * 3)), [
-            f"个股20日{ret_stock:.1%} vs 沪深300 {ret_mkt:.1%}"
+            f"20日{ret_stock:+.1%} vs 沪深300 {ret_mkt:+.1%}（{tag}{abs(diff):.1%}）"
         ]
-    except Exception as e:
-        return 0.0, [f"板块数据缺失:{e}"]
+    except Exception as e:  # noqa: BLE001
+        try:
+            close = stock_df["close"]
+            ret_stock = float(close.iloc[-1] / close.iloc[-20] - 1)
+            return max(-1.0, min(1.0, ret_stock * 3)), [
+                f"个股20日动量{ret_stock:+.1%}（指数源失败:{type(e).__name__}）"]
+        except Exception:  # noqa: BLE001
+            return 0.0, [f"板块数据不可用:{type(e).__name__}"]
 
 
-def dim_news(symbol: str) -> tuple[float, list]:
-    if ak is None:
-        return 0.0, ["消息模块未加载(离线)"]
+def dim_news(symbol: str, offline: bool = False) -> tuple[float, list]:
+    """消息维度：东财新闻标题关键词情绪。离线或接口失败时置中性并说明原因。"""
+    if offline:
+        return 0.0, ["消息面：离线模式跳过（中性0分）"]
     try:
-        news = ak.stock_news_em(symbol=symbol)
-        col = "新闻标题" if "新闻标题" in news.columns else news.columns[0]
-        titles = news[col].head(10).tolist()
+        titles = ds.fetch_news_titles(symbol, limit=10)
         pos = sum(any(w in str(t) for w in POS_WORDS) for t in titles)
         neg = sum(any(w in str(t) for w in NEG_WORDS) for t in titles)
         score = max(-1.0, min(1.0, (pos - neg) / max(1, len(titles)) * 2))
         return score, [f"近{len(titles)}条新闻 利好{pos}/利空{neg}"]
-    except Exception as e:
-        return 0.0, [f"消息数据缺失:{e}"]
+    except Exception as e:  # noqa: BLE001
+        return 0.0, [f"消息面不可用({type(e).__name__})，按中性0分计"]
 
 
 def _map_signal(composite: float) -> tuple[str, str]:
@@ -307,13 +388,14 @@ def analyze_stock(symbol: str, name: str = "", df: Optional[pd.DataFrame] = None
         offline = False
 
     sm, n_m = dim_market(df)
-    ss, n_s = dim_sector(df)
+    ss, n_s = dim_sector(df, offline=offline)
     if offline:
-        # 资金/消息维度需要联网，离线一律跳过并置 0，避免卡在网络等待
-        sz, n_z = 0.0, ["资金维度离线跳过"]
-        sn, n_n = 0.0, ["消息维度离线跳过"]
+        # 离线不触网：资金维度改用本地量价代理（仍有分数），消息维度置中性
+        sz, n_z = money_proxy(df)
+        n_z = [n + "（离线代理）" for n in n_z]
+        sn, n_n = dim_news(symbol, offline=True)
     else:
-        sz, n_z = dim_money(symbol)
+        sz, n_z = dim_money(symbol, df=df)
         sn, n_n = dim_news(symbol)
 
     composite = (weights["market"] * sm + weights["money"] * sz +
@@ -335,8 +417,29 @@ def analyze_stock(symbol: str, name: str = "", df: Optional[pd.DataFrame] = None
     if risk_gate is not None:
         risk_pass, risk_reason = risk_gate(signal)
 
+    source = str(df.attrs.get("source", "未知来源"))
+    data_date = ""
+    try:
+        data_date = pd.Timestamp(df.index[-1]).strftime("%Y-%m-%d")
+    except Exception:  # noqa: BLE001
+        pass
+    pct_change = None
+    try:
+        if len(df) >= 2:
+            prev = float(df["close"].iloc[-2])
+            if prev > 0:
+                pct_change = (last_price / prev - 1) * 100
+    except Exception:  # noqa: BLE001
+        pass
+
     if offline:
-        pnotes = ["⚠️ 合成数据（未联网），价位与信号不可据此下单"] + pnotes
+        reason = df.attrs.get("fallback_reason", "")
+        head = "⚠️ 合成数据（未联网），价位与信号不可据此下单"
+        if reason and "force_offline" not in str(reason):
+            head += f"｜回退原因：{reason}"
+        pnotes = [head] + pnotes
+    else:
+        pnotes = [f"✅ 真实行情｜来源 {source}｜数据日 {data_date}"] + pnotes
 
     res = StockResult(
         symbol=symbol, name=name, offline=offline,
@@ -345,6 +448,7 @@ def analyze_stock(symbol: str, name: str = "", df: Optional[pd.DataFrame] = None
         notes=pnotes,
         risk_pass=risk_pass, risk_reason=risk_reason,
         last_price=last_price,
+        source=source, data_date=data_date, pct_change=pct_change,
     )
     if not risk_pass:
         res.signal = "暂停"; res.signal_emoji = "🔴"

@@ -25,8 +25,10 @@ except Exception:  # pragma: no cover
 HERE = os.path.dirname(os.path.abspath(__file__))
 SECTORS_PATH = os.path.join(HERE, "sectors.json")
 
-# 离线兜底用的各板块样本成分股（真实代码/名称，仅用于沙箱验证链路，分数合成）
-OFFLINE_SAMPLES = {
+# 各板块核心股池（全部为真实龙头股代码/名称）。
+# 用途：东财板块成分股接口不可用时作为扫描池 —— 注意这不代表「数据是假的」，
+# 价格依然走多源直连真实行情；只有 load_price 回退合成时才算非真实。
+CORE_POOL = {
     "新能源": [("300750", "宁德时代"), ("002594", "比亚迪"), ("601012", "隆基绿能"),
               ("300274", "阳光电源"), ("300014", "亿纬锂能"), ("600438", "通威股份"),
               ("002466", "天齐锂业"), ("002460", "赣锋锂业")],
@@ -53,7 +55,7 @@ def load_sectors(path: str = SECTORS_PATH) -> list:
 def get_constituents(label: str, candidates: list) -> tuple:
     """返回 (成分股列表[(code,name)...], offline:bool)。offline=True 表示用内置样本。"""
     if ak is None:
-        return OFFLINE_SAMPLES.get(label, [("000001", "样本A")]), True
+        return CORE_POOL.get(label, [("000001", "平安银行")]), True
 
     for btype in ("concept", "industry"):
         name_getter = ak.stock_board_concept_name_em if btype == "concept" else ak.stock_board_industry_name_em
@@ -92,7 +94,7 @@ def get_constituents(label: str, candidates: list) -> tuple:
         except Exception:
             continue
     # 都失败 → 离线样本兜底
-    return OFFLINE_SAMPLES.get(label, [("000001", "样本A")]), True
+    return CORE_POOL.get(label, [("000001", "平安银行")]), True
 
 
 def _volume_anomaly(df: pd.DataFrame) -> float:
@@ -127,18 +129,26 @@ def _market_score(df: pd.DataFrame) -> tuple:
 
 def screen_sector(label: str, candidates: list, top_n: int = 8,
                   offline: bool = False) -> tuple:
-    """扫描单板块，返回 (TopN 行列表, offline)。"""
+    """扫描单板块，返回 (TopN 行列表, price_synthetic)。
+
+    重要：区分两件此前被混为一谈的事——
+      · 股池来源：东财板块接口 / 本地核心池（CORE_POOL 里全是真实龙头股代码）
+      · 价格真伪：多源直连真实行情 / 合成随机游走
+    只有「价格是合成的」才该警告「非真实」。股池走本地核心池时价格依然是真的，
+    此前统一标成「离线样本·非真实」会让人误以为整块数据都不可信。
+    """
     if offline:
-        cons, off = OFFLINE_SAMPLES.get(label, [("000001", "样本A")]), True
+        cons, pool_local = CORE_POOL.get(label, [("000001", "平安银行")]), True
     else:
-        cons, off = get_constituents(label, candidates)
+        cons, pool_local = get_constituents(label, candidates)
 
     rows = []
+    price_synthetic = False
     for sym, nm in cons:
         from signal_engine import load_price
         df, doff = load_price(sym, force_offline=offline)
         if doff:
-            off = True
+            price_synthetic = True
         s_mkt, n_mkt = _market_score(df)
         s_vol = _volume_anomaly(df)
         score = max(-1.0, min(1.0, 0.6 * s_mkt + 0.4 * s_vol))
@@ -152,16 +162,22 @@ def screen_sector(label: str, candidates: list, top_n: int = 8,
             "note": "；".join(n_mkt),
         })
     rows.sort(key=lambda x: x["score"], reverse=True)
-    return rows[:top_n], off
+    return rows[:top_n], price_synthetic, pool_local
 
 
 def run_screener(top_n: int = 8, offline: bool = False) -> dict:
-    """跑全部板块，返回 {label: {"rows":[...], "offline":bool}}。"""
+    """跑全部板块。
+
+    返回 {label: {"rows":[...], "offline":价格是否合成, "pool_local":股池是否本地池}}。
+    `offline` 键名保留兼容旧调用（dashboard/webui），语义已收窄为「价格合成」。
+    """
     sectors = load_sectors()
     result = {}
     for s in sectors:
-        rows, off = screen_sector(s["label"], s["candidates"], top_n=top_n, offline=offline)
-        result[s["label"]] = {"rows": rows, "offline": off}
+        rows, price_synthetic, pool_local = screen_sector(
+            s["label"], s["candidates"], top_n=top_n, offline=offline)
+        result[s["label"]] = {"rows": rows, "offline": price_synthetic,
+                              "pool_local": pool_local}
     return result
 
 
@@ -169,7 +185,12 @@ def build_screener_report(result: dict) -> str:
     today = datetime.today().strftime("%Y-%m-%d")
     lines = [f"# 🔎 五板块自动选股初筛 {today}\n"]
     for label, blk in result.items():
-        off_tag = "（离线样本·非真实信号）" if blk["offline"] else ""
+        if blk.get("offline"):
+            off_tag = "（⚠️ 价格为合成数据·非真实信号）"
+        elif blk.get("pool_local"):
+            off_tag = "（股池：本地核心池；价格：真实行情）"
+        else:
+            off_tag = ""
         lines.append(f"## 🧩 {label} 板块 Top 推荐 {off_tag}\n")
         lines.append("| 排名 | 代码 | 名称 | 强度分 | 最新价 | 行情 | 量能 | 备注 |")
         lines.append("|---|---|---|---|---|---|---|---|")

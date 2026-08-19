@@ -75,13 +75,28 @@ def _watchlist_table(results) -> str:
         risk = "" if r.risk_pass else f'<div class="risk">⛔ 风控拦截：{escape(r.risk_reason)}</div>'
         # 离线行同样完整渲染（只加样式与标注），否则看板一片空白像"没有结果"
         tr_cls = ' class="offline"' if r.offline else ""
+        # 涨跌幅：A股惯例 涨红跌绿
+        pct = getattr(r, "pct_change", None)
+        if pct is None:
+            pct_html = '<span class="flat">-</span>'
+        elif pct > 0:
+            pct_html = f'<span class="up">+{pct:.2f}%</span>'
+        elif pct < 0:
+            pct_html = f'<span class="down">{pct:.2f}%</span>'
+        else:
+            pct_html = '<span class="flat">0.00%</span>'
+        src = getattr(r, "source", "") or "-"
+        ddate = getattr(r, "data_date", "") or ""
+        src_html = (f'<span class="src-syn">合成</span>' if r.offline
+                    else f'<span class="src-real">{escape(src.split("(")[0])}</span>')
         rows.append(
             f"<tr{tr_cls}>"
             f'<td class="code">{escape(r.symbol)}</td>'
             f"<td>{escape(r.name)}</td>"
             f'<td class="sig">{r.signal_emoji} {escape(r.signal)}</td>'
             f'<td class="score">{_bar(r.composite)}<small>{_fmt(r.composite)}</small></td>'
-            f"<td>{price}</td>"
+            f'<td class="px">{price}<br>{pct_html}</td>'
+            f'<td class="src">{src_html}<br><small>{escape(ddate)}</small></td>'
             f'<td class="dims">行情{_fmt(r.market_score)} 资金{_fmt(r.money_score)}<br>'
             f"板块{_fmt(r.sector_score)} 消息{_fmt(r.news_score)}</td>"
             f'<td class="notes">{escape(notes)}{risk}</td>'
@@ -96,7 +111,13 @@ def _screener_blocks(screener_result: dict) -> str:
     blocks = []
     for label, blk in screener_result.items():
         off = blk.get("offline")
-        tag = ' <span class="off">离线样本·非真实</span>' if off else ""
+        # 区分「价格合成」(真警告) 与「股池用本地核心池」(价格仍真实，不该报警)
+        if off:
+            tag = ' <span class="off">⚠️ 价格合成·非真实信号</span>'
+        elif blk.get("pool_local"):
+            tag = ' <span class="pool">股池：本地核心池 · 价格真实</span>'
+        else:
+            tag = ""
         rows = []
         for i, rr in enumerate(blk["rows"], 1):
             last = f"{rr['last']:.2f}" if rr.get("last") else "-"
@@ -146,6 +167,15 @@ th, td { text-align:left; padding:9px 12px; border-bottom:1px solid #232c38;
 th { background:#1c2530; color:#9fb0c0; font-weight:600; font-size:12px; }
 tr:last-child td { border-bottom:none; }
 tr.offline td { color:#9b8a6a; font-style:italic; }
+/* A股惯例：涨红跌绿 */
+.up   { color:#ff5b5b; font-weight:700; }
+.down { color:#2ecc71; font-weight:700; }
+.flat { color:#888; }
+td.px { white-space:nowrap; font-variant-numeric:tabular-nums; }
+td.src { white-space:nowrap; font-size:12px; }
+.src-real { color:#5ad19a; }
+.src-syn  { color:#e0a85a; }
+td.src small { color:#777; }
 .code { font-family:"SFMono-Regular",Consolas,monospace; color:#7fb4ff; white-space:nowrap; }
 .sig { white-space:nowrap; font-weight:600; }
 .score { min-width:130px; }
@@ -159,6 +189,7 @@ tr.offline td { color:#9b8a6a; font-style:italic; }
   padding:14px 16px; margin-bottom:14px; }
 .sector h3 { margin:0 0 10px; font-size:15px; }
 .off { color:#e0a85a; font-size:12px; }
+.pool { color:#7fb3d5; font-size:12px; }
 footer { color:#6b7888; font-size:12px; border-top:1px solid #2a3340;
   padding-top:14px; margin-top:30px; }
 """
@@ -179,7 +210,9 @@ def render_dashboard(results, screener_result: dict = None,
     wl_section = (
         "<section><h2>👁 自选股信号总览</h2>"
         "<table><thead><tr><th>代码</th><th>名称</th><th>信号</th>"
-        "<th>综合分</th><th>最新价</th><th>四维</th><th>明细/规则</th></tr></thead>"
+        "<th>综合分</th><th>最新价<br><small>涨跌</small></th>"
+        "<th>数据源<br><small>数据日</small></th>"
+        "<th>四维</th><th>明细/规则</th></tr></thead>"
         f"<tbody>{wl}</tbody></table></section>"
         if show_watchlist else ""
     )

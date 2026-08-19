@@ -35,6 +35,7 @@ from signal_engine import analyze_stock, StockResult
 from screener import run_screener
 from dashboard import render_dashboard
 from notify import send_markdown, send_wecom
+from datasource import fetch_realtime, market_phase
 
 PORT = int(os.getenv("QT_WEB_PORT", "8787"))
 
@@ -147,8 +148,23 @@ label { font-size:13px; color:#9fb0c0; display:flex; align-items:center; gap:4px
 .pill { padding:5px 12px; border-radius:16px; font-size:12px; font-weight:600; }
 .pill.idle { background:#16341f; color:#5fd98a; }
 .pill.run { background:#332c12; color:#e0c45a; }
+.pill.phase { background:#1a2430; color:#7fb3d5; }
+.pill.trading { background:#16341f; color:#5fd98a; }
 #status { font-size:12px; color:#8b98a5; margin-left:auto; }
-iframe { width:100%; height:calc(100vh - 58px); border:none; background:#0f1419; }
+.sep { width:1px; height:22px; background:#2a3340; margin:0 4px; }
+select { background:#1a2230; color:#cfe0f0; border:1px solid #2a3340;
+  border-radius:6px; padding:6px 8px; font-size:12px; }
+.ticker { display:flex; gap:18px; flex-wrap:wrap; align-items:center;
+  padding:8px 18px; background:#0e141c; border-bottom:1px solid #1c2530;
+  font-size:13px; font-variant-numeric:tabular-nums; color:#8b98a5; }
+.ticker .q { white-space:nowrap; }
+.ticker .nm { color:#cfe0f0; margin-right:6px; }
+/* A股惯例：涨红跌绿 */
+.ticker .up { color:#ff5b5b; font-weight:700; }
+.ticker .down { color:#2ecc71; font-weight:700; }
+.ticker .flat { color:#888; }
+.ticker .ts { margin-left:auto; font-size:11px; color:#5a6875; }
+iframe { width:100%; height:calc(100vh - 100px); border:none; background:#0f1419; }
 </style></head>
 <body>
 <div class="bar">
@@ -158,13 +174,30 @@ iframe { width:100%; height:calc(100vh - 58px); border:none; background:#0f1419;
   <button id="b3" onclick="scan('both')">🚀 全部运行</button>
   <label><input type="checkbox" id="offline"> 离线验证</label>
   <label><input type="checkbox" id="push"> 推送钉钉</label>
+  <span class="sep"></span>
+  <label><input type="checkbox" id="auto"> 🔄 自动刷新</label>
+  <select id="interval">
+    <option value="60">每 1 分钟</option>
+    <option value="180" selected>每 3 分钟</option>
+    <option value="300">每 5 分钟</option>
+    <option value="900">每 15 分钟</option>
+  </select>
+  <label><input type="checkbox" id="onlyTrading" checked> 仅盘中</label>
   <span id="pill" class="pill idle">🟢 空闲</span>
+  <span id="phase" class="pill phase">—</span>
   <span id="status"></span>
 </div>
+<div id="ticker" class="ticker">实时报价加载中…</div>
 <iframe id="board" src="/api/board"></iframe>
 <script>
 let lastFinished = null;
+let lastMode = 'daily';        // 自动刷新沿用最近一次手动选择的模式
+let nextAt = 0;                // 下次自动刷新的时间戳(ms)
+let isRunning = false;
+let isTrading = false;
+
 function scan(mode){
+  lastMode = mode;
   const offline = document.getElementById('offline').checked;
   const push = document.getElementById('push').checked;
   fetch('/api/scan',{method:'POST',
@@ -174,15 +207,66 @@ function scan(mode){
     .catch(e=>setStatus('🔴 启动失败，后台服务可能已退出：'+e));
 }
 function setStatus(t){ document.getElementById('status').textContent = t; }
+
+/* ---------- 自动刷新调度：仅在开关打开且(未勾仅盘中 或 当前盘中)时触发 ---------- */
+function autoTick(){
+  const on = document.getElementById('auto').checked;
+  const onlyTrading = document.getElementById('onlyTrading').checked;
+  if(!on){ nextAt = 0; return; }
+  if(onlyTrading && !isTrading){
+    setStatus('🔄 自动刷新已开启，但当前非交易时段（勾掉「仅盘中」可强制刷新）');
+    nextAt = 0; return;
+  }
+  const iv = parseInt(document.getElementById('interval').value,10)*1000;
+  const now = Date.now();
+  if(nextAt === 0){ nextAt = now + iv; return; }
+  if(now >= nextAt && !isRunning){
+    nextAt = now + iv;
+    scan(lastMode);
+  }
+}
+function countdownText(){
+  const on = document.getElementById('auto').checked;
+  if(!on || nextAt === 0) return '';
+  const left = Math.max(0, Math.round((nextAt - Date.now())/1000));
+  return ' ｜ 下次自动刷新 ' + left + 's';
+}
+
+/* ---------- 实时报价条：轻量接口，不跑引擎，盘中每 10s 刷新 ---------- */
+function loadQuotes(){
+  fetch('/api/quotes').then(r=>r.json()).then(j=>{
+    const el = document.getElementById('ticker');
+    if(!j.ok || !j.quotes || !j.quotes.length){
+      el.innerHTML = '<span class="flat">实时报价不可用（数据源限流或非交易日）</span>';
+      return;
+    }
+    el.innerHTML = j.quotes.map(q=>{
+      const cls = q.pct>0 ? 'up' : (q.pct<0 ? 'down' : 'flat');
+      const sign = q.pct>0 ? '+' : '';
+      return '<span class="q"><span class="nm">'+q.name+'</span>'+
+             q.price.toFixed(2)+' <span class="'+cls+'">'+sign+q.pct.toFixed(2)+'%</span></span>';
+    }).join('') + '<span class="ts">报价 '+j.ts+'</span>';
+  }).catch(()=>{
+    document.getElementById('ticker').innerHTML =
+      '<span class="flat">🔴 服务已断开，实时报价停止</span>';
+  });
+}
 function poll(){
   fetch('/api/status').then(r=>r.json()).then(s=>{
     const pill = document.getElementById('pill');
     const dis = s.running;
+    isRunning = !!s.running;
+    isTrading = !!s.is_trading;
     ['b1','b2','b3'].forEach(id=>document.getElementById(id).disabled=dis);
     if(s.running){ pill.textContent='⏳ 扫描中…'; pill.className='pill run'; }
     else { pill.textContent='🟢 空闲'; pill.className='pill idle'; }
+    const ph = document.getElementById('phase');
+    ph.textContent = (s.is_trading?'🔔 ':'🕘 ') + (s.phase||'—') +
+                     (s.server_time?(' '+s.server_time):'');
+    ph.className = 'pill ' + (s.is_trading ? 'trading' : 'phase');
     if(s.error){ setStatus('❌ '+s.error); }
-    else if(s.log && s.log.length){ setStatus(s.log[s.log.length-1]); }
+    else if(s.log && s.log.length){ setStatus(s.log[s.log.length-1] + countdownText()); }
+    autoTick();
     if(!s.running && s.finished_at && s.finished_at!==lastFinished){
       lastFinished = s.finished_at;
       document.getElementById('board').src = '/api/board?t='+Date.now();
@@ -195,7 +279,21 @@ function poll(){
   });
   setTimeout(poll, 2000);
 }
-window.onload = ()=>poll();
+window.onload = ()=>{
+  poll();
+  loadQuotes();
+  setInterval(loadQuotes, 10000);   // 实时报价条每 10 秒刷新
+  // 勾选自动刷新时立刻起算倒计时；取消则清零
+  document.getElementById('auto').addEventListener('change', function(){
+    nextAt = this.checked ? Date.now() +
+      parseInt(document.getElementById('interval').value,10)*1000 : 0;
+  });
+  document.getElementById('interval').addEventListener('change', function(){
+    if(document.getElementById('auto').checked){
+      nextAt = Date.now() + parseInt(this.value,10)*1000;
+    }
+  });
+};
 </script>
 </body></html>"""
 
@@ -224,8 +322,38 @@ class Handler(BaseHTTPRequestHandler):
                 d = {k: _state[k] for k in
                      ("running", "mode", "offline", "push",
                       "started_at", "finished_at", "error", "log")}
+            try:
+                phase, is_trading = market_phase()
+            except Exception:  # noqa: BLE001
+                phase, is_trading = "未知", False
+            d["phase"] = phase
+            d["is_trading"] = is_trading
+            d["server_time"] = datetime.now().strftime("%H:%M:%S")
             self._send(200, json.dumps(d, ensure_ascii=False),
                        "application/json; charset=utf-8")
+        elif p.path == "/api/quotes":
+            # 轻量实时报价：不跑引擎，仅拉一次批量快照，供面板秒级刷新价格
+            try:
+                watch = load_watchlist()
+                syms = [i["symbol"] for i in watch.get("watchlist", [])]
+                q = fetch_realtime(syms)
+                names = {i["symbol"]: i.get("name", "") for i in watch.get("watchlist", [])}
+                out = []
+                for s in syms:
+                    v = q.get(s)
+                    if not v:
+                        continue
+                    out.append({"symbol": s, "name": v.get("name") or names.get(s, ""),
+                                "price": round(v["price"], 2),
+                                "pct": round(v["pct"], 2)})
+                self._send(200, json.dumps({"ok": True, "quotes": out,
+                                            "ts": datetime.now().strftime("%H:%M:%S")},
+                                           ensure_ascii=False),
+                           "application/json; charset=utf-8")
+            except Exception as e:  # noqa: BLE001
+                self._send(200, json.dumps({"ok": False, "msg": str(e)},
+                                           ensure_ascii=False),
+                           "application/json; charset=utf-8")
         else:
             self._send(204, b"", "")
 
