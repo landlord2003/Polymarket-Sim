@@ -15,8 +15,20 @@
 | Git | 任意较新版本 | 用于 clone 仓库 |
 | 网络 | 能访问 AkShare 数据源（东方财富等） | **国内网络最佳**；海外/受限网络需代理，否则取数失败会自动降级为「离线」，不出真实信号 |
 | 钉钉/企微 | （可选）已建好的自定义机器人 Webhook + 加签密钥 | 用于接收信号推送；不配也能本地跑，只是不推送 |
+| 加密（可选） | Binance Testnet 密钥（dry-run 不需） | 仅跑 `crypto/bot_dryrun.py` 需要；默认 dry-run 零资金，无需密钥 |
 
 > ⚠️ A股**不自动下单**：本系统只产出「买/持/卖」信号推给你，**手动决策、手动下单**。这是合规 + 风控的硬约束。
+> ⚠️ 加密线默认 `dry_run=true`（永不真实下单）；`testnet=true` 走 Binance 测试网，**仅用于技术验证，勿接真实资金**。
+
+### 功能矩阵（部署后能直接做什么）
+
+| 功能 | 命令 | 说明 |
+|------|------|------|
+| A股四维度信号 | `python a_share/run_daily.py` | 自选股打分 + 钉钉推送 |
+| 个性化规则 | 编辑 `watchlist.json` 的 `rules` | 钢研布林下轨买点 / 元力建仓区间等已内置 |
+| 五板块自动选股 | `python a_share/run_daily.py --screener` | 新能源/新材料/AI/机器人/军工 扫描 TopN |
+| 加密模拟盘 | `python crypto/bot_dryrun.py --once` | CCXT 全自动闭环（dry-run 零资金） |
+| Freqtrade 框架 | 见 `crypto/freqtrade/README.md` | 需另装 freqtrade + testnet 密钥 |
 
 ---
 
@@ -60,14 +72,24 @@ cp .env.example .env
 ### 第 5 步：离线自检（不联网、不推送，验证代码接线）
 ```bash
 python a_share/run_daily.py --offline
+python a_share/run_daily.py --screener --offline   # 五板块选股离线自检
+python crypto/bot_dryrun.py --once                 # 加密模拟盘一轮（dry-run）
 ```
-应看到一份 Markdown 格式信号日报，每只标的标注「离线」，且**不推送**。
+应看到一份 Markdown 格式信号日报，每只标的标注「离线」，且**不推送**；选股与加密也应有正常输出。
 
 ### 第 6 步：联网实跑（出真实信号 + 推送）
 ```bash
-python a_share/run_daily.py
+python a_share/run_daily.py --screener
 ```
-联网正常时，会对 `a_share/watchlist.json` 里的每只股票跑四维度打分，汇总后推送钉钉（配了 `.env` 的话）。
+联网正常时，会对 `a_share/watchlist.json` 里的每只股票跑四维度打分、对五板块跑选股初筛，汇总后推送钉钉（配了 `.env` 的话）。
+
+### 第 7 步（可选）：加密模拟盘实跑
+```bash
+# 默认 dry_run=true 零资金，验证整条链路（用合成/实时数据）
+python crypto/bot_dryrun.py --once --live        # 连 Binance/Testnet 实跑一轮
+python crypto/bot_dryrun.py --loop --interval 60 # 每 60 秒一轮（Ctrl+C 退出）
+```
+若要接 testnet 真测试单：在 `.env` 填 `CRYPTO_API_KEY` / `CRYPTO_API_SECRET`，并把 `CRYPTO_DRYRUN` 改为 `false`（仍用测试资金，零真实风险）。
 
 ---
 
@@ -90,6 +112,8 @@ python a_share/run_daily.py
 | 推送提示「未配置 DINGTALK...」 | `.env` 没填或没激活环境 | 确认 `.env` 存在且值正确，`echo $DINGTALK_WEBHOOK` 能看到 |
 | `ModuleNotFoundError: akshare` | 依赖没装进当前环境 | 确认已 `activate` 且 `pip install -r requirements.txt` |
 | 信号全为「观望」 | 当前行情四维度综合分接近 0 | 正常；调高权重或等行情触发阈值 |
+| 加密提示 `api.binance.com` 超时 | 网络/代理问题 | 默认离线合成验证链路；`--live` 才连网，需可达 Binance |
+| `ccxt` 导入失败 | 依赖未装 | 确认已 `pip install -r requirements.txt` |
 
 ---
 
@@ -98,12 +122,17 @@ python a_share/run_daily.py
 ```
 quant-trading/
 ├── a_share/
-│   ├── watchlist.json     # 自选股 + 低空板块标的（改这里）
-│   ├── signal_engine.py   # 四维度打分 + 风控闸门
+│   ├── watchlist.json     # 自选股 + 个性化规则 rules（改这里）
+│   ├── sectors.json       # 五板块扫描配置
+│   ├── signal_engine.py   # 四维度打分 + 个性化规则叠加 + 风控
+│   ├── screener.py        # 五板块自动选股初筛
 │   ├── notify.py          # 钉钉/企微推送（读 .env）
-│   ├── run_daily.py       # 每日编排入口
+│   ├── run_daily.py       # 每日编排入口（--screener 跑选股）
 │   └── backtest_skeleton.py  # backtrader 回测骨架
-├── crypto/                # 加密线（P3，CCXT testnet）
+├── crypto/
+│   ├── bot_dryrun.py      # CCXT 全自动闭环（零资金 dry-run/testnet）
+│   ├── ccxt_demo.py       # CCXT 取数演示
+│   └── freqtrade/         # Freqtrade 完整框架脚手架
 ├── risk/                  # 双线共用风控模块
 ├── requirements.txt
 ├── .env.example

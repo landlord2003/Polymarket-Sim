@@ -1,33 +1,40 @@
 # 量化交易自研系统（股票 + 加密）
 
-> 状态：P1 骨架 ✅ ｜ P2 A股信号跟踪 ✅ ｜ 原则：**双线并行 · 全模拟起步 · 零资金 · A股暂不走自动下单**
+> 状态：P1 骨架 ✅ ｜ P2 A股信号跟踪 ✅ ｜ P2+ 个性化规则+五板块选股 ✅ ｜ P3 加密模拟盘 ✅
+> 原则：**双线并行 · 全模拟起步 · 零资金 · A股暂不走自动下单**
 > 主导：老吴（吴自强） ｜ 协办：Claw
 
 ## 它能做什么
 
 - ✅ **自动跟踪**你关注的股票（watchlist：元力/钢研/悦安 + 低空板块标的）
-- ✅ **自动选股**雏形：四维度打分过滤器，可在全市场/A股池扩展（见 `signal_engine.py`）
+- ✅ **个性化信号规则**：钢研"企稳布林下轨18.45买点"、元力"建仓区间25.5-26.5/止损24/阻力29.5"等阈值直接写进 `watchlist.json` → 引擎叠加到四维度信号
+- ✅ **五板块自动选股**：新能源 / 新材料 / AI / 机器人 / 军工，循环扫描成分股 → 行情+量能初筛 → TopN 推荐（`screener.py`，`run_daily.py --screener`）
 - ✅ **给出交易策略信号**：行情 / 资金 / 板块 / 消息 四维度综合 → 买 / 持 / 卖，经风控闸门后推送钉钉/微信
-- ❌ **不自动下单**：A股自动交易需 QMT/PTrade（50万+ 门槛），本阶段信号推给你**手动执行**
+- ✅ **加密模拟盘全自动链路**：CCXT 取数→RSI/EMA信号→风控→testnet/dry-run 下单（`crypto/bot_dryrun.py`），零资金验证
+- ❌ **A股不自动下单**：需 QMT/PTrade（50万+ 门槛），本阶段信号推给你**手动执行**
 
 ## 目录结构
 
 ```
 quant-trading/
 ├── a_share/                # A股线
-│   ├── watchlist.json      # 自选股 + 低空板块（改这里）
-│   ├── signal_engine.py    # 四维度打分 + 风控闸门
+│   ├── watchlist.json      # 自选股 + 个性化规则 rules（建仓区间/止损/布林买点）
+│   ├── sectors.json        # 五板块扫描配置（新能源/新材料/AI/机器人/军工）
+│   ├── signal_engine.py    # 四维度打分 + 个性化规则叠加 + 风控闸门
+│   ├── screener.py         # 五板块自动选股初筛
 │   ├── notify.py           # 钉钉/企微推送（读 .env）
-│   ├── run_daily.py        # 每日信号扫描入口
+│   ├── run_daily.py        # 每日信号扫描入口（--screener 跑选股）
 │   └── backtest_skeleton.py# backtrader 回测骨架
-├── crypto/                 # 加密线：CCXT + testnet（P3）
-│   └── ccxt_demo.py
+├── crypto/                 # 加密线：CCXT + Freqtrade testnet（P3）
+│   ├── bot_dryrun.py       # CCXT 全自动闭环（零资金 dry-run/testnet）
+│   ├── ccxt_demo.py        # CCXT 取数演示
+│   └── freqtrade/          # Freqtrade 完整框架脚手架（config + 策略）
 ├── risk/                   # 双线共用风控模块
 │   └── risk_control.py
 ├── data/                   # 本地数据缓存
 ├── output/                 # 回测报表 / 信号输出
 ├── requirements.txt
-├── .env.example            # 推送凭证模板（复制为 .env 填值）
+├── .env.example            # 推送凭证 + 加密变量模板（复制为 .env 填值）
 ├── .gitignore
 ├── DEPLOY.md               # 另一台电脑部署步骤
 ├── README.md
@@ -39,9 +46,11 @@ quant-trading/
 ```bash
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env        # 填入钉钉 Webhook + SECRET
-python a_share/run_daily.py --offline   # 离线自检
-python a_share/run_daily.py              # 联网实跑 + 推送
+cp .env.example .env        # 填入钉钉 Webhook + SECRET（加密变量可选）
+python a_share/run_daily.py --offline            # A股离线自检
+python a_share/run_daily.py --screener --offline # 五板块选股离线自检
+python a_share/run_daily.py --screener          # 联网实跑 + 选股 + 推送
+python crypto/bot_dryrun.py --once              # 加密模拟盘一轮（dry-run 零资金）
 ```
 
 另一台电脑完整部署见 **[DEPLOY.md](./DEPLOY.md)**。

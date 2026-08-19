@@ -183,8 +183,56 @@ def _map_signal(composite: float) -> tuple[str, str]:
     return "卖出", "🔴"
 
 
+def _apply_personal_rules(rules: dict, last_price: float, base_comp: float,
+                          base_signal: str, base_notes: list) -> tuple:
+    """把个股个性化阈值（建仓区间/止损/阻力/布林下轨买点/成本）叠加进信号。
+
+    钢研高纳 boll_lower_buy=18.45、元力 buy_range=[25.50,26.50] 等规则在此生效。
+    返回 (composite, signal, emoji, notes)。强制信号（止损/买点）优先级最高。
+    """
+    notes = list(base_notes)
+    comp = base_comp
+    forced = None  # (signal, emoji)
+
+    stop_loss = rules.get("stop_loss")
+    if stop_loss is not None and last_price <= stop_loss:
+        forced = ("卖出", "🔴")
+        notes.append(f"触发个性化止损线 {stop_loss}")
+
+    resistance = rules.get("resistance")
+    if resistance is not None and last_price >= resistance:
+        notes.append(f"触及阻力位 {resistance}，建议减仓/止盈")
+        comp = min(comp, -0.4)
+
+    buy_range = rules.get("buy_range")
+    if isinstance(buy_range, (list, tuple)) and len(buy_range) == 2:
+        lo, hi = buy_range
+        if lo <= last_price <= hi:
+            comp = max(comp, 0.7)
+            notes.append(f"进入建仓区间 [{lo}, {hi}]")
+            forced = forced or ("买入", "🟢")
+
+    boll_lower = rules.get("boll_lower_buy")
+    if boll_lower is not None and last_price <= boll_lower * 1.03:
+        comp = max(comp, 0.6)
+        notes.append(f"触及个性化布林下轨买点 {boll_lower}")
+        forced = forced or ("买入", "🟢")
+
+    cost_avg = rules.get("cost_avg")
+    if cost_avg is not None:
+        cmp = "低于" if last_price < cost_avg else "高于"
+        notes.append(f"现价 {cmp} 筹码均价 {cost_avg}")
+
+    comp = max(-1.0, min(1.0, comp))
+    if forced:
+        return comp, forced[0], forced[1], notes
+    sig, emo = _map_signal(comp)
+    return comp, sig, emo, notes
+
+
 def analyze_stock(symbol: str, name: str = "", df: Optional[pd.DataFrame] = None,
-                  weights: Optional[dict] = None, risk_gate=None) -> StockResult:
+                  weights: Optional[dict] = None, risk_gate=None,
+                  rules: Optional[dict] = None) -> StockResult:
     """对单只股票跑四维度评分。risk_gate 为可选函数 signal->(bool, reason)。"""
     weights = weights or DEFAULT_WEIGHTS
     if df is None:
@@ -206,6 +254,15 @@ def analyze_stock(symbol: str, name: str = "", df: Optional[pd.DataFrame] = None
     composite = max(-1.0, min(1.0, composite))
     signal, emoji = _map_signal(composite)
 
+    last_price = float(df["close"].iloc[-1])
+
+    # —— 个性化规则叠加（钢研布林下轨18.45、元力建仓区间等）——
+    if rules:
+        composite, signal, emoji, pnotes = _apply_personal_rules(
+            rules, last_price, composite, signal, n_m + n_z + n_s + n_n)
+    else:
+        pnotes = n_m + n_z + n_s + n_n
+
     risk_pass, risk_reason = True, "ok"
     if risk_gate is not None:
         risk_pass, risk_reason = risk_gate(signal)
@@ -214,9 +271,9 @@ def analyze_stock(symbol: str, name: str = "", df: Optional[pd.DataFrame] = None
         symbol=symbol, name=name, offline=False,
         market_score=sm, money_score=sz, sector_score=ss, news_score=sn,
         composite=composite, signal=signal, signal_emoji=emoji,
-        notes=n_m + n_z + n_s + n_n,
+        notes=pnotes,
         risk_pass=risk_pass, risk_reason=risk_reason,
-        last_price=float(df["close"].iloc[-1]),
+        last_price=last_price,
     )
     if not risk_pass:
         res.signal = "暂停"; res.signal_emoji = "🔴"

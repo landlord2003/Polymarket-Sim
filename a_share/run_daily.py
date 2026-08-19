@@ -1,10 +1,13 @@
 """A股每日信号扫描 + 钉钉/微信推送（手动执行）
 
 用法：
-  python a_share/run_daily.py            # 联网取数，真实信号
-  python a_share/run_daily.py --offline  # 合成数据，仅验证引擎与报告（不推送真实信号）
+  python a_share/run_daily.py                 # 联网取数，真实信号
+  python a_share/run_daily.py --offline       # 合成数据，仅验证引擎与报告（不推送真实信号）
+  python a_share/run_daily.py --screener      # 额外跑五板块自动选股初筛
+  python a_share/run_daily.py --screener --offline
 
-流程：watchlist → 四维度打分 → 风控闸门 → Markdown 日报 → 推送
+流程：watchlist(含个性化规则) → 四维度打分 → 风控闸门 → Markdown 日报 → 推送
+      [--screener] 五板块(新能源/新材料/AI/机器人/军工) 扫描 → TopN 推荐
 """
 
 import sys
@@ -17,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from signal_engine import analyze_stock, StockResult
 from notify import send_markdown, send_wecom
+from screener import run_screener, build_screener_report
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WATCHLIST = os.path.join(HERE, "watchlist.json")
@@ -62,6 +66,7 @@ def build_report(results: list) -> str:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--offline", action="store_true", help="合成数据验证，不推送真实信号")
+    ap.add_argument("--screener", action="store_true", help="额外跑五板块自动选股初筛")
     args = ap.parse_args()
 
     watch = load_watchlist()
@@ -70,18 +75,28 @@ def main():
     for item in watch:
         sym = item["symbol"]
         name = item.get("name", "")
+        rules = item.get("rules")
         if args.offline:
             results.append(StockResult(
                 symbol=sym, name=name, offline=True,
                 notes=["离线合成数据，仅验证引擎，未产生真实信号"]))
             continue
-        r = analyze_stock(sym, name)
+        r = analyze_stock(sym, name, rules=rules)
         if r.offline:
             offline_any = True
         results.append(r)
 
     report = build_report(results)
+
+    screener_report = ""
+    if args.screener:
+        scr = run_screener(offline=args.offline)
+        screener_report = build_screener_report(scr)
+        report += "\n\n" + screener_report
+
     print(report)
+    if screener_report:
+        print("\n===== 选股初筛已生成（见上）=====")
 
     if offline_any and not args.offline:
         print("\n[warn] 部分标的离线取数失败，报告含非真实信号，已跳过推送。")

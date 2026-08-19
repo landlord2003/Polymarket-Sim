@@ -1,0 +1,25 @@
+{
+    "max_open_trades": 2,
+    "stake_currency": "USDT",
+    "stake_amount": 100,
+    "tradable_balance_ratio": 0.99,
+    "dry_run": true,
+    "dry_run_wallet": 1000,
+    "exchange": {
+        "name": "binance",
+        "key": "${CRYPTO_API_KEY}",
+        "secret": "${CRYPTO_API_SECRET}",
+        "sandbox": true,
+        "pair_whitelist": ["BTC/USDT"],
+        "pair_blacklist": ["*BNB/*", "*BUSD/*"]
+    },
+    "pairlists": [
+        {"method": "StaticPairList"}
+    ],
+    "timeframe": "1m",
+    "strategy": "CcxtDryRunStrategy",
+    "db_url": "sqlite:///tradesv3.sqlite",
+    "telegram": {"enabled": false},
+    "api_server": {"enabled": false},
+    "internals": {"process_throttle_secs": 5}
+}
