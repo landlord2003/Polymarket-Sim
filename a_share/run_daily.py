@@ -26,9 +26,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 WATCHLIST = os.path.join(HERE, "watchlist.json")
 
 
-def load_watchlist(path: str = WATCHLIST) -> list:
+def load_watchlist(path: str = WATCHLIST) -> dict:
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)["watchlist"]
+        return json.load(f)
 
 
 def build_report(results: list) -> str:
@@ -70,9 +70,10 @@ def main():
     args = ap.parse_args()
 
     watch = load_watchlist()
+    weights = watch.get("weights")  # 顶层四维度权重，一处可调
     results = []
     offline_any = args.offline
-    for item in watch:
+    for item in watch["watchlist"]:
         sym = item["symbol"]
         name = item.get("name", "")
         rules = item.get("rules")
@@ -81,7 +82,7 @@ def main():
                 symbol=sym, name=name, offline=True,
                 notes=["离线合成数据，仅验证引擎，未产生真实信号"]))
             continue
-        r = analyze_stock(sym, name, rules=rules)
+        r = analyze_stock(sym, name, rules=rules, weights=weights)
         if r.offline:
             offline_any = True
         results.append(r)

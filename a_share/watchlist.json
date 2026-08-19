@@ -29,16 +29,26 @@
       "name": "悦安新材",
       "sector": "新材料",
       "tags": ["自选", "羰基铁粉"],
-      "note": "低空eVTOL软磁/合金粉体供应商",
-      "rules": {}
+      "note": "低空eVTOL软磁/合金粉体供应商；rules为技术参考值（2026-08-19 收盘27.75，近期高30.38/低23.81，布林下轨23.48），待你按真实成本确认",
+      "rules": {
+        "buy_range": [24.00, 27.00],
+        "boll_lower_buy": 23.48,
+        "stop_loss": 23.00,
+        "resistance": 30.50
+      }
     },
     {
       "symbol": "002085",
       "name": "万丰奥威",
       "sector": "低空",
       "tags": ["低空", "eVTOL"],
-      "note": "低空经济eVTOL整机代表",
-      "rules": {}
+      "note": "低空经济eVTOL整机代表；rules为技术参考值（2026-08-19 收盘10.22，近期高11.06/低9.70，布林下轨10.00，20日压力11.10），待你按真实成本确认",
+      "rules": {
+        "buy_range": [9.70, 10.20],
+        "boll_lower_buy": 10.00,
+        "stop_loss": 9.50,
+        "resistance": 11.20
+      }
     },
     {
       "symbol": "001696",
@@ -64,5 +74,6 @@
       "note": "碳纤维材料，eVTOL机体用",
       "rules": {}
     }
-  ]
+  ],
+  "weights": {"market": 0.35, "money": 0.30, "sector": 0.20, "news": 0.15}
 }
