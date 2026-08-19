@@ -37,11 +37,12 @@ def build_report(results: list) -> str:
     lines = [f"# 📊 A股四维度信号日报 {today}\n"]
     buy, hold, sell = [], [], []
     for r in results:
-        if r.offline:
-            lines.append(f"## ⚠️ {r.name or r.symbol}({r.symbol}) — 离线\n- {r.notes[0]}\n")
+        if not r.signal:
+            lines.append(f"## ⚠️ {r.name or r.symbol}({r.symbol}) — 无数据\n")
             continue
         lines.append(
-            f"## {r.signal_emoji} {r.name or r.symbol}({r.symbol}) — {r.signal}\n"
+            f"## {r.signal_emoji} {r.name or r.symbol}({r.symbol}) — {r.signal}"
+            f"{'（合成数据）' if r.offline else ''}\n"
             f"- 最新价：{r.last_price:.2f}\n"
             f"- 行情 {r.market_score:+.2f} ｜ 资金 {r.money_score:+.2f} ｜ "
             f"板块 {r.sector_score:+.2f} ｜ 消息 {r.news_score:+.2f}\n"

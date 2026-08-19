@@ -86,18 +86,12 @@ def _run_scan(mode: str, offline: bool, push: bool):
         any_offline = False
         if mode in ("daily", "both"):
             for item in watch["watchlist"]:
-                if offline:
-                    results.append(StockResult(
-                        symbol=item["symbol"], name=item.get("name", ""),
-                        offline=True,
-                        notes=["离线合成数据，仅验证引擎，未产生真实信号"]))
-                else:
-                    r = analyze_stock(item["symbol"], item.get("name", ""),
-                                      rules=item.get("rules"), weights=weights,
-                                      holding=holding)
-                    if r.offline:
-                        any_offline = True
-                    results.append(r)
+                r = analyze_stock(item["symbol"], item.get("name", ""),
+                                  rules=item.get("rules"), weights=weights,
+                                  holding=holding, force_offline=offline)
+                if r.offline:
+                    any_offline = True
+                results.append(r)
 
         scr = None
         show_wl = mode in ("daily", "both")
@@ -177,7 +171,7 @@ function scan(mode){
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({mode,offline,push})})
     .then(r=>r.json()).then(j=>setStatus(j.msg||'已启动'))
-    .catch(e=>setStatus('启动失败: '+e));
+    .catch(e=>setStatus('🔴 启动失败，后台服务可能已退出：'+e));
 }
 function setStatus(t){ document.getElementById('status').textContent = t; }
 function poll(){
@@ -193,7 +187,12 @@ function poll(){
       lastFinished = s.finished_at;
       document.getElementById('board').src = '/api/board?t='+Date.now();
     }
-  }).catch(()=>{});
+  }).catch(()=>{
+    // 服务已退出时必须明确告知，不能静默——否则用户点按钮完全不知道发生了什么
+    const pill = document.getElementById('pill');
+    pill.textContent='🔴 服务已断开'; pill.className='pill run';
+    setStatus('后台服务未运行，请双击项目根目录的「启动看板.bat」重启');
+  });
   setTimeout(poll, 2000);
 }
 window.onload = ()=>poll();

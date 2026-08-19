@@ -292,22 +292,29 @@ def _apply_personal_rules(rules: dict, last_price: float, base_comp: float,
 def analyze_stock(symbol: str, name: str = "", df: Optional[pd.DataFrame] = None,
                   weights: Optional[dict] = None, risk_gate=None,
                   rules: Optional[dict] = None,
-                  holding: bool = False) -> StockResult:
-    """对单只股票跑四维度评分。risk_gate 为可选函数 signal->(bool, reason)。"""
+                  holding: bool = False,
+                  force_offline: bool = False) -> StockResult:
+    """对单只股票跑四维度评分。risk_gate 为可选函数 signal->(bool, reason)。
+
+    force_offline=True 或联网取数失败时，用合成数据「完整跑通全流程」并返回
+    带分数/价位/信号的结果（offline=True 仅用于标注与抑制推送），
+    不再返回空壳结果——否则看板会一片空白，看着像"没有结果"。
+    """
     weights = weights or DEFAULT_WEIGHTS
     if df is None:
-        df, offline = load_price(symbol)
+        df, offline = load_price(symbol, force_offline=force_offline)
     else:
         offline = False
 
-    if offline:
-        return StockResult(symbol=symbol, name=name, offline=True,
-                           notes=["离线合成数据，仅验证引擎，未产生真实信号"])
-
     sm, n_m = dim_market(df)
-    sz, n_z = dim_money(symbol)
     ss, n_s = dim_sector(df)
-    sn, n_n = dim_news(symbol)
+    if offline:
+        # 资金/消息维度需要联网，离线一律跳过并置 0，避免卡在网络等待
+        sz, n_z = 0.0, ["资金维度离线跳过"]
+        sn, n_n = 0.0, ["消息维度离线跳过"]
+    else:
+        sz, n_z = dim_money(symbol)
+        sn, n_n = dim_news(symbol)
 
     composite = (weights["market"] * sm + weights["money"] * sz +
                  weights["sector"] * ss + weights["news"] * sn)
@@ -328,8 +335,11 @@ def analyze_stock(symbol: str, name: str = "", df: Optional[pd.DataFrame] = None
     if risk_gate is not None:
         risk_pass, risk_reason = risk_gate(signal)
 
+    if offline:
+        pnotes = ["⚠️ 合成数据（未联网），价位与信号不可据此下单"] + pnotes
+
     res = StockResult(
-        symbol=symbol, name=name, offline=False,
+        symbol=symbol, name=name, offline=offline,
         market_score=sm, money_score=sz, sector_score=ss, news_score=sn,
         composite=composite, signal=signal, signal_emoji=emoji,
         notes=pnotes,

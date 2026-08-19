@@ -50,7 +50,7 @@ def _fmt(x, nd=2):
 def _summary(results) -> str:
     buy = sell = hold = 0
     for r in results:
-        if r.offline:
+        if not r.signal:
             continue
         if r.signal in ("买入", "偏多"):
             buy += 1
@@ -70,18 +70,13 @@ def _summary(results) -> str:
 def _watchlist_table(results) -> str:
     rows = []
     for r in results:
-        if r.offline:
-            rows.append(
-                f'<tr class="offline"><td>{escape(r.symbol)}</td>'
-                f"<td>{escape(r.name)}</td><td>⚠️ 离线</td>"
-                f'<td colspan="4">合成数据，未产生真实信号</td></tr>'
-            )
-            continue
         notes = "；".join(r.notes) or "—"
         price = f"{r.last_price:.2f}" if r.last_price else "-"
         risk = "" if r.risk_pass else f'<div class="risk">⛔ 风控拦截：{escape(r.risk_reason)}</div>'
+        # 离线行同样完整渲染（只加样式与标注），否则看板一片空白像"没有结果"
+        tr_cls = ' class="offline"' if r.offline else ""
         rows.append(
-            f"<tr>"
+            f"<tr{tr_cls}>"
             f'<td class="code">{escape(r.symbol)}</td>'
             f"<td>{escape(r.name)}</td>"
             f'<td class="sig">{r.signal_emoji} {escape(r.signal)}</td>'
