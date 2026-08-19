@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from signal_engine import analyze_stock, StockResult
 from notify import send_markdown, send_wecom
 from screener import run_screener, build_screener_report
+from dashboard import write_dashboard
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WATCHLIST = os.path.join(HERE, "watchlist.json")
@@ -67,6 +68,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--offline", action="store_true", help="合成数据验证，不推送真实信号")
     ap.add_argument("--screener", action="store_true", help="额外跑五板块自动选股初筛")
+    ap.add_argument("--no-html", action="store_true", help="不生成 HTML 看板")
     args = ap.parse_args()
 
     watch = load_watchlist()
@@ -90,10 +92,17 @@ def main():
     report = build_report(results)
 
     screener_report = ""
+    scr_result = None
     if args.screener:
-        scr = run_screener(offline=args.offline)
-        screener_report = build_screener_report(scr)
+        scr_result = run_screener(offline=args.offline)
+        screener_report = build_screener_report(scr_result)
         report += "\n\n" + screener_report
+
+    # —— HTML 看板（默认生成，--no-html 关闭）——
+    if not args.no_html:
+        mode = "offline" if (offline_any or args.offline) else "online"
+        html_path = write_dashboard(results, scr_result, mode=mode)
+        print(f"\n[html] 看板已生成：{html_path}")
 
     print(report)
     if screener_report:

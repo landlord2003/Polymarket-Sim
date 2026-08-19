@@ -11,6 +11,7 @@
 - ✅ **五板块自动选股**：新能源 / 新材料 / AI / 机器人 / 军工，循环扫描成分股 → 行情+量能初筛 → TopN 推荐（`screener.py`，`run_daily.py --screener`）
 - ✅ **给出交易策略信号**：行情 / 资金 / 板块 / 消息 四维度综合 → 买 / 持 / 卖，经风控闸门后推送钉钉/微信
 - ✅ **加密模拟盘全自动链路**：CCXT 取数→RSI/EMA信号→风控→testnet/dry-run 下单（`crypto/bot_dryrun.py`），零资金验证
+- ✅ **本地 HTML 看板**：`run_daily.py` 自动生成 `output/dashboard.html`，浏览器双击即看（深色/自包含/零依赖），含自选股信号表 + 五板块推荐
 - ❌ **A股不自动下单**：需 QMT/PTrade（50万+ 门槛），本阶段信号推给你**手动执行**
 
 ## 目录结构
@@ -50,6 +51,8 @@ cp .env.example .env        # 填入钉钉 Webhook + SECRET（加密变量可选
 python a_share/run_daily.py --offline            # A股离线自检
 python a_share/run_daily.py --screener --offline # 五板块选股离线自检
 python a_share/run_daily.py --screener          # 联网实跑 + 选股 + 推送
+python a_share/run_daily.py --no-html            # 只推送、不生成看板
+# 看板生成于 output/dashboard.html，浏览器双击打开即可看（深色/自包含）
 python crypto/bot_dryrun.py --once              # 加密模拟盘一轮（dry-run 零资金）
 ```
 
