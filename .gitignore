@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# 密钥（切勿提交）
+.env
+
+# 日志与缓存
+*.log
+data/cache/
+pip_install*.log
+
+# 系统
+.DS_Store
+Thumbs.db

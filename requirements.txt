@@ -1,0 +1,10 @@
+# 量化交易自研系统 - 核心依赖
+# Python 3.11 / 3.12 推荐（3.13 已验证 akshare 可导入，但旧依赖可能缺 3.13 轮子，建议 3.12 最稳）
+pandas>=2.0
+numpy>=1.24
+akshare>=1.12
+backtrader>=1.9
+ccxt>=4.3
+
+# 通知用标准库 urllib 实现，无需 requests
+# 加密线进阶（P3 启用）：freqtrade
