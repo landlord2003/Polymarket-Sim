@@ -117,6 +117,24 @@ def dim_market(df: pd.DataFrame) -> tuple[float, list]:
         return 0.0, [f"行情数据缺失:{e}"]
 
 
+def live_boll_lower(df: pd.DataFrame, window: int = 20, k: float = 2.0) -> Optional[float]:
+    """实时布林下轨（与 dim_market 同口径：20日均值 - k*std）。
+
+    用于「动态布林下轨买点」：每次按最新数据计算，避免把历史快照（如钢研早前的18.45）
+    当静态阈值，导致价格跌穿时被误判为买点。
+    """
+    try:
+        close = df["close"]
+        if len(close) < window:
+            return None
+        mid = close.rolling(window).mean()
+        std = close.rolling(window).std()
+        lb = float(mid.iloc[-1] - k * std.iloc[-1])
+        return lb if np.isfinite(lb) else None
+    except Exception:
+        return None
+
+
 def dim_money(symbol: str) -> tuple[float, list]:
     if ak is None:
         return 0.0, ["资金模块未加载(离线)"]
@@ -186,26 +204,45 @@ def _map_signal(composite: float) -> tuple[str, str]:
 
 
 def _apply_personal_rules(rules: dict, last_price: float, base_comp: float,
-                          base_signal: str, base_notes: list) -> tuple:
-    """把个股个性化阈值（建仓区间/止损/阻力/布林下轨买点/成本）叠加进信号。
+                          base_signal: str, base_notes: list,
+                          holding: bool = False,
+                          df: Optional[pd.DataFrame] = None) -> tuple:
+    """把个股个性化阈值（建仓区间/止损/阻力/动态布林买点）叠加进信号。
 
-    钢研高纳 boll_lower_buy=18.45、元力 buy_range=[25.50,26.50] 等规则在此生效。
-    返回 (composite, signal, emoji, notes)。强制信号（止损/买点）优先级最高。
+    空仓语义（holding=False，当前老吴全空仓）：
+      - 止损线 = 趋势破位参考线：跌破则偏弱、不接飞刀、不报「卖出」（没有持仓可卖）。
+      - 建仓区间 / 布林下轨 = 回补参考：价格进入才亮「买入」。
+    持仓语义（holding=True）：止损线跌破报「卖出」，阻力位触及建议减仓。
+
+    动态布林下轨：use_dynamic_boll=true 时按实时 20日-2σ 计算，避免静态快照（如钢研18.45）
+    过时导致跌穿误判为买点。返回 (composite, signal, emoji, notes)。
     """
     notes = list(base_notes)
     comp = base_comp
     forced = None  # (signal, emoji)
+    block_buy = False
 
+    # —— 止损 / 趋势破位参考线 ——
     stop_loss = rules.get("stop_loss")
     if stop_loss is not None and last_price <= stop_loss:
-        forced = ("卖出", "🔴")
-        notes.append(f"触发个性化止损线 {stop_loss}")
+        if holding:
+            forced = ("卖出", "🔴")
+            notes.append(f"触发止损线 {stop_loss}")
+        else:
+            notes.append(f"跌破趋势参考线 {stop_loss}，暂不强（空仓）")
+            comp = min(comp, -0.2)
+            block_buy = True
+    elif stop_loss is not None:
+        notes.append(f"价格高于趋势参考线 {stop_loss}")
 
+    # —— 阻力位（减仓/止盈参考）——
     resistance = rules.get("resistance")
     if resistance is not None and last_price >= resistance:
         notes.append(f"触及阻力位 {resistance}，建议减仓/止盈")
-        comp = min(comp, -0.4)
+        if holding:
+            comp = min(comp, -0.4)
 
+    # —— 建仓区间（回补/建仓参考）——
     buy_range = rules.get("buy_range")
     if isinstance(buy_range, (list, tuple)) and len(buy_range) == 2:
         lo, hi = buy_range
@@ -214,16 +251,36 @@ def _apply_personal_rules(rules: dict, last_price: float, base_comp: float,
             notes.append(f"进入建仓区间 [{lo}, {hi}]")
             forced = forced or ("买入", "🟢")
 
-    boll_lower = rules.get("boll_lower_buy")
-    if boll_lower is not None and last_price <= boll_lower * 1.03:
-        comp = max(comp, 0.6)
-        notes.append(f"触及个性化布林下轨买点 {boll_lower}")
-        forced = forced or ("买入", "🟢")
+    # —— 布林下轨买点（动态优先，静态 boll_lower_buy 兼容兜底）——
+    use_dyn = rules.get("use_dynamic_boll", False)
+    boll_floor = rules.get("boll_lower_buy")
+    lb = live_boll_lower(df) if (use_dyn and df is not None) else None
+    if use_dyn and lb is not None:
+        tol = rules.get("boll_tol", 0.03)
+        near = (last_price >= lb * (1 - tol)) and (last_price <= lb * (1 + tol))
+        stable = last_price >= float(df["close"].iloc[-5:].min())
+        if near and stable:
+            if block_buy:
+                notes.append(f"贴近动态下轨 {lb:.2f} 但已跌破破位线，暂缓")
+            else:
+                comp = max(comp, 0.6)
+                notes.append(f"触及动态布林下轨 {lb:.2f} 且企稳")
+                forced = forced or ("买入", "🟢")
+        elif near and not stable:
+            notes.append(f"贴近下轨 {lb:.2f} 但仍在创新低，暂观望")
+    elif boll_floor is not None:
+        if last_price <= boll_floor * 1.03:
+            if block_buy:
+                notes.append(f"贴近下轨参考 {boll_floor} 但已跌破破位线，暂缓")
+            else:
+                comp = max(comp, 0.6)
+                notes.append(f"触及布林下轨参考 {boll_floor}")
+                forced = forced or ("买入", "🟢")
 
     cost_avg = rules.get("cost_avg")
     if cost_avg is not None:
         cmp = "低于" if last_price < cost_avg else "高于"
-        notes.append(f"现价 {cmp} 筹码均价 {cost_avg}")
+        notes.append(f"现价 {cmp} 参考成本 {cost_avg}")
 
     comp = max(-1.0, min(1.0, comp))
     if forced:
@@ -234,7 +291,8 @@ def _apply_personal_rules(rules: dict, last_price: float, base_comp: float,
 
 def analyze_stock(symbol: str, name: str = "", df: Optional[pd.DataFrame] = None,
                   weights: Optional[dict] = None, risk_gate=None,
-                  rules: Optional[dict] = None) -> StockResult:
+                  rules: Optional[dict] = None,
+                  holding: bool = False) -> StockResult:
     """对单只股票跑四维度评分。risk_gate 为可选函数 signal->(bool, reason)。"""
     weights = weights or DEFAULT_WEIGHTS
     if df is None:
@@ -258,10 +316,11 @@ def analyze_stock(symbol: str, name: str = "", df: Optional[pd.DataFrame] = None
 
     last_price = float(df["close"].iloc[-1])
 
-    # —— 个性化规则叠加（钢研布林下轨18.45、元力建仓区间等）——
+    # —— 个性化规则叠加（动态布林下轨、元力建仓区间等）——
     if rules:
         composite, signal, emoji, pnotes = _apply_personal_rules(
-            rules, last_price, composite, signal, n_m + n_z + n_s + n_n)
+            rules, last_price, composite, signal, n_m + n_z + n_s + n_n,
+            holding=holding, df=df)
     else:
         pnotes = n_m + n_z + n_s + n_n
 

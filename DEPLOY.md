@@ -25,10 +25,10 @@
 | 功能 | 命令 | 说明 |
 |------|------|------|
 | A股四维度信号 | `python a_share/run_daily.py` | 自选股打分 + 钉钉推送 |
-| 个性化规则 | 编辑 `watchlist.json` 的 `rules` | 钢研布林下轨买点 / 元力建仓区间等已内置 |
+| 个性化规则 | 编辑 `watchlist.json` 的 `rules` + 顶层 `holding` | 钢研动态布林下轨买点 / 元力建仓区间等已内置；`holding:false`=空仓语义 |
 | 五板块自动选股 | `python a_share/run_daily.py --screener` | 新能源/新材料/AI/机器人/军工 扫描 TopN |
 | 加密模拟盘 | `python crypto/bot_dryrun.py --once` | CCXT 全自动闭环（dry-run 零资金） |
-| 可视面板 | `python a_share/webui.py` | 浏览器开 http://127.0.0.1:8787，页面内按钮启动扫描 |
+| 可视面板 | **双击 `启动看板.bat`** | 浏览器自动开 http://127.0.0.1:8787，页面内按钮启动扫描，无需敲命令 |
 | Freqtrade 框架 | 见 `crypto/freqtrade/README.md` | 需另装 freqtrade + testnet 密钥 |
 
 ---
@@ -84,11 +84,11 @@ python a_share/run_daily.py --screener
 ```
 联网正常时，会对 `a_share/watchlist.json` 里的每只股票跑四维度打分、对五板块跑选股初筛，汇总后推送钉钉（配了 `.env` 的话）。
 
-### 第 6.5 步（推荐）：可视面板（webui，免敲命令行）
-```bash
-python a_share/webui.py
-```
-保持终端窗口开着（Ctrl+C 退出），浏览器打开 **http://127.0.0.1:8787**：点 **📊 日常盯盘** / **🔎 板块选股** / **🚀 全部运行**，勾 **离线验证** 先用合成数据跑顺、不联网不推送；勾 **推送钉钉** 且配好 `.env` 时推手机。扫描在后台线程跑（联网取数约 30–90 秒），页面每 2 秒自动轮询刷新。端口用 `QT_WEB_PORT` 环境变量改（默认 8787）。
+### 第 6.5 步（推荐）：可视面板（webui，无需敲命令行）
+
+**双击仓库里的 `启动看板.bat`**，浏览器自动打开 **http://127.0.0.1:8787**（保持运行它的窗口开着）。点 **📊 日常盯盘** / **🔎 板块选股** / **🚀 全部运行**，勾 **离线验证** 先用合成数据跑顺、不联网不推送；勾 **推送钉钉** 且配好 `.env` 时推手机。扫描在后台线程跑（联网取数约 30–90 秒），页面每 2 秒自动轮询刷新。端口用 `QT_WEB_PORT` 环境变量改（默认 8787）。
+
+> `.bat` 会自动选择 Python：优先项目 `.venv`，其次本机 WorkBuddy 托管环境（`%USERPROFILE%\.workbuddy\...`），最后系统 `python`。若在另一台机用 `.venv`，记得先 `python -m venv .venv && pip install -r requirements.txt`。
 
 ### 第 7 步（可选）：加密模拟盘实跑
 ```bash
@@ -103,7 +103,7 @@ python crypto/bot_dryrun.py --loop --interval 60 # 每 60 秒一轮（Ctrl+C 退
 ## 三、日常使用 & 定时
 
 ### 修改自选股
-编辑 `a_share/watchlist.json`（JSON 格式，加代码/名称/标签即可）。低空板块标的已预置，按需增删。
+编辑 `a_share/watchlist.json`（JSON 格式，加代码/名称/标签即可）。低空板块标的已预置，按需增删。文件顶层 `holding:false` 表示当前空仓（规则按"回补参考"解读）；若已建仓改为 `true`。
 
 ### 定时每天自动跑（可选）
 - **Windows**：任务计划程序 → 触发器「每日开盘后」→ 操作 `cmd /c ".venv\Scripts\python.exe a_share\run_daily.py"`

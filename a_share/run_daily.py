@@ -73,6 +73,7 @@ def main():
 
     watch = load_watchlist()
     weights = watch.get("weights")  # 顶层四维度权重，一处可调
+    holding = watch.get("holding", False)  # 顶层持仓状态：False=空仓，规则按回补参考解读
     results = []
     offline_any = args.offline
     for item in watch["watchlist"]:
@@ -84,7 +85,7 @@ def main():
                 symbol=sym, name=name, offline=True,
                 notes=["离线合成数据，仅验证引擎，未产生真实信号"]))
             continue
-        r = analyze_stock(sym, name, rules=rules, weights=weights)
+        r = analyze_stock(sym, name, rules=rules, weights=weights, holding=holding)
         if r.offline:
             offline_any = True
         results.append(r)

@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import sys
 import json
+import webbrowser
 import threading
 import time
 from datetime import datetime
@@ -80,6 +81,7 @@ def _run_scan(mode: str, offline: bool, push: bool):
 
         watch = load_watchlist()
         weights = watch.get("weights")
+        holding = watch.get("holding", False)  # 顶层持仓状态：False=空仓
         results = []
         any_offline = False
         if mode in ("daily", "both"):
@@ -91,7 +93,8 @@ def _run_scan(mode: str, offline: bool, push: bool):
                         notes=["离线合成数据，仅验证引擎，未产生真实信号"]))
                 else:
                     r = analyze_stock(item["symbol"], item.get("name", ""),
-                                      rules=item.get("rules"), weights=weights)
+                                      rules=item.get("rules"), weights=weights,
+                                      holding=holding)
                     if r.offline:
                         any_offline = True
                     results.append(r)
@@ -261,8 +264,10 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"🦀 量化信号面板已启动： http://127.0.0.1:{PORT}")
-    print("   在浏览器打开上面的地址，点按钮即可运行扫描（无需命令行）。Ctrl+C 退出。")
+    url = f"http://127.0.0.1:{PORT}"
+    print(f"🦀 量化信号面板已启动： {url}")
+    print("   浏览器将自动打开；若未打开请手动访问上面的地址。点按钮即可运行扫描（无需命令行）。Ctrl+C 退出。")
+    threading.Timer(1.2, lambda: webbrowser.open(url)).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
