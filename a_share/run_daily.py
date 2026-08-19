@@ -81,12 +81,8 @@ def main():
         sym = item["symbol"]
         name = item.get("name", "")
         rules = item.get("rules")
-        if args.offline:
-            results.append(StockResult(
-                symbol=sym, name=name, offline=True,
-                notes=["离线合成数据，仅验证引擎，未产生真实信号"]))
-            continue
-        r = analyze_stock(sym, name, rules=rules, weights=weights, holding=holding)
+        r = analyze_stock(sym, name, rules=rules, weights=weights,
+                          holding=holding, force_offline=args.offline)
         if r.offline:
             offline_any = True
         results.append(r)
