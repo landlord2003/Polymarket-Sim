@@ -13,6 +13,10 @@ env/
 data/cache/
 pip_install*.log
 
+# 生成的看板产物（每次运行重生成，不入库）
+output/dashboard.html
+output/*.html
+
 # 系统
 .DS_Store
 Thumbs.db
