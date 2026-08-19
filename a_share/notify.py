@@ -16,6 +16,44 @@ import time
 import urllib.parse
 import urllib.request
 
+
+def _load_dotenv():
+    """Minimal .env loader (stdlib only). Injects KEY=VALUE pairs from the
+    project-root .env into os.environ so callers can use os.getenv().
+    Walks up from this file's dir to find .env; does not override existing
+    process env vars. Comments (#) and blank lines are skipped."""
+    d = os.path.dirname(os.path.abspath(__file__))
+    env_path = None
+    cur = d
+    for _ in range(5):
+        cand = os.path.join(cur, ".env")
+        if os.path.isfile(cand):
+            env_path = cand
+            break
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    if not env_path:
+        return
+    with open(env_path, "r", encoding="utf-8") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):]
+            if "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            if k and k not in os.environ:
+                os.environ[k] = v
+
+
+_load_dotenv()
+
 WEBHOOK = os.getenv("DINGTALK_WEBHOOK")
 SECRET = os.getenv("DINGTALK_SECRET")
 WECOM_WEBHOOK = os.getenv("WECOM_WEBHOOK")
@@ -46,7 +84,9 @@ def send_markdown(title: str, text: str) -> dict | None:
         return None
     body = {"msgtype": "markdown", "markdown": {"title": title, "text": text}}
     try:
-        return _post_json(_dingtalk_signed_url(), body)
+        resp = _post_json(_dingtalk_signed_url(), body)
+        print(f"[notify] 钉钉推送成功：errcode={resp.get('errcode')} errmsg={resp.get('errmsg')}")
+        return resp
     except Exception as e:
         print(f"[notify] 钉钉推送失败: {e}")
         return None
