@@ -105,6 +105,7 @@ def _watchlist_table(results) -> str:
             f'<td class="acts">'
             f'<button class="dtl" onclick="showDetail(\'{sym}\',\'{nm}\')">详情</button>'
             f'<button class="buy" onclick="showTrade(\'{sym}\',\'{nm}\')">📝模拟买卖</button>'
+            f'<button class="del" onclick="removeFromWatchlist(\'{sym}\')">删除</button>'
             f"</td>"
             f"</tr>"
         )
@@ -135,13 +136,18 @@ def _screener_blocks(screener_result: dict) -> str:
                 f'<td class="score">{_bar(rr["score"])}<small>{_fmt(rr["score"])}</small></td>'
                 f"<td>{last}</td>"
                 f'<td class="notes">{escape(rr.get("note", ""))}</td>'
+                f'<td class="acts">'
+                f'<button class="dtl" onclick="showDetail(\'{escape(rr["symbol"])}\',\'{escape(rr["name"])}\')">详情</button>'
+                f'<button class="buy" onclick="showTrade(\'{escape(rr["symbol"])}\',\'{escape(rr["name"])}\')">📝模拟买卖</button>'
+                f'<button class="add" onclick="addToWatchlist(\'{escape(rr["symbol"])}\',\'{escape(rr["name"])}\')">＋自选</button>'
+                f"</td>"
                 f"</tr>"
             )
         blocks.append(
             f'<div class="sector">'
             f"<h3>🧩 {escape(label)} {tag}</h3>"
             f'<table><thead><tr><th>#</th><th>代码</th><th>名称</th>'
-            f"<th>强度</th><th>最新价</th><th>备注</th></tr></thead>"
+            f"<th>强度</th><th>最新价</th><th>备注</th><th>操作</th></tr></thead>"
             f'<tbody>{"".join(rows)}</tbody></table></div>'
         )
     return "\n".join(blocks)
@@ -205,6 +211,8 @@ footer { color:#6b7888; font-size:12px; border-top:1px solid #2a3340;
 .acts button:hover { background:#2f4660; }
 .acts .buy { color:#6ff0a0; border-color:#2c6e4a; }
 .acts .dtl { color:#7fb4ff; border-color:#2c4a6e; }
+.acts .add { color:#ffd479; border-color:#6e5a2c; }
+.acts .del { color:#ef9a9a; border-color:#6e2c2c; }
 /* 弹窗（看板内嵌） */
 .modal-mask { position:fixed; inset:0; background:rgba(0,0,0,.6);
   display:none; align-items:flex-start; justify-content:center; z-index:9999;
@@ -350,6 +358,7 @@ function showDetail(symbol, name){
       else { news += '<li class="tag-na">暂无新闻（需联网）</li>'; }
       news += '</ul>';
       const html = '<button class="close" onclick="closeModal()">关闭</button>'
+        + '<button class="add" onclick="addToWatchlist(\''+symbol+'\',\''+name.replace(/'/g,'')+'\')">＋加入自选股</button>'
         + '<h2>'+symbol+' '+name+'</h2>'
         + '<div class="sub">'+srcTag+' ｜ 数据日 '+(d.data_date||'—')+'</div>'
         + kpi
@@ -427,6 +436,27 @@ function refreshBook(){
     } else { h += '<div class="tag-na" style="margin-top:8px">当前无持仓</div>'; }
     const box = document.getElementById('tBook'); if(box) box.innerHTML = h;
   });
+}
+
+function addToWatchlist(symbol, name){
+  fetch('/api/watchlist',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'add',symbol:symbol,name:name})})
+    .then(r=>r.json()).then(j=>{
+      if(j.ok){ alert('已加入自选股：'+symbol+' '+name);
+        if(parent && parent.document && parent.document.getElementById('board'))
+          parent.document.getElementById('board').src='/api/board?t='+Date.now(); }
+      else { alert('加入失败：'+(j.msg||'未知错误')); }
+    }).catch(e=>alert('加入失败：'+e));
+}
+function removeFromWatchlist(symbol){
+  if(!confirm('确认从自选股删除 '+symbol+' ？')) return;
+  fetch('/api/watchlist',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'remove',symbol:symbol})})
+    .then(r=>r.json()).then(j=>{
+      if(j.ok){ if(parent && parent.document && parent.document.getElementById('board'))
+          parent.document.getElementById('board').src='/api/board?t='+Date.now(); }
+      else { alert('删除失败：'+(j.msg||'未知错误')); }
+    }).catch(e=>alert('删除失败：'+e));
 }
 </script>
 """

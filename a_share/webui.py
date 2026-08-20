@@ -30,7 +30,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import run_daily
-from run_daily import load_watchlist, build_report
+from run_daily import load_watchlist, build_report, WATCHLIST
 from signal_engine import analyze_stock, StockResult
 from screener import run_screener, load_sectors
 import re
@@ -94,6 +94,17 @@ def _resolve_symbol(text):
     except Exception:
         pass
     return text
+
+
+def _save_watchlist(wl: dict):
+    """把自选股写回 watchlist.json（新增/删除用）。"""
+    try:
+        with open(WATCHLIST, "w", encoding="utf-8") as _f:
+            json.dump(wl, _f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:  # noqa: BLE001
+        print("save watchlist failed:", e)
+        return False
 
 
 def _build_stock_detail(sym):
@@ -641,12 +652,16 @@ class Handler(BaseHTTPRequestHandler):
     def _send(self, code, body, ctype="text/plain; charset=utf-8"):
         if isinstance(body, str):
             body = body.encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+        except (ConnectionAbortedError, BrokenPipeError, OSError):
+            # 客户端（浏览器）中断连接属正常情况，忽略以免刷屏
+            pass
 
     def do_GET(self):
         p = urlparse(self.path)
@@ -782,6 +797,43 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps(
                 {"ok": res.get("ok"), "msg": res.get("msg"), "book": res.get("book")},
                 ensure_ascii=False, default=str), "application/json; charset=utf-8")
+        elif p.path == "/api/watchlist":
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                data = json.loads(raw.decode("utf-8") or "{}")
+            except Exception:
+                data = {}
+            action = data.get("action", "add")
+            symbol = str(data.get("symbol", "")).strip()
+            name = str(data.get("name", "")).strip()
+            if not symbol:
+                self._send(200, json.dumps({"ok": False, "msg": "缺少 symbol"},
+                                           ensure_ascii=False),
+                           "application/json; charset=utf-8"); return
+            wl = load_watchlist()
+            lst = wl.setdefault("watchlist", [])
+            if action == "remove":
+                newlst = [x for x in lst if x.get("symbol") != symbol]
+                removed = len(lst) != len(newlst)
+                wl["watchlist"] = newlst
+                _save_watchlist(wl)
+                self._send(200, json.dumps({"ok": removed,
+                                           "msg": ("已删除 " + symbol) if removed
+                                           else ("未找到 " + symbol)},
+                                           ensure_ascii=False),
+                           "application/json; charset=utf-8"); return
+            # add
+            if any(x.get("symbol") == symbol for x in lst):
+                self._send(200, json.dumps({"ok": True, "msg": "已在自选股中"},
+                                           ensure_ascii=False),
+                           "application/json; charset=utf-8"); return
+            lst.append({"symbol": symbol, "name": name})
+            wl["watchlist"] = lst
+            _save_watchlist(wl)
+            self._send(200, json.dumps({"ok": True, "msg": "已加入自选股 " + symbol},
+                                       ensure_ascii=False),
+                       "application/json; charset=utf-8")
         else:
             self._send(404, "not found", "text/plain")
 
