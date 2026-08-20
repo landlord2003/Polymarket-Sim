@@ -93,7 +93,7 @@ def _watchlist_table(results) -> str:
         nm = escape(r.name)
         sym = escape(r.symbol)
         rows.append(
-            f"<tr{tr_cls}>"
+            f"<tr{tr_cls} data-sym=\"{sym}\">"
             f'<td class="code">{sym}</td>'
             f"<td>{nm}</td>"
             f'<td class="sig">{r.signal_emoji} {escape(r.signal)}'
@@ -298,6 +298,7 @@ def render_dashboard(results, screener_result: dict = None,
         "</div>"
         + _modal_html()
         + _modal_js()
+        + _live_price_js()
         + "</body></html>"
     )
 
@@ -308,6 +309,33 @@ def _modal_html() -> str:
         'onclick="if(event.target===this)closeModal()">'
         '<div class="modal" id="modalBox"></div></div>'
     )
+
+
+def _live_price_js() -> str:
+    """看板内嵌：每 10 秒拉 /api/quotes，就地刷新自选股表格的「最新价/涨跌」列，
+    与顶部横栏报价条同频刷新，不重载整页、不重跑引擎。"""
+    return """
+<script>
+(function(){
+  function refreshPx(){
+    fetch('/api/quotes').then(function(r){return r.json();}).then(function(j){
+      if(!j.ok || !j.quotes) return;
+      var m = {}; j.quotes.forEach(function(q){ m[q.symbol] = q; });
+      document.querySelectorAll('tr[data-sym]').forEach(function(tr){
+        var q = m[tr.getAttribute('data-sym')]; if(!q) return;
+        var td = tr.querySelector('td.px'); if(!td) return;
+        var cls = q.pct>0 ? 'up' : (q.pct<0 ? 'down' : 'flat');
+        var sg = q.pct>0 ? '+' : '';
+        td.innerHTML = (q.price!=null ? q.price.toFixed(2) : '-') +
+          '<br><span class="'+cls+'">'+sg+(q.pct!=null?q.pct.toFixed(2):'0.00')+'%</span>';
+      });
+    }).catch(function(){});
+  }
+  refreshPx();
+  setInterval(refreshPx, 10000);
+})();
+</script>
+"""
 
 
 def _fmt_money(x, unit: float = 1.0, nd: int = 2, suffix: str = "") -> str:

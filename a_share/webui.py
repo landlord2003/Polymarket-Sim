@@ -109,6 +109,7 @@ def get_watchlist_signals(watch: dict, offline: bool = False,
 
     # 状态新鲜：用持久化信号重建，避免每条都重算导致秒翻
     results = []
+    forced = False
     for item in watch["watchlist"]:
         sym = item["symbol"]
         name = item.get("name", "")
@@ -118,6 +119,16 @@ def get_watchlist_signals(watch: dict, offline: bool = False,
                               holding=holding, force_offline=offline,
                               breadth=None)
             results.append(r)
+            forced = True
+            continue
+        # 自愈：缓存为离线合成、但本次联网 → 强制重算该标的，
+        # 使其摆脱「永久合成」状态（根治万丰奥威一直显示合成）。
+        if (not offline) and s.get("offline", False):
+            r = analyze_stock(sym, name, rules=item.get("rules"), weights=weights,
+                              holding=holding, force_offline=offline,
+                              breadth=None)
+            results.append(r)
+            forced = True
             continue
         r = StockResult(
             symbol=sym, name=s.get("name", name),
@@ -139,7 +150,8 @@ def get_watchlist_signals(watch: dict, offline: bool = False,
         else:
             r.intraday_alert = _intraday_alert(item, r.last_price)
         results.append(r)
-    return results, state_as_of
+    as_of = save_signal_state(results) if (forced and not offline) else state_as_of
+    return results, as_of
 import sim_engine
 from dashboard import (render_dashboard, render_stock_detail, render_portfolio)
 
@@ -543,7 +555,7 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
   <button class="ghost" onclick="toggleSectors()">板块</button>
   <div id="sectorPanel" class="panel">[[SECTORS]]</div>
   <span class="sep"></span>
-  <label><input type="checkbox" id="auto"> 自动刷新</label>
+  <label><input type="checkbox" id="auto" checked> 自动刷新</label>
   <select id="interval">
     <option value="60">每 1 分钟</option>
     <option value="180" selected>每 3 分钟</option>
