@@ -47,9 +47,13 @@ CORE_POOL = {
 }
 
 
-def load_sectors(path: str = SECTORS_PATH) -> list:
+def load_sectors(path: str = SECTORS_PATH, include_extra: bool = False) -> list:
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)["scan_sectors"]
+        data = json.load(f)
+    out = [dict(s, default=True) for s in data.get("scan_sectors", [])]
+    if include_extra and data.get("extra_sectors"):
+        out += [dict(s, default=False) for s in data["extra_sectors"]]
+    return out
 
 
 def get_constituents(label: str, candidates: list) -> tuple:
@@ -165,15 +169,23 @@ def screen_sector(label: str, candidates: list, top_n: int = 8,
     return rows[:top_n], price_synthetic, pool_local
 
 
-def run_screener(top_n: int = 8, offline: bool = False) -> dict:
-    """跑全部板块。
+def run_screener(top_n: int = 8, offline: bool = False,
+                 sectors: Optional[list] = None) -> dict:
+    """跑板块选股。
+
+    sectors: 指定板块标签列表（来自主页面板块下拉框勾选）。为 None 时跑默认
+    5 板块；为非空列表时只跑勾选的板块（含 extra_sectors 里的「其他板块」）。
 
     返回 {label: {"rows":[...], "offline":价格是否合成, "pool_local":股池是否本地池}}。
-    `offline` 键名保留兼容旧调用（dashboard/webui），语义已收窄为「价格合成」。
     """
-    sectors = load_sectors()
+    all_sec = load_sectors(include_extra=True)
+    if sectors:
+        labels = set(sectors)
+        chosen = [s for s in all_sec if s["label"] in labels]
+    else:
+        chosen = [s for s in all_sec if s.get("default")]
     result = {}
-    for s in sectors:
+    for s in chosen:
         rows, price_synthetic, pool_local = screen_sector(
             s["label"], s["candidates"], top_n=top_n, offline=offline)
         result[s["label"]] = {"rows": rows, "offline": price_synthetic,

@@ -20,3 +20,6 @@ output/*.html
 # 系统
 .DS_Store
 Thumbs.db
+
+# 模拟交易账本（运行时状态，含测试成交，不入库）
+a_share/sim_book.json

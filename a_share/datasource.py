@@ -264,6 +264,156 @@ def fetch_news_titles(symbol: str, limit: int = 10) -> list[str]:
     return titles
 
 
+# ------------------------------------------------------- 个股快照(估值/市值)
+
+# 东方财富 push2 qt/stock/get 字段码（按公开文档经验映射，取数失败即降级，绝不乱填）
+_FIELDS_SNAPSHOT = (
+    "f43,f44,f45,f46,f47,f48,f49,f50,f51,f52,f55,f57,f58,"
+    "f59,f116,f117,f162,f167,f168,f169"
+)
+
+
+def fetch_snapshot(symbol: str) -> dict:
+    """东财个股快照：现价/涨跌幅/最高/最低/今开/昨收/成交量/成交额/振幅/
+    量比/总市值/流通市值/市盈率(动)/市净率/换手率。
+
+    返回 dict（金额单位：元）。任一核心字段缺失置 None，由上层显示「—」。
+    失败抛 DataSourceError。
+    """
+    url = ("https://push2.eastmoney.com/api/qt/stock/get"
+           f"?secid={_secid(symbol)}&fields={_FIELDS_SNAPSHOT}&invt=2&fltt=2")
+    data = json.loads(_http_get(url))
+    d = (data.get("data") or {})
+    if not d or d.get("f57") is None:
+        raise DataSourceError(f"{symbol} 快照返回空")
+    g = lambda k, t=float: _safe(d.get(k), t)  # noqa: E731
+
+    def _safe(v, t):
+        if v in (None, "", "-"):
+            return None
+        try:
+            return t(v)
+        except Exception:
+            return None
+
+    snap = {
+        "symbol": symbol,
+        "name": d.get("f58"),
+        "price": _safe(d.get("f43")),
+        "pct": _safe(d.get("f44")),
+        "change": _safe(d.get("f45")),
+        "high": _safe(d.get("f46")),
+        "low": _safe(d.get("f47")),
+        "open": _safe(d.get("f48")),
+        "prev_close": _safe(d.get("f49")),
+        "volume": _safe(d.get("f50")),
+        "amount": _safe(d.get("f51")),
+        "amplitude": _safe(d.get("f52")),
+        "vol_ratio": _safe(d.get("f59")),
+        "mktcap": _safe(d.get("f116")),
+        "float_mktcap": _safe(d.get("f117")),
+        "pe": _safe(d.get("f167")),
+        "pb": _safe(d.get("f162")),
+        "turnover": _safe(d.get("f168")),
+    }
+    return snap
+
+
+# ----------------------------------------------------- 资金流向分项(主/大/中/小单)
+
+def fetch_fund_flow_breakdown(symbol: str) -> dict:
+    """东财个股资金流：返回最新一日的 主力/超大单/大单/中单/小单 净流入(元)。"""
+    url = ("https://push2.eastmoney.com/api/qt/stock/fflow/daykline/get"
+           f"?secid={_secid(symbol)}&fields1=f1,f2,f3,f7"
+           "&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65"
+           "&klt=101&lmt=1")
+    data = json.loads(_http_get(url))
+    rows = ((data.get("data") or {}).get("klines")) or []
+    if not rows:
+        raise DataSourceError(f"{symbol} 资金流分项返回空")
+    p = rows[0].split(",")
+    # 标准列序：日期,主力,小单,中单,大单,超大单,主占比,小占比,中占比,大占比,超大占比,收盘,涨跌幅
+    def _safe(v):
+        try:
+            return float(v)
+        except Exception:
+            return 0.0
+    return {
+        "main": _safe(p[1]), "retail": _safe(p[2]), "mid": _safe(p[3]),
+        "big": _safe(p[4]), "huge": _safe(p[5]),
+    }
+
+
+# ------------------------------------------------------------- F10 主营财务
+
+def fetch_financials(symbol: str) -> dict:
+    """东财 F10 主营财务（最新一期）：营收/归母净利润/ROE/毛利率/净利同比。"""
+    flt = urllib.parse.quote(f'(SECURITY_CODE="{symbol}")')
+    url = ("https://datacenter-web.eastmoney.com/api/data/v1/get"
+           "?reportName=RPT_F10_FINANCE_MAIN&columns=ALL"
+           f"&filter={flt}&pageSize=1&sortColumns=REPORT_DATE&sortTypes=-1"
+           "&source=WEB&client=WEB&v=0.1")
+    text = _http_get(url, encoding="utf-8")
+    data = json.loads(text)
+    arr = (((data.get("result") or {}).get("data")) or [])
+    if not arr:
+        raise DataSourceError(f"{symbol} 财务数据为空")
+    it = arr[0]
+
+    def _safe(k, t=float):
+        v = it.get(k)
+        if v in (None, "", "-"):
+            return None
+        try:
+            return t(v)
+        except Exception:
+            return None
+
+    return {
+        "report_date": str(it.get("REPORT_DATE") or "")[:10],
+        "revenue": _safe("TOTAL_OPERATE_INCOME"),
+        "net_profit": _safe("PARENT_NETPROFIT"),
+        "roe": _safe("WEIGHTAVG_ROE"),
+        "gross_margin": _safe("XSMLL"),
+        "profit_yoy": _safe("PARENT_NETPROFIT_YOY"),
+    }
+
+
+# ------------------------------------------------------- 加密货币公开行情(无需密钥)
+
+def fetch_crypto_quotes(symbols: Optional[list[str]] = None) -> dict:
+    """通过 ccxt 公共 ticker 拉取主流加密货币行情（无需 API 密钥）。
+
+    默认覆盖 BTC/ETH/BNB/SOL/XRP/DOGE/ADA/TON。失败返回 ok=False（不抛），
+    由上层显示「加密行情不可用」。
+    """
+    if symbols is None:
+        symbols = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT",
+                   "XRP/USDT", "DOGE/USDT", "ADA/USDT", "TON/USDT"]
+    try:
+        import ccxt
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "msg": f"ccxt 未安装: {e}", "quotes": []}
+    try:
+        ex = ccxt.binance()
+        ex.enableRateLimit = True
+        tickers = ex.fetch_tickers(symbols)
+        out = []
+        for s in symbols:
+            t = tickers.get(s)
+            if not t:
+                continue
+            out.append({
+                "symbol": s,
+                "price": t.get("last"),
+                "pct": t.get("percentage"),
+                "quote_volume": t.get("quoteVolume"),
+            })
+        return {"ok": True, "quotes": out}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "msg": str(e), "quotes": []}
+
+
 # ---------------------------------------------------------------- 交易时段
 
 def market_phase(now: Optional[datetime] = None) -> tuple[str, bool]:

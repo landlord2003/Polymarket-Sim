@@ -24,7 +24,7 @@ import threading
 import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -32,10 +32,15 @@ sys.path.insert(0, HERE)
 import run_daily
 from run_daily import load_watchlist, build_report
 from signal_engine import analyze_stock, StockResult
-from screener import run_screener
-from dashboard import render_dashboard
+from screener import run_screener, load_sectors
+import re
+from html import escape
 from notify import send_markdown, send_wecom
-from datasource import fetch_realtime, market_phase
+from datasource import (fetch_realtime, market_phase, fetch_snapshot,
+                       fetch_fund_flow_breakdown, fetch_financials,
+                       fetch_crypto_quotes, fetch_kline, DataSourceError)
+import sim_engine
+from dashboard import (render_dashboard, render_stock_detail, render_portfolio)
 
 PORT = int(os.getenv("QT_WEB_PORT", "8787"))
 
@@ -68,7 +73,339 @@ def _placeholder_html() -> str:
     )
 
 
-def _run_scan(mode: str, offline: bool, push: bool):
+
+
+# -------------------------------------------------- 股票详情聚合 + 30s 内存缓存
+_DETAIL_CACHE = {}
+_DETAIL_CACHE_T = {}
+
+
+def _resolve_symbol(text):
+    """6位代码直接用；否则按持仓名称反查代码；都失败则原样返回。"""
+    text = (text or "").strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d{6}", text):
+        return text
+    try:
+        for it in load_watchlist().get("watchlist", []):
+            if it.get("name") == text:
+                return it["symbol"]
+    except Exception:
+        pass
+    return text
+
+
+def _build_stock_detail(sym):
+    snap = {}; ff = {}; fin = {}; kline = []; news = []
+    synthetic = False; source = ""; data_date = ""; error = None
+    try:
+        snap = fetch_snapshot(sym)
+        if isinstance(snap, dict) and snap.get("error"):
+            error = snap["error"]; snap = {}
+    except Exception as e:  # noqa: BLE001
+        error = str(e)
+    try:
+        ff = fetch_fund_flow_breakdown(sym)
+    except Exception:  # noqa: BLE001
+        ff = {}
+    try:
+        fin = fetch_financials(sym)
+    except Exception:  # noqa: BLE001
+        fin = {}
+    try:
+        df = fetch_kline(sym, days=60)
+        kline = [{"date": str(idx.date()), "open": float(r.open),
+                  "close": float(r.close), "low": float(r.low), "high": float(r.high)}
+                 for idx, r in df.iterrows()]
+        source = df.attrs.get("source", "") or ""
+        data_date = str(df.index[-1].date()) if len(df) else ""
+    except Exception:  # noqa: BLE001
+        kline = []
+    try:
+        news = fetch_news_titles(sym, limit=8)
+    except Exception:  # noqa: BLE001
+        news = []
+    if isinstance(snap, dict):
+        source = source or snap.get("source", "")
+        data_date = data_date or snap.get("data_date", "")
+    # 降级：东财快照被限流(snap 为空)时，用腾讯K线最后一根回填现价/开高低/昨收，
+    # 保证详情页永远有真实价（K线源最稳）。
+    if (not isinstance(snap, dict) or not snap.get("price")) and len(kline) >= 1:
+        last = kline[-1]
+        prev = kline[-2]["close"] if len(kline) >= 2 else last["open"]
+        snap = snap if isinstance(snap, dict) else {}
+        snap["price"] = last["close"]
+        snap["open"] = last["open"]
+        snap["high"] = last["high"]
+        snap["low"] = last["low"]
+        snap["prev_close"] = prev
+        snap["pct"] = round((last["close"] / prev - 1) * 100, 2) if prev else 0.0
+        if not source:
+            source = "腾讯财经(前复权K线回填)"
+    return {"snapshot": snap if isinstance(snap, dict) else {},
+            "fund_flow": ff, "financials": fin, "kline": kline, "news": news,
+            "synthetic": synthetic, "source": source, "data_date": data_date,
+            "error": error}
+
+
+def _detail_cache_get(sym):
+    now = time.time()
+    if sym in _DETAIL_CACHE and now - _DETAIL_CACHE_T.get(sym, 0) < 30:
+        return _DETAIL_CACHE[sym]
+    d = _build_stock_detail(sym)
+    _DETAIL_CACHE[sym] = d
+    _DETAIL_CACHE_T[sym] = now
+    return d
+
+
+def control_html() -> str:
+    """顶部控制条 SPA：日常盯盘/板块选股/全部运行/查任意股票/模拟仓/
+    板块下拉勾选/自动刷新/实时报价条/加密行情区。"""
+    try:
+        _all_sec = load_sectors(include_extra=True)
+    except Exception:  # noqa: BLE001
+        _all_sec = []
+    _sec_boxes = "".join(
+        '<label class="sec"><input type="checkbox" class="secChk" value="{0}"{1}>{2}</label>'.format(
+            s["label"], ' checked' if s.get("default") else "", s["label"])
+        for s in _all_sec
+    )
+    _html = r"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>量化信号面板</title>
+<script src="/static/echarts.min.js"></script>
+<style>
+* { box-sizing:border-box; }
+body { margin:0; background:#0b0f14; color:#e6e6e6;
+  font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif; }
+.bar { position:sticky; top:0; z-index:20; display:flex; align-items:center;
+  gap:8px; flex-wrap:wrap; padding:10px 16px; background:#121821;
+  border-bottom:1px solid #232c38; }
+.bar h1 { font-size:15px; margin:0 10px 0 0; white-space:nowrap; }
+button { background:#1f6feb; color:#fff; border:none; border-radius:8px;
+  padding:7px 13px; font-size:13px; cursor:pointer; font-weight:600; }
+button:hover { background:#2a7dff; }
+button:disabled { background:#2a3340; color:#6b7888; cursor:not-allowed; }
+button.ghost { background:#1a2230; color:#9fb0c0; border:1px solid #2a3340; }
+button.back { background:#1a2230; color:#cfe0f0; border:1px solid #2a3340;
+  margin-left:10px; border-radius:8px; padding:5px 12px; font-size:13px; cursor:pointer; }
+button.back:hover { background:#243044; }
+label { font-size:13px; color:#9fb0c0; display:flex; align-items:center; gap:4px;
+  cursor:pointer; user-select:none; }
+.pill { padding:5px 12px; border-radius:16px; font-size:12px; font-weight:600; }
+.pill.idle { background:#16341f; color:#5fd98a; }
+.pill.run { background:#332c12; color:#e0c45a; }
+.pill.phase { background:#1a2430; color:#7fb3d5; }
+.pill.trading { background:#16341f; color:#5fd98a; }
+#status { font-size:12px; color:#8b98a5; margin-left:auto; }
+.sep { width:1px; height:22px; background:#2a3340; margin:0 2px; }
+select { background:#1a2230; color:#cfe0f0; border:1px solid #2a3340;
+  border-radius:6px; padding:6px 8px; font-size:12px; }
+input#qSearch { background:#0f1620; color:#e6e6e6; border:1px solid #2a3340;
+  border-radius:6px; padding:6px 9px; font-size:13px; width:190px; }
+.ticker { display:flex; gap:18px; flex-wrap:wrap; align-items:center;
+  padding:7px 18px; background:#0e141c; border-bottom:1px solid #1c2530;
+  font-size:13px; font-variant-numeric:tabular-nums; color:#8b98a5; }
+.ticker.crypto { background:#0c1118; }
+.ticker .q { white-space:nowrap; }
+.ticker .nm { color:#cfe0f0; margin-right:6px; }
+.ticker .up { color:#ff5b5b; font-weight:700; }
+.ticker .down { color:#2ecc71; font-weight:700; }
+.ticker .flat { color:#888; }
+.ticker .ts { margin-left:auto; font-size:11px; color:#5a6875; }
+iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419; }
+.panel { display:none; position:absolute; top:54px; left:16px; z-index:30;
+  background:#121821; border:1px solid #2a3340; border-radius:10px; padding:10px 12px;
+  max-width:520px; box-shadow:0 8px 30px rgba(0,0,0,.5); }
+.panel .sec { display:inline-flex; margin:3px 8px 3px 0; padding:3px 8px;
+  background:#0f1620; border:1px solid #232c38; border-radius:14px; font-size:12px; }
+.mask { display:none; position:fixed; inset:0; z-index:50;
+  background:rgba(0,0,0,.6); align-items:flex-start; justify-content:center; }
+.mask.show { display:flex; }
+.mbox { background:#0f1419; color:#e6e6e6; margin-top:60px; max-width:760px; width:92%;
+  max-height:82vh; overflow:auto; border:1px solid #2a3340; border-radius:12px;
+  padding:18px 20px; box-shadow:0 12px 40px rgba(0,0,0,.6); }
+.mbox h2 { margin:0 0 6px; font-size:18px; }
+.mbox .sub { color:#9fb0c0; font-size:13px; margin-bottom:10px; }
+.mbox .close { float:right; background:#2a3340; color:#cfe0f0; border:none;
+  border-radius:6px; padding:4px 10px; cursor:pointer; font-size:12px; }
+.chart { width:100%; height:300px; margin:8px 0 4px; }
+.kpi { display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:8px; margin:10px 0; }
+.kpi .cell { background:#141b24; border:1px solid #1f2937; border-radius:8px; padding:8px 10px; }
+.kpi .k { color:#7f8ea0; font-size:11px; }
+.kpi .v { font-size:16px; font-weight:700; margin-top:2px; }
+.kpi .v.up { color:#ff5b5b; } .kpi .v.down { color:#2ecc71; } .kpi .v.flat { color:#888; }
+.tag-real { color:#5fd98a; background:#15301f; padding:2px 8px; border-radius:10px; font-size:12px; }
+.tag-syn { color:#e0a45a; background:#332712; padding:2px 8px; border-radius:10px; font-size:12px; }
+</style></head>
+<body>
+<div class="bar">
+  <h1>量化信号面板</h1>
+  <input id="qSearch" placeholder="查任意股票(代码/名称)">
+  <button onclick="searchStock()">查</button>
+  <span class="sep"></span>
+  <button id="b1" onclick="scan('daily')">日常盯盘</button>
+  <button id="b2" onclick="scan('screener')">板块选股</button>
+  <button id="b3" onclick="scan('both')">全部运行</button>
+  <button id="bP" onclick="openPortfolio()">模拟仓</button>
+  <label><input type="checkbox" id="offline"> 离线验证</label>
+  <label><input type="checkbox" id="push"> 推送钉钉</label>
+  <span class="sep"></span>
+  <button class="ghost" onclick="toggleSectors()">板块</button>
+  <div id="sectorPanel" class="panel">[[SECTORS]]</div>
+  <span class="sep"></span>
+  <label><input type="checkbox" id="auto"> 自动刷新</label>
+  <select id="interval">
+    <option value="60">每 1 分钟</option>
+    <option value="180" selected>每 3 分钟</option>
+    <option value="300">每 5 分钟</option>
+    <option value="900">每 15 分钟</option>
+  </select>
+  <label><input type="checkbox" id="onlyTrading" checked> 仅盘中</label>
+  <span id="pill" class="pill idle">空闲</span>
+  <span id="phase" class="pill phase"></span>
+  <span id="status"></span>
+</div>
+<div id="cryptoTicker" class="ticker crypto">加密行情加载中…</div>
+<div id="ticker" class="ticker">实时报价加载中…</div>
+<iframe id="board" src="/api/board"></iframe>
+<div id="mainModalMask" class="mask" onclick="if(event.target===this)closeMain()">
+  <div id="mainModalBox" class="mbox"></div>
+</div>
+<script>
+let lastFinished=null, lastMode='daily', nextAt=0, isRunning=false, isTrading=false;
+function scan(mode){
+  lastMode=mode;
+  const offline=document.getElementById('offline').checked;
+  const push=document.getElementById('push').checked;
+  let sectors=null;
+  if(mode!=='daily'){
+    const chks=document.querySelectorAll('.secChk:checked');
+    sectors=[].slice.call(chks).map(c=>c.value);
+  }
+  fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({mode,offline,push,sectors})})
+    .then(r=>r.json()).then(j=>setStatus(j.msg||'已启动'))
+    .catch(e=>setStatus('启动失败：'+e));
+}
+function setStatus(t){document.getElementById('status').textContent=t;}
+function autoTick(){
+  const on=document.getElementById('auto').checked;
+  const onlyTrading=document.getElementById('onlyTrading').checked;
+  if(!on){nextAt=0;return;}
+  if(onlyTrading && !isTrading){setStatus('自动刷新已开，但当前非交易时段（取消「仅盘中」可强制）');nextAt=0;return;}
+  const iv=parseInt(document.getElementById('interval').value,10)*1000;
+  const now=Date.now();
+  if(nextAt===0){nextAt=now+iv;return;}
+  if(now>=nextAt && !isRunning){nextAt=now+iv;scan(lastMode);}
+}
+function countdownText(){
+  const on=document.getElementById('auto').checked;
+  if(!on||nextAt===0)return '';
+  return ' ｜ 下次刷新 '+Math.max(0,Math.round((nextAt-Date.now())/1000))+'s';
+}
+function loadQuotes(){
+  fetch('/api/quotes').then(r=>r.json()).then(j=>{
+    const el=document.getElementById('ticker');
+    if(!j.ok||!j.quotes||!j.quotes.length){el.innerHTML='<span class="flat">实时报价不可用（限流/休市）</span>';return;}
+    el.innerHTML=j.quotes.map(q=>{
+      const cls=q.pct>0?'up':(q.pct<0?'down':'flat');const sg=q.pct>0?'+':'';
+      return '<span class="q"><span class="nm">'+q.name+'</span>'+q.price.toFixed(2)+' <span class="'+cls+'">'+sg+q.pct.toFixed(2)+'%</span></span>';
+    }).join('')+'<span class="ts">报价 '+j.ts+'</span>';
+  }).catch(()=>{document.getElementById('ticker').innerHTML='<span class="flat">服务已断开</span>';});
+}
+function loadCrypto(){
+  fetch('/api/crypto_quotes').then(r=>r.json()).then(j=>{
+    const el=document.getElementById('cryptoTicker');
+    if(!j.ok||!j.quotes||!j.quotes.length){el.innerHTML='<span class="flat">加密行情不可用（需联网/限流）</span>';return;}
+    el.innerHTML=j.quotes.map(q=>{
+      const cls=q.pct>0?'up':(q.pct<0?'down':'flat');const sg=q.pct>0?'+':'';
+      const px=q.price!=null?q.price.toFixed(2):'-';
+      const pc=q.pct!=null?q.pct.toFixed(2):'0.00';
+      return '<span class="q"><span class="nm">'+q.symbol+'</span>'+px+' <span class="'+cls+'">'+sg+pc+'%</span></span>';
+    }).join('')+'<span class="ts">'+(j.ts||'')+'</span>';
+  }).catch(()=>{document.getElementById('cryptoTicker').innerHTML='<span class="flat">加密行情断开</span>';});
+}
+function poll(){
+  fetch('/api/status').then(r=>r.json()).then(s=>{
+    const pill=document.getElementById('pill');
+    isRunning=!!s.running; isTrading=!!s.is_trading;
+    ['b1','b2','b3'].forEach(id=>document.getElementById(id).disabled=isRunning);
+    if(s.running){pill.textContent='扫描中…';pill.className='pill run';}
+    else{pill.textContent='空闲';pill.className='pill idle';}
+    const ph=document.getElementById('phase');
+    ph.textContent=(s.is_trading?'盘中 ':'休市 ')+(s.phase||'')+' '+(s.server_time||'');
+    ph.className='pill '+(s.is_trading?'trading':'phase');
+    if(s.error){setStatus('错误：'+s.error);}
+    else if(s.log&&s.log.length){setStatus(s.log[s.log.length-1]+countdownText());}
+    autoTick();
+    if(!s.running&&s.finished_at&&s.finished_at!==lastFinished){
+      lastFinished=s.finished_at;
+      document.getElementById('board').src='/api/board?t='+Date.now();
+    }
+  }).catch(()=>{
+    document.getElementById('pill').textContent='服务已断开';
+    document.getElementById('pill').className='pill run';
+    setStatus('后台服务未运行，请双击「启动看板.bat」重启');
+  });
+  setTimeout(poll,2000);
+}
+function toggleSectors(){const p=document.getElementById('sectorPanel');p.style.display=p.style.display==='block'?'none':'block';}
+function openPortfolio(){document.getElementById('board').src='/api/portfolio';}
+function searchStock(){
+  const v=document.getElementById('qSearch').value.trim();
+  if(!v){setStatus('请输入代码或名称');return;}
+  fetch('/api/stock_detail?symbol='+encodeURIComponent(v)+'&format=json')
+    .then(r=>r.json()).then(d=>showMainDetail(v,d))
+    .catch(e=>openMain('<div class="sub" style="color:#ef7a66">'+e+'</div>'));
+}
+function showMainDetail(q,d){
+  if(d.error){openMain('<h2>'+q+'</h2><div class="sub" style="color:#ef7a66">'+d.error+'</div>');return;}
+  const s=d.snapshot||{}, f=d.fund_flow||{}, fin=d.financials||{};
+  const cls=(s.pct||0)>0?'up':((s.pct||0)<0?'down':'flat');const sg=(s.pct||0)>0?'+':'';
+  const srcTag=d.synthetic?'<span class="tag-syn">合成数据</span>':'<span class="tag-real">'+(d.source||'真实行情')+'</span>';
+  let kpi='<div class="kpi">';
+  kpi+='<div class="cell"><div class="k">现价</div><div class="v '+cls+'">'+(s.price!=null?s.price.toFixed(2):'-')+'</div></div>';
+  kpi+='<div class="cell"><div class="k">涨跌幅</div><div class="v '+cls+'">'+(s.pct!=null?sg+s.pct.toFixed(2)+'%':'-')+'</div></div>';
+  kpi+='<div class="cell"><div class="k">市盈率</div><div class="v">'+(s.pe!=null?s.pe.toFixed(2):'-')+'</div></div>';
+  kpi+='<div class="cell"><div class="k">市净率</div><div class="v">'+(s.pb!=null?s.pb.toFixed(2):'-')+'</div></div>';
+  kpi+='<div class="cell"><div class="k">总市值(亿)</div><div class="v">'+(s.mktcap!=null?(s.mktcap/1e8).toFixed(2):'-')+'</div></div>';
+  kpi+='<div class="cell"><div class="k">流通市值(亿)</div><div class="v">'+(s.float_mktcap!=null?(s.float_mktcap/1e8).toFixed(2):'-')+'</div></div>';
+  kpi+='</div>';
+  let flow='<div class="kpi">';
+  const fb=(l,v)=>{if(v==null)return '';const c=v>0?'up':(v<0?'down':'flat');const g=v>0?'+':'';return '<div class="cell"><div class="k">'+l+'</div><div class="v '+c+'">'+g+(v/1e8).toFixed(2)+'亿</div></div>';};
+  flow+=fb('主力',f.main)+fb('超大单',f.huge)+fb('大单',f.big)+fb('中单',f.mid)+fb('小单',f.retail);
+  flow+='</div>';
+  const html='<button class="close" onclick="closeMain()">关闭</button>'
+    +'<h2>'+(s.name||q)+' '+(d.symbol||'')+'</h2>'
+    +'<div class="sub">'+srcTag+' ｜ 数据日 '+(d.data_date||'-')+'</div>'
+    +kpi+'<div id="mchart" class="chart"></div>'
+    +'<h3 style="font-size:14px;margin:12px 0 4px">资金流向</h3>'+flow;
+  openMain(html);
+  try{
+    const chart=echarts.init(document.getElementById('mchart'));
+    const dl=(d.kline||[]).map(x=>x.date);
+    const ohlc=(d.kline||[]).map(x=>[x.open,x.close,x.low,x.high]);
+    chart.setOption({backgroundColor:'#0d1219',grid:{left:55,right:18,top:16,bottom:28},tooltip:{trigger:'axis'},xAxis:{type:'category',data:dl,axisLabel:{color:'#8b98a5',fontSize:10}},yAxis:{scale:true,axisLabel:{color:'#8b98a5'}},dataZoom:[{type:'inside'},{type:'slider',height:14,bottom:6}],series:[{type:'candlestick',data:ohlc,itemStyle:{color:'#ff5b5b',color0:'#2ecc71',borderColor:'#ff5b5b',borderColor0:'#2ecc71'}}]});
+    window.addEventListener('resize',()=>chart.resize());
+  }catch(e){}
+}
+function openMain(h){document.getElementById('mainModalBox').innerHTML=h;document.getElementById('mainModalMask').classList.add('show');}
+function closeMain(){document.getElementById('mainModalMask').classList.remove('show');}
+window.onload=()=>{
+  poll(); loadQuotes(); loadCrypto();
+  setInterval(loadQuotes,10000); setInterval(loadCrypto,10000);
+  document.getElementById('auto').addEventListener('change',function(){nextAt=this.checked?Date.now()+parseInt(document.getElementById('interval').value,10)*1000:0;});
+  document.getElementById('interval').addEventListener('change',function(){if(document.getElementById('auto').checked){nextAt=Date.now()+parseInt(this.value,10)*1000;}});
+  document.getElementById('qSearch').addEventListener('keydown',function(e){if(e.key==='Enter')searchStock();});
+};
+</script>
+</body></html>"""
+    return _html.replace("[[SECTORS]]", _sec_boxes)
+
+
+def _run_scan(mode: str, offline: bool, push: bool, sectors: list = None):
     try:
         with _lock:
             _state["running"] = True
@@ -97,7 +434,7 @@ def _run_scan(mode: str, offline: bool, push: bool):
         scr = None
         show_wl = mode in ("daily", "both")
         if mode in ("screener", "both"):
-            scr = run_screener(offline=offline)
+            scr = run_screener(offline=offline, sectors=sectors)
 
         mode_tag = "offline" if (offline or any_offline) else "online"
         html = render_dashboard(results if show_wl else [],
@@ -299,6 +636,8 @@ window.onload = ()=>{
 
 
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"  # 支持 keep-alive 与大文件(如 echarts.min.js)正确传输
+
     def _send(self, code, body, ctype="text/plain; charset=utf-8"):
         if isinstance(body, str):
             body = body.encode("utf-8")
@@ -312,7 +651,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         p = urlparse(self.path)
         if p.path in ("/", "/index.html"):
-            self._send(200, CONTROL_HTML, "text/html; charset=utf-8")
+            self._send(200, control_html(), "text/html; charset=utf-8")
         elif p.path == "/api/board":
             with _lock:
                 html = _state["html"] or _placeholder_html()
@@ -354,6 +693,43 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps({"ok": False, "msg": str(e)},
                                            ensure_ascii=False),
                            "application/json; charset=utf-8")
+        elif p.path == "/api/stock_detail":
+            q = parse_qs(p.query)
+            sym = _resolve_symbol(q.get("symbol", [""])[0])
+            fmt = q.get("format", ["html"])[0]
+            if not sym:
+                self._send(200, json.dumps({"error": "缺少 symbol"}, ensure_ascii=False),
+                           "application/json; charset=utf-8"); return
+            d = _detail_cache_get(sym)
+            if fmt == "json":
+                self._send(200, json.dumps(d, ensure_ascii=False, default=str),
+                           "application/json; charset=utf-8")
+            else:
+                self._send(200, render_stock_detail(sym, d), "text/html; charset=utf-8")
+        elif p.path == "/api/portfolio":
+            q = parse_qs(p.query)
+            fmt = q.get("format", ["html"])[0]
+            book = sim_engine.summary()
+            if fmt == "json":
+                self._send(200, json.dumps({"book": book}, ensure_ascii=False, default=str),
+                           "application/json; charset=utf-8")
+            else:
+                self._send(200, render_portfolio(book), "text/html; charset=utf-8")
+        elif p.path == "/api/crypto_quotes":
+            try:
+                res = fetch_crypto_quotes()
+            except Exception as e:  # noqa: BLE001
+                res = {"ok": False, "msg": str(e), "quotes": []}
+            res["ts"] = datetime.now().strftime("%H:%M:%S")
+            self._send(200, json.dumps(res, ensure_ascii=False, default=str),
+                       "application/json; charset=utf-8")
+        elif p.path == "/static/echarts.min.js":
+            ep = os.path.join(HERE, "static", "echarts.min.js")
+            if os.path.exists(ep):
+                with open(ep, "rb") as _f:
+                    self._send(200, _f.read(), "application/javascript; charset=utf-8")
+            else:
+                self._send(404, "not found", "text/plain")
         else:
             self._send(204, b"", "")
 
@@ -369,6 +745,7 @@ class Handler(BaseHTTPRequestHandler):
             mode = data.get("mode", "daily")
             offline = bool(data.get("offline", False))
             push = bool(data.get("push", False))
+            sectors = data.get("sectors") or None
             if mode not in ("daily", "screener", "both"):
                 mode = "daily"
             with _lock:
@@ -377,11 +754,34 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps({"ok": False, "msg": "正在运行中，请稍候"}),
                            "application/json; charset=utf-8")
                 return
-            t = threading.Thread(target=_run_scan, args=(mode, offline, push),
+            t = threading.Thread(target=_run_scan,
+                                 args=(mode, offline, push, sectors),
                                  daemon=True)
             t.start()
             self._send(200, json.dumps({"ok": True, "msg": "已启动扫描"}),
                        "application/json; charset=utf-8")
+        elif p.path == "/api/trade":
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                data = json.loads(raw.decode("utf-8") or "{}")
+            except Exception:
+                data = {}
+            symbol = str(data.get("symbol", ""))
+            name = str(data.get("name", ""))
+            side = str(data.get("side", "buy"))
+            try:
+                price = float(data.get("price", 0))
+                qty = int(data.get("qty", 0))
+            except Exception:
+                price = qty = 0
+            if side == "sell":
+                res = sim_engine.sell(symbol, price, qty)
+            else:
+                res = sim_engine.buy(symbol, name, price, qty)
+            self._send(200, json.dumps(
+                {"ok": res.get("ok"), "msg": res.get("msg"), "book": res.get("book")},
+                ensure_ascii=False, default=str), "application/json; charset=utf-8")
         else:
             self._send(404, "not found", "text/plain")
 
