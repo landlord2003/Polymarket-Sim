@@ -15,6 +15,8 @@ from __future__ import annotations
 import os as _os
 # 抑制 AkShare 内部 tqdm 进度条（全A快照会刷屏且拖慢）
 _os.environ.setdefault("TQDM_DISABLE", "1")
+import pickle as _pickle
+import time as _time
 
 import numpy as np
 import pandas as pd
@@ -29,6 +31,10 @@ try:
     from . import datasource as ds  # type: ignore
 except ImportError:  # 直接以脚本方式运行时
     import datasource as ds  # type: ignore
+
+HERE = _os.path.dirname(_os.path.abspath(__file__))
+_BENCH_CACHE = _os.path.join(HERE, "data", "cache", "bench_hist.pkl")
+_BENCH_MAX_AGE = 7 * 86400  # 7 天内复用，保证回测可复现、不被网络波动影响
 
 
 def _market_prefix(symbol: str) -> str:
@@ -124,7 +130,22 @@ _BENCHMARKS = {
 
 
 def fetch_benchmark_histories(days: int = 400) -> dict:
-    """预取多基准指数历史（回测外层只取一次）。返回 {名称: df}。"""
+    """预取多基准指数历史（回测外层只取一次）。返回 {名称: df}。
+
+    带本地文件缓存：7 天内复用，保证 proxy/real 两次回测用完全相同、不受网络
+    波动影响的基准数据（否则基准抓取时好时坏会让两次回测的因子集不一致）。
+    """
+    # 优先读本地缓存（7天内）
+    try:
+        if _os.path.exists(_BENCH_CACHE):
+            age = _time.time() - _os.path.getmtime(_BENCH_CACHE)
+            if age < _BENCH_MAX_AGE:
+                with open(_BENCH_CACHE, "rb") as f:
+                    cached = _pickle.load(f)
+                if isinstance(cached, dict) and cached:
+                    return cached
+    except Exception:  # noqa: BLE001
+        pass
     out = {}
     for name, code in _BENCHMARKS.items():
         try:
@@ -133,6 +154,14 @@ def fetch_benchmark_histories(days: int = 400) -> dict:
                 out[name] = df
         except Exception:  # noqa: BLE001
             continue
+    # 写缓存（即使部分缺失也存，下次优先用；全空则不写，下次重新抓）
+    if out:
+        try:
+            _os.makedirs(_os.path.dirname(_BENCH_CACHE), exist_ok=True)
+            with open(_BENCH_CACHE, "wb") as f:
+                _pickle.dump(out, f)
+        except Exception:  # noqa: BLE001
+            pass
     return out
 
 

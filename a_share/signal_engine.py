@@ -138,6 +138,21 @@ def load_price(symbol: str, start: str = "20240101",
     return df, True
 
 
+_IDX300_CACHE = None  # 沪深300指数K线缓存（回测中只抓一次，避免逐行联网）
+
+
+def _get_idx300(days: int = 60):
+    """一次性抓沪深300指数K线并缓存；失败只试一次（置 False 哨兵），杜绝逐行重复联网。"""
+    global _IDX300_CACHE
+    if _IDX300_CACHE is not None:
+        return _IDX300_CACHE if _IDX300_CACHE is not False else None
+    try:
+        _IDX300_CACHE = ds.fetch_index_kline("sh000300", days=days)
+    except Exception:  # noqa: BLE001
+        _IDX300_CACHE = False
+    return _IDX300_CACHE if _IDX300_CACHE is not False else None
+
+
 def dim_trend(df: pd.DataFrame, idx_df: Optional[pd.DataFrame] = None) -> tuple[float, list]:
     """趋势维度（阶段1 增强）：RSI/MA20/布林 + 多周期动量(5/20/60) + RS(对沪深300)。
 
@@ -185,11 +200,14 @@ def dim_trend(df: pd.DataFrame, idx_df: Optional[pd.DataFrame] = None) -> tuple[
 
         # —— RS 相对强度（对沪深300）——
         try:
-            idx = idx_df if idx_df is not None else ds.fetch_index_kline("sh000300", days=60)
-            ret_mkt = float(idx["close"].iloc[-1] / idx["close"].iloc[-20] - 1)
-            rs_score = np.clip((mom20 - ret_mkt) / 0.10, -1, 1)
-            score += 0.15 * rs_score
-            notes.append(f"RS(对沪深300) {mom20 - ret_mkt:+.1%}")
+            idx = idx_df if idx_df is not None else _get_idx300(60)
+            if idx is None or len(idx) < 20:
+                notes.append("RS：沪深300源不可用")
+            else:
+                ret_mkt = float(idx["close"].iloc[-1] / idx["close"].iloc[-20] - 1)
+                rs_score = np.clip((mom20 - ret_mkt) / 0.10, -1, 1)
+                score += 0.15 * rs_score
+                notes.append(f"RS(对沪深300) {mom20 - ret_mkt:+.1%}")
         except Exception:  # noqa: BLE001
             notes.append("RS：沪深300源失败")
 
@@ -311,6 +329,149 @@ def load_moneyflow_cache(symbol: str) -> Optional[pd.Series]:
         return s
     except Exception:  # noqa: BLE001
         return None
+
+
+# ----------------------------------------------------------- 精细资金流特征（真实订单档位）
+def load_moneyflow_full(symbol: str) -> Optional[pd.DataFrame]:
+    """读取 Tushare 抓取的资金流全字段缓存 CSV → DataFrame（index=datetime，已排序）。
+
+    含 trade_date / main_net_in / 各档位买额卖额(元) / 各档位买量卖量(手)。
+    向后兼容：若缓存只有 main_net_in（旧版），仍返回该 df。无文件返回 None。
+    """
+    p = _os.path.join(MONEYFLOW_CACHE_DIR, f"{symbol}.csv")
+    if not _os.path.exists(p):
+        return None
+    try:
+        d = pd.read_csv(p)
+        d["trade_date"] = d["trade_date"].astype(str)
+        idx = pd.to_datetime(d["trade_date"], format="%Y%m%d", errors="coerce")
+        na = idx.isna().values            # numpy 布尔数组，规避 pandas3.0 Series 索引对齐坑
+        keep = ~na
+        d = d.loc[keep].copy()
+        d.index = idx[keep]
+        return d.sort_index()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _ols_slope_norm(s) -> float:
+    """对序列 s 做 OLS 斜率并归一化到 ~[-1,1]（跨标的可比）。点-时间安全。"""
+    s = np.asarray(pd.Series(s).dropna(), dtype=float)
+    n = len(s)
+    if n < 6:
+        return 0.0
+    x = np.arange(n, dtype=float)
+    xm, ym = x.mean(), s.mean()
+    denom = float(((x - xm) ** 2).sum())
+    if denom < 1e-12:
+        return 0.0
+    slope = float(((x - xm) * (s - ym)).sum()) / denom
+    sy = float(s.std())
+    if sy < 1e-9:
+        return 0.0
+    norm = slope * n / (sy + 1e-9)
+    return float(max(-1.0, min(1.0, norm)))
+
+
+def _sum_z(s, win: int = 5, hist: int = 60) -> float:
+    """序列 s 最近 win 日累计相对其自身 hist 日分布的 z 分数（尺度无关）。"""
+    s = np.asarray(pd.Series(s).dropna(), dtype=float)
+    if len(s) < win + 1:
+        return 0.0
+    trail = s[-hist:] if len(s) >= hist else s
+    mean, std = float(trail.mean()), float(trail.std())
+    if std < 1e-9:
+        return 0.0
+    return float(max(-1.0, min(1.0,
+                   (s[-win:].sum() - win * mean) / (std * (win ** 0.5) + 1e-9))))
+
+
+def _mfi_series(close, high, low, vol, win: int = 14) -> pd.Series:
+    """Money Flow Index（量价加权 RSI），返回与输入等长序列。滚动窗口因果、点-时间安全。"""
+    close = pd.Series(close, dtype=float)
+    high = pd.Series(high, dtype=float)
+    low = pd.Series(low, dtype=float)
+    vol = pd.Series(vol, dtype=float)
+    tp = (high + low + close) / 3.0
+    raw = tp * vol
+    td = tp.diff().fillna(0.0)
+    pos = raw.where(td > 0, 0.0).rolling(win).sum()
+    neg = raw.where(td < 0, 0.0).rolling(win).sum()
+    mfi = 100.0 - 100.0 / (1.0 + pos / (neg + 1e-9))
+    return mfi
+
+
+def _adi_series(close, high, low, vol) -> pd.Series:
+    """Chaikin Accumulation/Distribution 线（累计），返回等长序列。"""
+    close = np.asarray(close, dtype=float)
+    high = np.asarray(high, dtype=float)
+    low = np.asarray(low, dtype=float)
+    vol = np.asarray(vol, dtype=float)
+    denom = (high - low)
+    safe = np.where(denom > 0, denom, 1.0)
+    frac = np.where(denom > 0, ((close - low) - (high - close)) / safe, 0.0)
+    mf = frac.astype(float) * vol.astype(float)
+    return pd.Series(mf).cumsum()
+
+
+def refined_money_block(pre: dict, i: int, has_real: bool) -> list:
+    """返回 10 维精细资金流特征（在 point i，即 sub=data[:i+1] 处）。
+
+    pre 为在 build_rows 中预计算的全长序列字典（已对齐 df.index）：
+      'mfi','adi'：由 K 线算（两种模式都有）；
+      'elg_net','lg_net','md_net','sm_net','main_net'：真实订单净额（元），proxy 模式为 None；
+      'price_div'：价格-资金背离编码（全长）。
+    has_real=False（proxy）时，订单档位相关项置 0，仅保留 K 线可算的 MFI/ADI，
+      从而干净隔离「真实订单信息」的增量贡献。
+    """
+    out = [0.0] * 10
+    # MFI / ADI：始终由 K 线计算（两种模式一致，不引入混杂）
+    try:
+        mfi_v = pre["mfi"].iloc[i]
+        if np.isfinite(mfi_v):
+            out[7] = float(max(-1.0, min(1.0, (mfi_v - 50.0) / 50.0)))
+    except Exception:
+        pass
+    try:
+        out[8] = _ols_slope_norm(pre["adi"].iloc[: i + 1])
+    except Exception:
+        pass
+    if not has_real:
+        return out
+
+    try:
+        elg = pre["elg_net"].iloc[: i + 1]
+        lg = pre["lg_net"].iloc[: i + 1]
+        md = pre["md_net"].iloc[: i + 1]
+        sm = pre["sm_net"].iloc[: i + 1]
+        main = pre["main_net"].iloc[: i + 1]
+        out[0] = _sum_z(main, 5, 60)                 # 主力净流入 z（近5日累计 vs 60日分布）
+        out[1] = _ols_slope_norm(elg.tail(10))       # 特大单净流入趋势（机构意图）
+        out[2] = _ols_slope_norm(lg.tail(10))        # 大单净流入趋势
+        out[3] = _sum_z(elg - lg, 5, 60)             # 特大单−大单 背离（大资金是否一致）
+        out[4] = _sum_z(main - sm, 5, 60)            # 机构−散户 分化（主力净 − 小单净）
+        # 主力强度：近5日 |主力净| / 近5日 四档位总成交额
+        tot = (pre["elg_net"].abs().iloc[: i + 1] + pre["lg_net"].abs().iloc[: i + 1]
+               + pre["md_net"].abs().iloc[: i + 1] + pre["sm_net"].abs().iloc[: i + 1])
+        denom_t = float(tot.iloc[-5:].sum())
+        if denom_t > 0:
+            out[5] = float(min(1.0, main.iloc[-5:].abs().sum() / denom_t))
+        # 连续净流入天数（截止 i），封顶 10
+        c = 0
+        for v in reversed(main.values):
+            if v > 0:
+                c += 1
+            else:
+                break
+        out[6] = float(min(c, 10) / 10.0)
+        # 价格-资金背离：价跌钱进=吸筹(+0.5)，价涨钱出=派发(-0.5)，同向放大±1
+        try:
+            out[9] = float(pre["price_div"].iloc[i])
+        except Exception:
+            out[9] = 0.0
+    except Exception:
+        pass
+    return out
 
 
 def dim_money(symbol: str, df: Optional[pd.DataFrame] = None,

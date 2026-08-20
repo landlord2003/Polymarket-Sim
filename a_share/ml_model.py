@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import sys
 import os
+import time
 import argparse
 import json
+import concurrent.futures as _cf
 from typing import Optional
 
 import numpy as np
@@ -36,7 +38,8 @@ sys.path.insert(0, HERE)
 from signal_engine import (dim_trend, money_proxy, dim_valuation,
                            dim_sector_rotation, dim_regime,
                            money_score_from_inflow, proxy_inflow_series,
-                           load_moneyflow_cache,
+                           load_moneyflow_cache, load_moneyflow_full,
+                           refined_money_block, _mfi_series, _adi_series,
                            _map_signal, DEFAULT_WEIGHTS)
 from akshare_factors import fetch_benchmark_histories
 
@@ -47,6 +50,9 @@ RETRAIN_GAP = 30        # 每 30 个交易日（约1月）重训一次
 
 
 # ----------------------------------------------------------- 数据加载（同 backtest）
+_HIST_CACHE = {}   # (symbol, days) -> DataFrame；进程内复用，避免同一标的多视角重复抓取
+
+
 def _synthetic_data(symbol: str, n: int = 600) -> pd.DataFrame:
     rng = np.random.default_rng(abs(hash(symbol)) % (2**32))
     dates = pd.date_range(end=pd.Timestamp.today().normalize(), periods=n, freq="D")
@@ -62,16 +68,54 @@ def _synthetic_data(symbol: str, n: int = 600) -> pd.DataFrame:
     return df
 
 
-def load_hist(symbol: str, days: int = 600) -> pd.DataFrame:
+def _fetch_kline_timed(symbol: str, days: int, timeout: float = 25) -> Optional[pd.DataFrame]:
+    """带线程超时的 K 线抓取：单次超 timeout 秒直接判失败（降级合成），避免网络阻塞卡死回测。"""
     try:
         from datasource import fetch_kline
-        df = fetch_kline(symbol, days=days)
-        if len(df) >= 30:
+        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(fetch_kline, symbol, days=days)
+            df = fut.result(timeout=timeout)
+        if df is not None and len(df) >= 30:
             return df
-        raise RuntimeError("K线不足")
+        raise RuntimeError("K线不足/空")
     except Exception as e:  # 离线兜底：仅验证引擎
         print(f"[warn] {symbol} 取数失败（{e}），使用合成数据（非真实准确率）")
+        return None
+
+
+def load_hist(symbol: str, days: int = 600) -> pd.DataFrame:
+    key = (symbol, days)
+    if key in _HIST_CACHE:
+        return _HIST_CACHE[key]
+    df = _load_hist_disk(symbol, days)
+    _HIST_CACHE[key] = df
+    return df
+
+
+def _load_hist_disk(symbol: str, days: int) -> pd.DataFrame:
+    """带磁盘缓存的 K 线加载：优先读 data/cache/kline_<symbol>.csv（2天内），
+    否则抓取并落盘。使 proxy/real 两次回测共享完全相同的 K 线（标签一致、公平），
+    且第二次运行几乎瞬时。抓取失败/超时降级合成。
+    """
+    p = os.path.join(HERE, "data", "cache", f"kline_{symbol}.csv")
+    try:
+        if os.path.exists(p):
+            age = time.time() - os.path.getmtime(p)
+            if age < 2 * 86400:
+                d = pd.read_csv(p, index_col=0, parse_dates=True)
+                if len(d) >= 30:
+                    return d
+    except Exception:  # noqa: BLE001
+        pass
+    df = _fetch_kline_timed(symbol, days)
+    if df is None:
         return _synthetic_data(symbol)
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        df.to_csv(p)
+    except Exception:  # noqa: BLE001
+        pass
+    return df
 
 
 # ----------------------------------------------------------- 特征工程（点-时间）
@@ -287,21 +331,72 @@ class GradientBoosting:
 
 
 # ----------------------------------------------------------- 数据集构建（逐日）
+_ORDER_COLS = {"buy_elg_amount", "sell_elg_amount", "buy_lg_amount",
+               "sell_lg_amount", "buy_md_amount", "sell_md_amount",
+               "buy_sm_amount", "sell_sm_amount"}
+
+
+def _build_pre(symbol: str, df: pd.DataFrame, money_cache: Optional[dict]):
+    """预计算精细资金流所需的全长序列（对齐 df.index，点-时间安全）。
+
+    返回 (pre, has_real, inflow_full)：
+      pre: {mfi, adi, price_div, elg_net, lg_net, md_net, sm_net, main_net}
+      has_real: 是否拿到真实订单档位数据（--money real 且缓存含全字段）
+      inflow_full: 日度主力净流入(元) Series（供 feat_vector 算 crude 资金分）
+    """
+    close, high, low, vol = df["close"], df["high"], df["low"], df["volume"]
+    mfi = _mfi_series(close, high, low, vol)
+    adi = _adi_series(close, high, low, vol)
+    price_ret5 = close.pct_change(5)
+    elg_net = lg_net = md_net = sm_net = main_net = None
+    inflow_full = None
+    has_real = False
+    if money_cache and symbol in money_cache:
+        mc = money_cache[symbol]
+        if isinstance(mc, pd.DataFrame):
+            mc = mc.reindex(df.index)
+            if "main_net_in" in mc.columns:
+                inflow_full = mc["main_net_in"]
+            if _ORDER_COLS.issubset(set(mc.columns)):
+                elg_net = mc["buy_elg_amount"] - mc["sell_elg_amount"]
+                lg_net = mc["buy_lg_amount"] - mc["sell_lg_amount"]
+                md_net = mc["buy_md_amount"] - mc["sell_md_amount"]
+                sm_net = mc["buy_sm_amount"] - mc["sell_sm_amount"]
+                main_net = elg_net + lg_net
+                has_real = True
+        elif isinstance(mc, pd.Series):
+            inflow_full = mc.reindex(df.index)
+    # 价格-资金背离编码（仅 has_real 时有意义；proxy 全 0）
+    price_div = pd.Series(0.0, index=df.index)
+    if has_real and main_net is not None:
+        main5 = main_net.rolling(5).sum()
+        up = price_ret5 >= 0
+        money_in = main5 >= 0
+        enc = np.where(up & money_in, 1.0,
+              np.where((~up) & money_in, 0.5,
+              np.where(up & (~money_in), -0.5,
+              np.where((~up) & (~money_in), -1.0, 0.0))))
+        price_div = pd.Series(enc, index=df.index)
+    pre = {"mfi": mfi, "adi": adi, "price_div": price_div,
+           "elg_net": elg_net, "lg_net": lg_net, "md_net": md_net,
+           "sm_net": sm_net, "main_net": main_net}
+    return pre, has_real, inflow_full
+
+
 def build_rows(symbol: str, bench_hist: dict, hs300, horizon: int,
                 money_cache: Optional[dict] = None) -> list:
     """返回逐日行列表：每行 {X, y, factors:[5因子], date}。
 
+    X = 14 维基础特征 + 10 维精细资金流块（共 24 维）。proxy 模式下后 10 维中
+    订单档位相关项恒为 0（仅 MFI/ADI 由 K 线计算），从而干净隔离真实订单信息增量。
     只保留 i 有足够未来（i+horizon < n）且 i>=START_DAYS 的行。
-    money_cache: {symbol: 日度主力净流入(元) Series(日期索引)}；real 模式预取，
-      内部按 df.index 对齐后在 feat_vector 中逐日切片，无未来函数。
+    money_cache: {symbol: 全字段资金流 DataFrame}（real）或 {symbol: 净流入 Series}（兼容）。
     """
     df = load_hist(symbol)
     n = len(df)
     if n < START_DAYS + horizon + 1:
         return []
-    inflow_full = None
-    if money_cache and symbol in money_cache:
-        inflow_full = money_cache[symbol].reindex(df.index)
+    pre, has_real, inflow_full = _build_pre(symbol, df, money_cache)
     closes = df["close"].values.astype(float)
     rows = []
     for i in range(START_DAYS, n - horizon):
@@ -309,6 +404,8 @@ def build_rows(symbol: str, bench_hist: dict, hs300, horizon: int,
         tgt = sub.index[-1]
         vec, fac = feat_vector(symbol, sub, bench_hist, hs300, tgt,
                                money_series=inflow_full)
+        rb = refined_money_block(pre, i, has_real)
+        vec = np.concatenate([vec, np.asarray(rb, dtype=float)])
         if np.any(~np.isfinite(vec)):
             vec = np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0)
         y = 1.0 if closes[i + horizon] / closes[i] - 1 > 0 else 0.0
@@ -422,8 +519,10 @@ def predict_latest(symbol, name, sector, horizon, ModelCls, bench_hist,
     model.fit(X, y_train)
     sub = df.iloc[:n]
     tgt = sub.index[-1]
-    inflow_full = money_cache.get(symbol).reindex(df.index) if (money_cache and symbol in money_cache) else None
+    pre, has_real, inflow_full = _build_pre(symbol, df, money_cache)
     vec, fac = feat_vector(symbol, sub, bench_hist, hs300, tgt, money_series=inflow_full)
+    rb = refined_money_block(pre, n - 1, has_real)
+    vec = np.concatenate([vec, np.asarray(rb, dtype=float)])
     vec = np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0)
     prob = float(model.predict_proba(vec.reshape(1, -1))[0])
     last = float(df["close"].iloc[-1])
@@ -570,10 +669,10 @@ def main():
         money_cache = {}
         if args.money == "real":
             for (code, _, _) in build_universe():
-                c = load_moneyflow_cache(code)
+                c = load_moneyflow_full(code)
                 if c is not None:
                     money_cache[code] = c
-            print(f"真实资金流缓存：{len(money_cache)}/{len(build_universe())} 只")
+            print(f"真实资金流全字段缓存：{len(money_cache)}/{len(build_universe())} 只")
         print(f"扫描自动荐股池（{len(build_universe())} 只）…")
         rec, picks, skipped = auto_recommend(
             horizon=args.horizon, model_name=args.model,
@@ -607,10 +706,10 @@ def main():
     money_cache = {}
     if args.money == "real":
         for s in symbols:
-            c = load_moneyflow_cache(s)
+            c = load_moneyflow_full(s)
             if c is not None:
                 money_cache[s] = c
-        print(f"真实资金流缓存：{len(money_cache)}/{len(symbols)} 只（--money real）")
+        print(f"真实资金流全字段缓存：{len(money_cache)}/{len(symbols)} 只（--money real）")
 
     table = []
     for h in HORIZONS:
