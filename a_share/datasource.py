@@ -287,16 +287,20 @@ _FIELDS_SNAPSHOT = (
 )
 
 
-def fetch_snapshot(symbol: str) -> dict:
+def fetch_snapshot(symbol: str, fast: bool = False) -> dict:
     """东财个股快照：现价/涨跌幅/最高/最低/今开/昨收/成交量/成交额/振幅/
     量比/总市值/流通市值/市盈率(动)/市净率/换手率。
 
     返回 dict（金额单位：元）。任一核心字段缺失置 None，由上层显示「—」。
     失败抛 DataSourceError。
+
+    fast=True 时缩短超时与重试（详情页用，避免单只拖死整轮请求）。
     """
     url = ("https://push2.eastmoney.com/api/qt/stock/get"
            f"?secid={_secid(symbol)}&fields={_FIELDS_SNAPSHOT}&invt=2&fltt=2")
-    data = json.loads(_http_get(url))
+    data = json.loads(_http_get(url,
+                                timeout=6 if fast else TIMEOUT,
+                                retries=1 if fast else 3))
     d = (data.get("data") or {})
     if not d or d.get("f57") is None:
         raise DataSourceError(f"{symbol} 快照返回空")
@@ -335,13 +339,18 @@ def fetch_snapshot(symbol: str) -> dict:
 
 # ----------------------------------------------------- 资金流向分项(主/大/中/小单)
 
-def fetch_fund_flow_breakdown(symbol: str) -> dict:
-    """东财个股资金流：返回最新一日的 主力/超大单/大单/中单/小单 净流入(元)。"""
+def fetch_fund_flow_breakdown(symbol: str, fast: bool = False) -> dict:
+    """东财个股资金流：返回最新一日的 主力/超大单/大单/中单/小单 净流入(元)。
+
+    fast=True 时缩短超时与重试（详情页用）。
+    """
     url = ("https://push2.eastmoney.com/api/qt/stock/fflow/daykline/get"
            f"?secid={_secid(symbol)}&fields1=f1,f2,f3,f7"
            "&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65"
            "&klt=101&lmt=1")
-    data = json.loads(_http_get(url))
+    data = json.loads(_http_get(url,
+                                timeout=6 if fast else TIMEOUT,
+                                retries=1 if fast else 3))
     rows = ((data.get("data") or {}).get("klines")) or []
     if not rows:
         raise DataSourceError(f"{symbol} 资金流分项返回空")
@@ -360,14 +369,19 @@ def fetch_fund_flow_breakdown(symbol: str) -> dict:
 
 # ------------------------------------------------------------- F10 主营财务
 
-def fetch_financials(symbol: str) -> dict:
-    """东财 F10 主营财务（最新一期）：营收/归母净利润/ROE/毛利率/净利同比。"""
+def fetch_financials(symbol: str, fast: bool = False) -> dict:
+    """东财 F10 主营财务（最新一期）：营收/归母净利润/ROE/毛利率/净利同比。
+
+    fast=True 时缩短超时与重试（详情页用）。
+    """
     flt = urllib.parse.quote(f'(SECURITY_CODE="{symbol}")')
     url = ("https://datacenter-web.eastmoney.com/api/data/v1/get"
            "?reportName=RPT_F10_FINANCE_MAIN&columns=ALL"
            f"&filter={flt}&pageSize=1&sortColumns=REPORT_DATE&sortTypes=-1"
            "&source=WEB&client=WEB&v=0.1")
-    text = _http_get(url, encoding="utf-8")
+    text = _http_get(url, encoding="utf-8",
+                     timeout=6 if fast else TIMEOUT,
+                     retries=1 if fast else 3)
     data = json.loads(text)
     arr = (((data.get("result") or {}).get("data")) or [])
     if not arr:

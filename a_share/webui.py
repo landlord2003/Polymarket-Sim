@@ -121,36 +121,101 @@ def _save_watchlist(wl: dict):
         return False
 
 
+def _safe_json(obj):
+    """递归把任意对象转成 JSON 原生类型，杜绝 json.dumps 因 tuple 键/numpy 类型
+    等抛错（曾导致连接被静默掐断）。"""
+    if isinstance(obj, dict):
+        return {str(k) if not isinstance(k, (str, int, float, bool)) else k:
+                _safe_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_safe_json(v) for v in obj]
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    try:
+        if hasattr(obj, "item"):  # numpy scalar
+            return obj.item()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        return float(obj)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        return str(obj)
+    except Exception:  # noqa: BLE001
+        return "<unserializable>"
+
+
+def _log_err(msg):
+    """把详情接口的真实异常落盘，便于连接异常时排查（位于 quant-trading/ 同级）。"""
+    try:
+        with open(os.path.join(os.path.dirname(HERE), "webui_error.log"),
+                  "a", encoding="utf-8") as f:
+            f.write("[" + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "] "
+                    + msg + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _build_stock_detail(sym):
-    snap = {}; ff = {}; fin = {}; kline = []; news = []
+    """并发抓取详情数据，整体 8s 硬上限。
+
+    此前是同步串行取数（快照/资金流/财务/K线/新闻），单只最慢可阻塞 200+ 秒，
+    期间 HTTP 连接空闲，被浏览器/杀毒软件掐断 → 浏览器收到
+    "Remote end closed connection without response"。
+
+    现改为 fast 模式并发（单源 6s/1 重试）+ 整体 8s 上限：超时的源直接丢弃，
+    用已有数据渲染，保证连接存活、详情页秒开。
+    """
     synthetic = False; source = ""; data_date = ""; error = None
+    snap = {}; ff = {}; fin = {}; kline = []; news = []
+
+    def _safe(fn):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001
+            return e
+
+    import concurrent.futures as cf
+    ex = cf.ThreadPoolExecutor(max_workers=5)
     try:
-        snap = fetch_snapshot(sym)
-        if isinstance(snap, dict) and snap.get("error"):
-            error = snap["error"]; snap = {}
-    except Exception as e:  # noqa: BLE001
-        error = str(e)
-    try:
-        ff = fetch_fund_flow_breakdown(sym)
-    except Exception:  # noqa: BLE001
-        ff = {}
-    try:
-        fin = fetch_financials(sym)
-    except Exception:  # noqa: BLE001
-        fin = {}
-    try:
-        df = fetch_kline(sym, days=60)
-        kline = [{"date": str(idx.date()), "open": float(r.open),
-                  "close": float(r.close), "low": float(r.low), "high": float(r.high)}
-                 for idx, r in df.iterrows()]
-        source = df.attrs.get("source", "") or ""
-        data_date = str(df.index[-1].date()) if len(df) else ""
-    except Exception:  # noqa: BLE001
-        kline = []
-    try:
-        news = fetch_news_titles(sym, limit=8)
-    except Exception:  # noqa: BLE001
-        news = []
+        f_snap = ex.submit(_safe, lambda: fetch_snapshot(sym, fast=True))
+        f_ff   = ex.submit(_safe, lambda: fetch_fund_flow_breakdown(sym, fast=True))
+        f_fin  = ex.submit(_safe, lambda: fetch_financials(sym, fast=True))
+        f_kl   = ex.submit(_safe, lambda: fetch_kline(sym, days=60, fast=True))
+        f_news = ex.submit(_safe, lambda: fetch_news_titles(sym, limit=8))
+        done, _ = cf.wait([f_snap, f_ff, f_fin, f_kl, f_news], timeout=8)
+        for fut, key in ((f_snap, "snap"), (f_ff, "ff"), (f_fin, "fin"),
+                         (f_kl, "kline"), (f_news, "news")):
+            if fut not in done:
+                continue  # 超时未完成：保留默认值，绝不阻塞
+            r = fut.result()
+            if isinstance(r, Exception):
+                if key == "snap":
+                    error = str(r)
+                continue
+            if key == "snap" and isinstance(r, dict):
+                snap = r
+            elif key == "ff" and isinstance(r, dict):
+                ff = r
+            elif key == "fin" and isinstance(r, dict):
+                fin = r
+            elif key == "news" and isinstance(r, list):
+                news = r
+            elif key == "kline":
+                try:
+                    kline = [{"date": str(idx.date()), "open": float(r.open),
+                              "close": float(r.close), "low": float(r.low),
+                              "high": float(r.high)}
+                             for idx, r in r.iterrows()]
+                    source = r.attrs.get("source", "") or ""
+                    data_date = str(r.index[-1].date()) if len(r) else ""
+                except Exception:  # noqa: BLE001
+                    kline = []
+    finally:
+        # 放弃未完成的慢任务，立即归还连接（不等待）
+        ex.shutdown(wait=False, cancel_futures=True)
+
     if isinstance(snap, dict):
         source = source or snap.get("source", "")
         data_date = data_date or snap.get("data_date", "")
@@ -770,8 +835,13 @@ class Handler(BaseHTTPRequestHandler):
                            "application/json; charset=utf-8"); return
             d = _detail_cache_get(sym)
             if fmt == "json":
-                self._send(200, json.dumps(d, ensure_ascii=False, default=str),
-                           "application/json; charset=utf-8")
+                try:
+                    body = json.dumps(_safe_json(d), ensure_ascii=False)
+                except Exception as e:  # noqa: BLE001
+                    _log_err("stock_detail 序列化失败 sym=%s: %s" % (sym, e))
+                    body = json.dumps({"error": "序列化失败: " + str(e)},
+                                      ensure_ascii=False)
+                self._send(200, body, "application/json; charset=utf-8")
             else:
                 self._send(200, render_stock_detail(sym, d), "text/html; charset=utf-8")
         elif p.path == "/api/portfolio":

@@ -317,8 +317,10 @@ function openModal(html){ document.getElementById('modalBox').innerHTML = html;
   document.getElementById('modalMask').classList.add('show'); }
 
 function showDetail(symbol, name){
-  fetch('/api/stock_detail?symbol='+symbol+'&format=json')
-    .then(r=>r.json()).then(d=>{
+  const _ctrl = new AbortController();
+  const _to = setTimeout(()=>_ctrl.abort(), 28000);
+  fetch('/api/stock_detail?symbol='+symbol+'&format=json', {signal:_ctrl.signal})
+    .then(r=>r.json()).then(d=>{ clearTimeout(_to);
       if(d.error){ openModal('<button class="close" onclick="closeModal()">关闭</button><h2>'+symbol+' '+name+'</h2><div class="sub" style="color:#ef7a66">'+d.error+'</div>'); return; }
       const s = d.snapshot||{};
       const f = d.fund_flow||{};
@@ -387,8 +389,10 @@ function showDetail(symbol, name){
 }
 
 function showTrade(symbol, name){
-  fetch('/api/stock_detail?symbol='+symbol+'&format=json')
-    .then(r=>r.json()).then(d=>{
+  const _ctrl = new AbortController();
+  const _to = setTimeout(()=>_ctrl.abort(), 28000);
+  fetch('/api/stock_detail?symbol='+symbol+'&format=json', {signal:_ctrl.signal})
+    .then(r=>r.json()).then(d=>{ clearTimeout(_to);
       const px = (d.snapshot&&d.snapshot.price)|| (d.kline&&d.kline.length? d.kline[d.kline.length-1].close : 0);
       const html = '<button class="close" onclick="closeModal()">关闭</button>'
         + '<h2>📝 模拟买卖 · '+symbol+' '+name+'</h2>'
@@ -402,7 +406,7 @@ function showTrade(symbol, name){
         + '<div id="tBook"></div>';
       openModal(html);
       refreshBook();
-    });
+    }).catch(e=>{ clearTimeout(_to); openModal('<button class="close" onclick="closeModal()">关闭</button><h2>加载失败</h2><div class="sub" style="color:#ef7a66">'+ (e && e.name==='AbortError' ? '请求超时（28秒），请重试或检查网络' : e) +'</div>'); });
 }
 
 function submitTrade(symbol, name){
