@@ -161,7 +161,7 @@ class LogisticRegression:
         return self._sigmoid(Xs @ self.w + self.b)
 
 
-# ----------------------------------------------------------- 模型 2：Gradient Boosting (决策树桩)
+# ----------------------------------------------------------- 模型 2：Gradient Boosting (depth-2 决策树)
 def _fit_stump(X, r):
     """在残差 r 上拟合一个 depth-2 决策树（两特征交互），返回可预测的单棵树。
 
@@ -359,7 +359,7 @@ def evaluate(probs: np.ndarray, ys: np.ndarray) -> tuple:
 def _write_report(path: str, table: list, summary: str):
     from datetime import datetime
     lines = [f"# Path3 本地 ML 模型回测报告（{datetime.today().strftime('%Y-%m-%d')}）\n"]
-    lines.append("> 零依赖 numpy 实现（Logistic Regression L2 + Gradient Boosting 树桩）；"
+    lines.append("> 零依赖 numpy 实现（Logistic Regression L2 + Gradient Boosting depth-2 树）；"
                  "walk-forward 扩展窗口、每月重训；特征点-时间、无未来函数。\n"
                  "> 对比口径：precision_up = 发出「看多」后 N 日收益为正的占比；"
                  "随机基准 50%。\n")
