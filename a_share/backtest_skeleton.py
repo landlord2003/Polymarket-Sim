@@ -83,8 +83,9 @@ def _regime_factor(sreg: float) -> float:
 
 def backtest_symbol(symbol: str, weights: dict, bench_hist: dict,
                     hs300: Optional[pd.DataFrame], fwd=FWD,
-                    start_days=START_DAYS):
-    df = load_hist(symbol)
+                    start_days=START_DAYS, df: Optional[pd.DataFrame] = None):
+    if df is None:
+        df = load_hist(symbol)
     if len(df) < start_days + max(fwd) + 1:
         return None
     closes = df["close"].values.astype(float)
@@ -149,12 +150,53 @@ def backtest_symbol(symbol: str, weights: dict, bench_hist: dict,
     }
 
 
+def candidate_weights(n: int = 24, seed: int = 42) -> list:
+    """生成候选权重组合（5维，和为1）：含当前默认 + 随机采样，用于网格搜索。"""
+    dims = ["trend", "money", "rotation", "valuation", "news"]
+    rng = np.random.default_rng(seed)
+    cands = [dict(DEFAULT_WEIGHTS)]
+    for _ in range(n - 1):
+        w = rng.random(len(dims))
+        w = w / w.sum()
+        cands.append({d: round(float(w[i]), 3) for i, d in enumerate(dims)})
+    return cands
+
+
+def tune_weights(symbols: list, bench_hist: dict, hs300,
+                 candidates: list, start_days: int = START_DAYS) -> list:
+    """对每组候选权重跑全样本回测，返回按精准20d降序的 (weights, p5, p10, p20) 列表。"""
+    hist = {s: load_hist(s) for s in symbols}
+    results = []
+    for cw in candidates:
+        p5, p10, p20 = [], [], []
+        for s in symbols:
+            d = hist[s]
+            if len(d) < start_days + max(FWD) + 1:
+                continue
+            r = backtest_symbol(s, cw, bench_hist, hs300,
+                                start_days=start_days, df=d)
+            if r and not r["synthetic"]:
+                p5.append(r["precision"][5])
+                p10.append(r["precision"][10])
+                p20.append(r["precision"][20])
+        if p5:
+            results.append((cw, float(np.mean(p5)),
+                            float(np.mean(p10)), float(np.mean(p20))))
+    results.sort(key=lambda x: -x[3])
+    return results
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbols", nargs="*", default=None,
                     help="标的列表，默认读 watchlist.json")
     ap.add_argument("--start", type=int, default=START_DAYS)
     ap.add_argument("--out", default=None, help="导出 Markdown 报告路径")
+    ap.add_argument("--tune", action="store_true",
+                    help="权重网格搜索（随机采样候选，找全样本精准率最高的组合）")
+    ap.add_argument("--tune-out", default=None, help="调优结果导出路径")
+    ap.add_argument("--apply", action="store_true",
+                    help="把调优出的最优权重写回 watchlist.json")
     args = ap.parse_args()
 
     if args.symbols:
@@ -172,6 +214,10 @@ def main():
     bench_hist = fetch_benchmark_histories(days=400)
     hs300 = bench_hist.get("沪深300")
     print(f"  可用基准：{list(bench_hist.keys())}")
+
+    if args.tune:
+        _run_tune(args, bench_hist, hs300)
+        return
 
     print("=" * 78)
     print("阶段1 五因子 walk-forward 回测（趋势+资金代理+轮动+估值+regime）")
@@ -214,6 +260,52 @@ def main():
 
     if args.out:
         _write_report(args.out, rows, all_p5, all_p10, all_p20, all_avg)
+
+
+def _run_tune(args, bench_hist, hs300):
+    import json
+    if args.symbols:
+        symbols = args.symbols
+    else:
+        try:
+            with open(os.path.join(HERE, "watchlist.json"), "r", encoding="utf-8") as f:
+                symbols = [i["symbol"] for i in json.load(f)["watchlist"]]
+        except Exception:
+            symbols = ["300034", "002085", "688786"]
+    cands = candidate_weights()
+    print(f"权重搜索：{len(cands)} 组候选，标的 {symbols} …")
+    res = tune_weights(symbols, bench_hist, hs300, cands, start_days=args.start)
+    print(f"\n{'排名':>4}  {'精准5d':>8}{'精准10d':>9}{'精准20d':>9}   权重(trend/money/rot/val/news)")
+    print("-" * 70)
+    for i, (w, p5, p10, p20) in enumerate(res[:10], 1):
+        print(f"{i:>4}  {p5*100:>7.1f}%{p10*100:>8.1f}%{p20*100:>8.1f}%   "
+              f"{w['trend']}/{w['money']}/{w['rotation']}/{w['valuation']}/{w['news']}")
+    best = res[0][0]
+    print(f"\n🏆 最优权重（按精准20d）：{best}")
+    if args.tune_out:
+        lines = ["# 权重调优结果\n",
+                 "| 排名 | 精准5d | 精准10d | 精准20d | trend | money | rotation | valuation | news |",
+                 "|---|---|---|---|---|---|---|---|---|"]
+        for i, (w, p5, p10, p20) in enumerate(res, 1):
+            lines.append(f"| {i} | {p5*100:.1f}% | {p10*100:.1f}% | {p20*100:.1f}% | "
+                         f"{w['trend']} | {w['money']} | {w['rotation']} | {w['valuation']} | {w['news']} |")
+        try:
+            with open(args.tune_out, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+            print(f"[tune] 已导出：{args.tune_out}")
+        except Exception as e:
+            print(f"[tune] 导出失败：{e}")
+    if args.apply:
+        try:
+            wp = os.path.join(HERE, "watchlist.json")
+            with open(wp, "r", encoding="utf-8") as f:
+                wl = json.load(f)
+            wl["weights"] = best
+            with open(wp, "w", encoding="utf-8") as f:
+                json.dump(wl, f, ensure_ascii=False, indent=2)
+            print(f"[apply] 已写回 watchlist.json 权重：{best}")
+        except Exception as e:
+            print(f"[apply] 写回失败：{e}")
 
 
 def _write_report(path: str, rows: list, all_p5, all_p10, all_p20, all_avg):
