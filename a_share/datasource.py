@@ -39,16 +39,20 @@ class DataSourceError(RuntimeError):
 
 
 def _http_get(url: str, headers: Optional[dict] = None,
-              encoding: str = "utf-8", retries: int = 3) -> str:
+              encoding: str = "utf-8", retries: int = 3,
+              timeout: float = TIMEOUT) -> str:
     """带重试的 GET。东财系接口对同一 IP 有间歇性 WAF 限流
-    （表现为 RemoteDisconnected），重试 + 退避可显著提高成功率。"""
+    （表现为 RemoteDisconnected），重试 + 退避可显著提高成功率。
+
+    timeout 可覆盖默认 TIMEOUT（板块初筛用 fast 模式缩短到 6s，避免拖死整轮）。
+    """
     last = None
     for attempt in range(retries):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": _UA,
                                                        "Accept": "*/*",
                                                        **(headers or {})})
-            with urllib.request.urlopen(req, timeout=TIMEOUT,
+            with urllib.request.urlopen(req, timeout=timeout,
                                         context=_SSL_CTX) as resp:
                 raw = resp.read()
             return raw.decode(encoding, errors="replace")
@@ -84,12 +88,13 @@ def _finalize(df: pd.DataFrame, source: str, adjusted: bool) -> pd.DataFrame:
 
 # ---------------------------------------------------------------- 日K线 三源
 
-def _kline_tencent(symbol: str, days: int = 320) -> pd.DataFrame:
+def _kline_tencent(symbol: str, days: int = 320,
+                   timeout: float = TIMEOUT, retries: int = 3) -> pd.DataFrame:
     """腾讯 web.ifzq 前复权日K（实测最稳，交易时段内含当日实时价）。"""
     code = _qt_code(symbol)
     url = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
            f"?param={code},day,,,{days},qfq")
-    data = json.loads(_http_get(url))
+    data = json.loads(_http_get(url, timeout=timeout, retries=retries))
     node = (data.get("data") or {}).get(code) or {}
     rows = node.get("qfqday") or node.get("day") or []
     if not rows:
@@ -108,13 +113,14 @@ def _kline_tencent(symbol: str, days: int = 320) -> pd.DataFrame:
                      "腾讯财经(前复权)", True)
 
 
-def _kline_eastmoney(symbol: str, days: int = 320) -> pd.DataFrame:
+def _kline_eastmoney(symbol: str, days: int = 320,
+                     timeout: float = TIMEOUT, retries: int = 3) -> pd.DataFrame:
     """东财 push2his 前复权日K（本机常被限流，仍作为一路备选）。"""
     url = ("https://push2his.eastmoney.com/api/qt/stock/kline/get"
            f"?secid={_secid(symbol)}&fields1=f1,f2,f3,f4,f5"
            "&fields2=f51,f52,f53,f54,f55,f56,f57"
            f"&klt=101&fqt=1&beg=0&end=20500101&lmt={days}")
-    data = json.loads(_http_get(url))
+    data = json.loads(_http_get(url, timeout=timeout, retries=retries))
     rows = ((data.get("data") or {}).get("klines")) or []
     if not rows:
         raise ValueError("东财返回空K线")
@@ -132,12 +138,13 @@ def _kline_eastmoney(symbol: str, days: int = 320) -> pd.DataFrame:
                      "东方财富(前复权)", True)
 
 
-def _kline_sina(symbol: str, days: int = 300) -> pd.DataFrame:
+def _kline_sina(symbol: str, days: int = 300,
+                timeout: float = TIMEOUT, retries: int = 3) -> pd.DataFrame:
     """新浪 getKLineData 日K（不复权，作为最后一路兜底并明确标注）。"""
     url = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
            f"CN_MarketData.getKLineData?symbol={_qt_code(symbol)}"
            f"&scale=240&ma=no&datalen={days}")
-    text = _http_get(url).strip()
+    text = _http_get(url, timeout=timeout, retries=retries).strip()
     if not text or text in ("null", "[]"):
         raise ValueError("新浪返回空K线")
     arr = json.loads(re.sub(r"(\w+):", r'"\1":', text))
@@ -152,14 +159,21 @@ def _kline_sina(symbol: str, days: int = 300) -> pd.DataFrame:
                      "新浪财经(不复权)", False)
 
 
-def fetch_kline(symbol: str, days: int = 320) -> pd.DataFrame:
-    """多源兜底取日K。全败则抛 DataSourceError（附各源失败原因）。"""
+def fetch_kline(symbol: str, days: int = 320, fast: bool = False) -> pd.DataFrame:
+    """多源兜底取日K。全败则抛 DataSourceError（附各源失败原因）。
+
+    fast=True 用于板块初筛：超时从 12s 缩到 6s、重试从 3 次降到 1 次，
+    让不可达/被限流的源快速失败，避免单只股票把整轮扫描拖死。
+    日常盯盘等需要稳健数据的路径保持 fast=False（默认）。
+    """
     errors = []
+    to = 6.0 if fast else TIMEOUT
+    rt = 1 if fast else 3
     for name, fn in (("腾讯", _kline_tencent),
                      ("东财", _kline_eastmoney),
                      ("新浪", _kline_sina)):
         try:
-            df = fn(symbol, days)
+            df = fn(symbol, days, timeout=to, retries=rt)
             if len(df) >= 30:
                 return df
             errors.append(f"{name}:仅{len(df)}根不足30")

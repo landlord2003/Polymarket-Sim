@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures as cf
 import json
 import os
 from datetime import datetime
@@ -132,8 +133,13 @@ def _market_score(df: pd.DataFrame) -> tuple:
 
 
 def screen_sector(label: str, candidates: list, top_n: int = 8,
-                  offline: bool = False) -> tuple:
-    """扫描单板块，返回 (TopN 行列表, price_synthetic)。
+                  offline: bool = False, fast: bool = False,
+                  progress_cb=None) -> tuple:
+    """扫描单板块，返回 (TopN 行列表, price_synthetic, pool_local)。
+
+    性能（修复「扫描时间过长」）：板块内个股**并发取数**（线程池 max_workers=8），
+    单只股票 20s 墙钟超时直接跳过，避免一只卡死拖垮整轮。
+    progress_cb(done, total, label) 可选，供面板实时显示扫描进度。
 
     重要：区分两件此前被混为一谈的事——
       · 股池来源：东财板块接口 / 本地核心池（CORE_POOL 里全是真实龙头股代码）
@@ -144,37 +150,86 @@ def screen_sector(label: str, candidates: list, top_n: int = 8,
     if offline:
         cons, pool_local = CORE_POOL.get(label, [("000001", "平安银行")]), True
     else:
-        cons, pool_local = get_constituents(label, candidates)
-
-    rows = []
-    price_synthetic = False
-    for sym, nm in cons:
-        from signal_engine import load_price
-        df, doff = load_price(sym, force_offline=offline)
-        if doff:
-            price_synthetic = True
-        s_mkt, n_mkt = _market_score(df)
-        s_vol = _volume_anomaly(df)
-        score = max(-1.0, min(1.0, 0.6 * s_mkt + 0.4 * s_vol))
+        # 板块成分股接口慢/被限流时，用线程 + 超时(25s)兜底到本地核心池，
+        # 避免单板块成分股拉取卡死、拖垮整轮扫描。
         try:
-            last = float(df["close"].iloc[-1])
-        except Exception:
-            last = 0.0
-        rows.append({
-            "symbol": sym, "name": nm, "score": round(score, 3),
-            "last": last, "mkt": round(s_mkt, 2), "vol": round(s_vol, 2),
-            "note": "；".join(n_mkt),
-        })
-    rows.sort(key=lambda x: x["score"], reverse=True)
-    return rows[:top_n], price_synthetic, pool_local
+            with cf.ThreadPoolExecutor(max_workers=1) as _ge:
+                fut = _ge.submit(get_constituents, label, candidates)
+                cons, pool_local = fut.result(timeout=25)
+        except Exception:  # noqa: BLE001
+            cons, pool_local = CORE_POOL.get(label, [("000001", "平安银行")]), True
+
+    total = len(cons)
+    price_synthetic = False
+    good_rows = []
+    failed = []
+    done = 0
+
+    def _worker(item):
+        sym, nm = item
+        from signal_engine import load_price
+        try:
+            df, doff = load_price(sym, force_offline=offline, fast=fast)
+            s_mkt, n_mkt = _market_score(df)
+            s_vol = _volume_anomaly(df)
+            score = max(-1.0, min(1.0, 0.6 * s_mkt + 0.4 * s_vol))
+            try:
+                last = float(df["close"].iloc[-1])
+            except Exception:
+                last = 0.0
+            return ({
+                "symbol": sym, "name": nm, "score": round(score, 3),
+                "last": last, "mkt": round(s_mkt, 2), "vol": round(s_vol, 2),
+                "note": "；".join(n_mkt),
+            }, doff, None)
+        except Exception as e:  # noqa: BLE001
+            return (None, False, f"行情获取失败:{e}")
+
+    with cf.ThreadPoolExecutor(max_workers=8) as ex:
+        futs = {ex.submit(_worker, it): it for it in cons}
+        for fut in cf.as_completed(futs):
+            done += 1
+            try:
+                row, doff, err = fut.result(timeout=20)
+            except cf.TimeoutError:
+                sym, nm = futs[fut]
+                row, doff, err = None, False, "行情获取超时(>20s)"
+            if row is None:
+                failed.append({"symbol": futs[fut][0], "name": futs[fut][1],
+                               "note": err})
+            else:
+                if doff:
+                    price_synthetic = True
+                good_rows.append(row)
+            if progress_cb:
+                try:
+                    progress_cb(done, total, label)
+                except Exception:  # noqa: BLE001
+                    pass
+
+    good_rows.sort(key=lambda x: x["score"], reverse=True)
+    rows = good_rows[:top_n]
+    # 成功样本不足 top_n 时，用失败项补足并标注，避免板块显示空白
+    if len(rows) < top_n:
+        for f in failed:
+            if len(rows) >= top_n:
+                break
+            rows.append({**f, "score": 0.0, "last": 0.0,
+                         "mkt": 0.0, "vol": 0.0})
+    return rows, price_synthetic, pool_local
 
 
 def run_screener(top_n: int = 8, offline: bool = False,
-                 sectors: Optional[list] = None) -> dict:
+                 sectors: Optional[list] = None,
+                 fast: bool = True,
+                 progress_cb=None) -> dict:
     """跑板块选股。
 
     sectors: 指定板块标签列表（来自主页面板块下拉框勾选）。为 None 时跑默认
     5 板块；为非空列表时只跑勾选的板块（含 extra_sectors 里的「其他板块」）。
+
+    fast: 初筛默认 True（缩短超时/重试，宁可丢几只也要快）；想要更稳健传 False。
+    progress_cb(done, total, label): 可选进度回调，供面板实时显示。
 
     返回 {label: {"rows":[...], "offline":价格是否合成, "pool_local":股池是否本地池}}。
     """
@@ -185,11 +240,22 @@ def run_screener(top_n: int = 8, offline: bool = False,
     else:
         chosen = [s for s in all_sec if s.get("default")]
     result = {}
-    for s in chosen:
-        rows, price_synthetic, pool_local = screen_sector(
-            s["label"], s["candidates"], top_n=top_n, offline=offline)
-        result[s["label"]] = {"rows": rows, "offline": price_synthetic,
-                              "pool_local": pool_local}
+
+    # 板块间也并发（每板块内部已并发取数），进一步压缩总时长
+    with cf.ThreadPoolExecutor(max_workers=min(4, max(1, len(chosen)))) as ex:
+        futs = {}
+        for s in chosen:
+            futs[ex.submit(screen_sector, s["label"], s["candidates"],
+                           top_n, offline, fast, progress_cb)] = s["label"]
+        for fut in cf.as_completed(futs):
+            label = futs[fut]
+            try:
+                rows, price_synthetic, pool_local = fut.result()
+            except Exception as e:  # noqa: BLE001
+                rows, price_synthetic, pool_local = [], True, False
+                print(f"[screener] {label} 扫描异常: {e}")
+            result[label] = {"rows": rows, "offline": price_synthetic,
+                             "pool_local": pool_local}
     return result
 
 

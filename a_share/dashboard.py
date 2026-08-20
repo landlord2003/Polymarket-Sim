@@ -358,7 +358,7 @@ function showDetail(symbol, name){
       else { news += '<li class="tag-na">暂无新闻（需联网）</li>'; }
       news += '</ul>';
       const html = '<button class="close" onclick="closeModal()">关闭</button>'
-        + '<button class="add" onclick="addToWatchlist(\''+symbol+'\',\''+name.replace(/'/g,'')+'\')">＋加入自选股</button>'
+        + '<button class="add" data-sym="'+symbol+'" data-name="'+name.replace(/"/g, "")+'" onclick="addToWatchlist(this.dataset.sym, this.dataset.name)">＋加入自选股</button>'
         + '<h2>'+symbol+' '+name+'</h2>'
         + '<div class="sub">'+srcTag+' ｜ 数据日 '+(d.data_date||'—')+'</div>'
         + kpi
@@ -396,7 +396,7 @@ function showTrade(symbol, name){
         + '<label>方向 <select id="tSide"><option value="buy">买入</option><option value="sell">卖出</option></select></label>'
         + '<label>价格 <input id="tPrice" type="number" step="0.01" value="'+(px?px.toFixed(2):'')+'"></label>'
         + '<label>数量(股,100倍数) <input id="tQty" type="number" step="100" value="100"></label>'
-        + '<button onclick="submitTrade(\''+symbol+'\',\''+name+'\')">确认</button>'
+        + '<button data-sym="'+symbol+'" data-name="'+name.replace(/"/g, "")+'" onclick="submitTrade(this.dataset.sym, this.dataset.name)">确认</button>'
         + '</div><div class="res" id="tRes"></div>'
         + '<div id="tBook"></div>';
       openModal(html);

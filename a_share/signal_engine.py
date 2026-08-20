@@ -64,19 +64,22 @@ def _market_of(symbol: str) -> str:
 
 def load_price(symbol: str, start: str = "20240101",
                end: Optional[str] = None,
-               force_offline: bool = False) -> tuple[pd.DataFrame, bool]:
+               force_offline: bool = False,
+               fast: bool = False) -> tuple[pd.DataFrame, bool]:
     """返回 (df, offline)。offline=True 表示使用合成数据，不应据此产生真实信号。
 
     force_offline=True 时直接走合成兜底、不触网（用于「离线验证」跑通链路）。
+    fast=True 时交给 datasource.fetch_kline(fast=True)：缩短超时与重试，
+    用于板块初筛这类「宁可丢几只也要快」的场景；日常盯盘保持 fast=False。
 
     取数链路（2026-08-19 重构）：datasource.fetch_kline 多源兜底
-    腾讯前复权 → 东财前复权 → 新浪不复权，各源带 3 次重试。
+    腾讯前复权 → 东财前复权 → 新浪不复权，各源带 3 次重试（fast 模式 1 次）。
     真实来源写入 df.attrs['source']；若全部失败，失败原因写入
     df.attrs['fallback_reason'] 并回退合成，**绝不静默伪装成真实行情**。
     """
     if not force_offline:
         try:
-            df = ds.fetch_kline(symbol)
+            df = ds.fetch_kline(symbol, fast=fast)
             if start:
                 try:
                     df = df[df.index >= pd.to_datetime(start)]

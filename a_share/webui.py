@@ -54,22 +54,35 @@ _state = {
     "html": None,
     "error": None,
     "log": [],
+    "progress": None,  # 扫描进度: {"label":..., "done":..., "total":...}
 }
 _lock = threading.Lock()
 
 
-def _placeholder_html() -> str:
+def _placeholder_html(progress: dict = None) -> str:
+    if progress:
+        label = progress.get("label", "")
+        done = progress.get("done", 0)
+        total = progress.get("total", 0)
+        pct = int(done / total * 100) if total else 0
+        bar = ("<div style='width:240px;height:8px;background:#1c2530;"
+               "border-radius:4px;margin:14px auto 6px;overflow:hidden'>"
+               f"<div style='width:{pct}%;height:100%;background:#1f6feb'></div></div>")
+        body = (f"<h2>🔍 扫描中…</h2>"
+                f"<p>{label}　{done}/{total}</p>{bar}"
+                "<p style='color:#6b7888;font-size:12px'>并发取数中，页面会自动刷新</p>")
+    else:
+        body = ("<h2>📡 尚未运行</h2>"
+                "<p>点击上方「日常盯盘」或「板块选股」开始扫描</p>"
+                "<p style='color:#6b7888;font-size:12px'>"
+                "首次联网取数约需 30–90 秒，请耐心等待，页面会自动刷新</p>")
     return (
         "<!DOCTYPE html><html lang='zh-CN'><head><meta charset='utf-8'>"
         "<style>body{background:#0f1419;color:#9fb0c0;font-family:-apple-system,"
         "'Microsoft YaHei',sans-serif;display:flex;align-items:center;"
         "justify-content:center;height:60vh;text-align:center;margin:0}"
         "h2{color:#e6e6e6} p{font-size:13px}</style></head><body>"
-        "<div><h2>📡 尚未运行</h2>"
-        "<p>点击上方「日常盯盘」或「板块选股」开始扫描</p>"
-        "<p style='color:#6b7888;font-size:12px'>"
-        "首次联网取数约需 30–90 秒，请耐心等待，页面会自动刷新</p></div>"
-        "</body></html>"
+        f"<div>{body}</div></body></html>"
     )
 
 
@@ -349,6 +362,7 @@ function poll(){
     ph.textContent=(s.is_trading?'盘中 ':'休市 ')+(s.phase||'')+' '+(s.server_time||'');
     ph.className='pill '+(s.is_trading?'trading':'phase');
     if(s.error){setStatus('错误：'+s.error);}
+    else if(s.running&&s.progress){setStatus('扫描中：'+s.progress.label+' '+s.progress.done+'/'+s.progress.total);}
     else if(s.log&&s.log.length){setStatus(s.log[s.log.length-1]+countdownText());}
     autoTick();
     if(!s.running&&s.finished_at&&s.finished_at!==lastFinished){
@@ -427,6 +441,7 @@ def _run_scan(mode: str, offline: bool, push: bool, sectors: list = None):
             _state["finished_at"] = None
             _state["error"] = None
             _state["log"] = ["开始扫描…"]
+            _state["progress"] = None
 
         watch = load_watchlist()
         weights = watch.get("weights")
@@ -445,7 +460,14 @@ def _run_scan(mode: str, offline: bool, push: bool, sectors: list = None):
         scr = None
         show_wl = mode in ("daily", "both")
         if mode in ("screener", "both"):
-            scr = run_screener(offline=offline, sectors=sectors)
+
+            def _progress(done, total, label):
+                with _lock:
+                    _state["progress"] = {"done": done, "total": total,
+                                          "label": label}
+
+            scr = run_screener(offline=offline, sectors=sectors,
+                               progress_cb=_progress)
 
         mode_tag = "offline" if (offline or any_offline) else "online"
         html = render_dashboard(results if show_wl else [],
@@ -474,6 +496,7 @@ def _run_scan(mode: str, offline: bool, push: bool, sectors: list = None):
     finally:
         with _lock:
             _state["running"] = False
+            _state["progress"] = None
 
 
 CONTROL_HTML = """<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
@@ -663,19 +686,28 @@ class Handler(BaseHTTPRequestHandler):
             # 客户端（浏览器）中断连接属正常情况，忽略以免刷屏
             pass
 
+    def handle_one_request(self):
+        # 吞掉请求读取阶段浏览器中断连接产生的异常 (WinError 10053/10054)，
+        # 否则会冒泡到 socketserver 打印整段 traceback 刷屏。
+        try:
+            super().handle_one_request()
+        except (ConnectionAbortedError, ConnectionResetError,
+                BrokenPipeError, OSError):
+            self.close_connection = True
+
     def do_GET(self):
         p = urlparse(self.path)
         if p.path in ("/", "/index.html"):
             self._send(200, control_html(), "text/html; charset=utf-8")
         elif p.path == "/api/board":
             with _lock:
-                html = _state["html"] or _placeholder_html()
+                html = _state["html"] or _placeholder_html(_state["progress"])
             self._send(200, html, "text/html; charset=utf-8")
         elif p.path == "/api/status":
             with _lock:
                 d = {k: _state[k] for k in
                      ("running", "mode", "offline", "push",
-                      "started_at", "finished_at", "error", "log")}
+                      "started_at", "finished_at", "error", "log", "progress")}
             try:
                 phase, is_trading = market_phase()
             except Exception:  # noqa: BLE001
