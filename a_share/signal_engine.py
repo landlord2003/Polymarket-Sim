@@ -20,14 +20,28 @@ try:
 except ImportError:  # 直接以脚本方式运行时
     import datasource as ds  # type: ignore
 
+# 阶段1 免费多源因子（AkShare + 本地/指数计算，见 akshare_factors.py）
+try:
+    from . import akshare_factors as af  # type: ignore
+except ImportError:  # 直接以脚本方式运行时
+    import akshare_factors as af  # type: ignore
+
 import os as _os
 import json as _json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
 
-# 维度权重（可在调用处覆盖）
-DEFAULT_WEIGHTS = {"market": 0.35, "money": 0.30, "sector": 0.20, "news": 0.15}
+# 维度权重（阶段1：五因子 + 新闻；regime 作为整体乘数单独施加）
+# trend=多周期动量+RS+RSI/MA/Boll；money=真实主力净流入；
+# rotation=板块/风格轮动；valuation=估值分位；news=新闻情绪。
+DEFAULT_WEIGHTS = {
+    "trend": 0.28,
+    "money": 0.24,
+    "rotation": 0.18,
+    "valuation": 0.15,
+    "news": 0.15,
+}
 
 POS_WORDS = ["利好", "增持", "中标", "获批", "回购", "签约", "增长", "突破", "订单", "扩产", "合作"]
 NEG_WORDS = ["利空", "减持", "处罚", "诉讼", "亏损", "下调", "警示", "退市", "问询", "违规", "停产"]
@@ -38,10 +52,12 @@ class StockResult:
     symbol: str
     name: str
     offline: bool = False
-    market_score: float = 0.0
-    money_score: float = 0.0
-    sector_score: float = 0.0
-    news_score: float = 0.0
+    market_score: float = 0.0       # 趋势：多周期动量+RS+RSI/MA/Boll
+    money_score: float = 0.0        # 真实主力净流入
+    sector_score: float = 0.0       # 板块/风格轮动
+    valuation_score: float = 0.0    # 估值分位（价格代理）
+    news_score: float = 0.0         # 新闻情绪
+    regime_score: float = 0.0       # 大盘状态（趋势+宽度），用作整体乘数
     composite: float = 0.0
     signal: str = "观望"
     signal_emoji: str = "🟡"
@@ -119,11 +135,17 @@ def load_price(symbol: str, start: str = "20240101",
     return df, True
 
 
-def dim_market(df: pd.DataFrame) -> tuple[float, list]:
+def dim_trend(df: pd.DataFrame, idx_df: Optional[pd.DataFrame] = None) -> tuple[float, list]:
+    """趋势维度（阶段1 增强）：RSI/MA20/布林 + 多周期动量(5/20/60) + RS(对沪深300)。
+
+    多周期动量捕捉不同持仓周期的趋势强度，RS 表达相对大盘强弱，
+    二者是此前缺失的「非价量派生」信息源（RSI/MA/布林仍同源价量，但动量/RS补了维度）。
+    idx_df 为预取的沪深300历史（回测只取一次，避免每日重复联网）。
+    """
     try:
         close = df["close"]
-        if len(close) < 30:
-            return 0.0, ["行情数据不足"]
+        if len(close) < 60:
+            return 0.0, ["趋势：K线不足60日"]
         delta = close.diff()
         gain = delta.clip(lower=0).rolling(14).mean()
         loss = (-delta.clip(upper=0)).rolling(14).mean()
@@ -134,19 +156,43 @@ def dim_market(df: pd.DataFrame) -> tuple[float, list]:
         std = close.rolling(20).std()
         lower = mid - 2 * std
         score, notes = 0.0, []
+
+        # —— RSI/MA/布林（原行情逻辑）——
         if rsi < 30:
-            score += 0.4; notes.append(f"RSI超卖{rsi:.0f}")
+            score += 0.25; notes.append(f"RSI超卖{rsi:.0f}")
         elif rsi < 45:
-            score += 0.2; notes.append(f"RSI偏低{rsi:.0f}")
+            score += 0.12; notes.append(f"RSI偏低{rsi:.0f}")
         elif rsi > 70:
-            score -= 0.4; notes.append(f"RSI超买{rsi:.0f}")
+            score -= 0.25; notes.append(f"RSI超买{rsi:.0f}")
         if ma20.iloc[-1] > ma20.iloc[-2] and close.iloc[-1] > ma20.iloc[-1]:
-            score += 0.3; notes.append("站上MA20且上行")
+            score += 0.2; notes.append("站上MA20且上行")
         if close.iloc[-1] <= lower.iloc[-1] * 1.02:
-            score += 0.3; notes.append("触及布林下轨")
+            score += 0.2; notes.append("触及布林下轨")
+
+        # —— 多周期动量（5/20/60日）——
+        mom5 = float(close.iloc[-1] / close.iloc[-6] - 1)
+        mom20 = float(close.iloc[-1] / close.iloc[-21] - 1)
+        mom60 = float(close.iloc[-1] / close.iloc[-61] - 1)
+        # 短期动量给更高权重（更灵敏），长期动量确认趋势
+        mom_score = (np.clip(mom5 / 0.08, -1, 1) * 0.5
+                     + np.clip(mom20 / 0.15, -1, 1) * 0.35
+                     + np.clip(mom60 / 0.30, -1, 1) * 0.15)
+        score += 0.35 * mom_score
+        notes.append(f"动量 5/20/60日 {mom5:+.1%}/{mom20:+.1%}/{mom60:+.1%}")
+
+        # —— RS 相对强度（对沪深300）——
+        try:
+            idx = idx_df if idx_df is not None else ds.fetch_index_kline("sh000300", days=60)
+            ret_mkt = float(idx["close"].iloc[-1] / idx["close"].iloc[-20] - 1)
+            rs_score = np.clip((mom20 - ret_mkt) / 0.10, -1, 1)
+            score += 0.15 * rs_score
+            notes.append(f"RS(对沪深300) {mom20 - ret_mkt:+.1%}")
+        except Exception:  # noqa: BLE001
+            notes.append("RS：沪深300源失败")
+
         return max(-1.0, min(1.0, score)), notes
-    except Exception as e:
-        return 0.0, [f"行情数据缺失:{e}"]
+    except Exception as e:  # noqa: BLE001
+        return 0.0, [f"趋势数据缺失:{type(e).__name__}"]
 
 
 def live_boll_lower(df: pd.DataFrame, window: int = 20, k: float = 2.0) -> Optional[float]:
@@ -206,14 +252,18 @@ def money_proxy(df: pd.DataFrame, window: int = 5) -> tuple[float, list]:
         return 0.0, [f"资金代理计算失败:{type(e).__name__}"]
 
 
-def dim_money(symbol: str, df: Optional[pd.DataFrame] = None) -> tuple[float, list]:
-    """资金维度：优先东财真实主力净流入，失败降级为本地量价代理指标。
+def dim_money(symbol: str, df: Optional[pd.DataFrame] = None,
+              inflow_series: Optional[list] = None) -> tuple[float, list]:
+    """资金维度（阶段1）：真实主力净流入优先，失败回退本地量价代理。
 
-    降级后仍给出有效评分，并在备注明确标注「代理」，避免出现
-    「资金数据缺失」这种既没分数也没解释的黑洞。
+    inflow_series 由调用方预取（回测只取一次避免重复触网）；为 None 时
+    实时尝试 af.fetch_main_inflow（AkShare→东财），再失败用 money_proxy。
     """
-    try:
-        flows = ds.fetch_money_flow(symbol, limit=10)
+    flows = inflow_series
+    src = "预取序列"
+    if flows is None:
+        flows, src = af.fetch_main_inflow(symbol, limit=10)
+    if flows:
         recent = list(reversed(flows[-5:]))          # 最新在前
         net = sum(recent)
         consec = 0
@@ -223,16 +273,72 @@ def dim_money(symbol: str, df: Optional[pd.DataFrame] = None) -> tuple[float, li
             else:
                 break
         wan = net / 1e4
+        tag = f"({src})"
         if net > 0 and consec >= 3:
-            return 0.6, [f"主力连续{consec}日净流入(近5日{wan:+.0f}万)"]
+            return 0.6, [f"主力连续{consec}日净流入{tag}(近5日{wan:+.0f}万)"]
         if net > 0:
-            return 0.3, [f"主力净流入(近5日{wan:+.0f}万)"]
-        return -0.5, [f"主力净流出(近5日{wan:+.0f}万)"]
-    except Exception:  # noqa: BLE001
-        if df is not None:
-            score, notes = money_proxy(df)
-            return score, notes + ["(东财资金接口限流，已用本地代理)"]
-        return 0.0, ["资金数据不可用(接口限流且无K线可代理)"]
+            return 0.3, [f"主力净流入{tag}(近5日{wan:+.0f}万)"]
+        return -0.5, [f"主力净流出{tag}(近5日{wan:+.0f}万)"]
+    # 真实源全失败 → 本地代理
+    if df is not None:
+        score, notes = money_proxy(df)
+        return score, notes + ["(真实资金接口限流，已用本地量价代理)"]
+    return 0.0, ["资金数据不可用(接口限流且无K线可代理)"]
+
+
+def dim_valuation(symbol: str, df: pd.DataFrame,
+                  valuation_pct: Optional[float] = None) -> tuple[float, list]:
+    """估值维度（阶段1）：估值分位越低越偏多。
+
+    valuation_pct 由调用方预取（回测只算一次）；为 None 时实时计算。
+    返回 (score∈[-1,1], notes)。
+    """
+    pct, src = (valuation_pct, "预取")
+    if pct is None:
+        pct, src = af.fetch_valuation_percentile(symbol, df)
+    if pct is None:
+        return 0.0, [f"估值不可用({src})"]
+    # 分位越低越便宜→越偏多：0分位 +0.8，1分位 -0.8
+    score = float(np.clip(0.5 - pct, -1.0, 1.0) * 1.6)
+    notes = [f"估值分位 {pct:.0%} {src}（低=便宜→偏多）"]
+    return score, notes
+
+
+def dim_sector_rotation(symbol: str, df: pd.DataFrame,
+                        bench_hist: Optional[dict] = None,
+                        target_date=None) -> tuple[float, list]:
+    """板块/风格轮动维度（阶段1）：个股20日动量 − 多基准20日动量均值。
+
+    bench_hist 为预取的指数历史字典；target_date 为该日日期（walk-forward 截止日）。
+    返回 (score∈[-1,1], notes)。
+    """
+    if bench_hist is None or target_date is None:
+        try:
+            bench_hist = af.fetch_benchmark_histories()
+            target_date = df.index[-1]
+        except Exception:  # noqa: BLE001
+            return 0.0, ["轮动：基准获取失败"]
+    if not bench_hist:
+        return 0.0, ["轮动：无可用基准"]
+    return af.sector_rotation_score(df, bench_hist, target_date)
+
+
+def dim_regime(bench_hist: Optional[dict] = None,
+               target_date=None,
+               breadth: Optional[tuple] = None) -> tuple[float, list]:
+    """大盘状态维度（阶段1）：沪深300 60日趋势 (+可选市场宽度) 作 regime 乘数。
+
+    返回 (regime_score∈[-1,1], notes)。
+    """
+    if bench_hist is None or target_date is None:
+        try:
+            bench_hist = af.fetch_benchmark_histories()
+            target_date = pd.Timestamp.today().normalize()
+        except Exception:  # noqa: BLE001
+            return 0.0, ["regime：基准获取失败"]
+    if not bench_hist:
+        return 0.0, ["regime：无可用基准"]
+    return af.market_regime(bench_hist, target_date, breadth)
 
 
 def dim_sector(stock_df: pd.DataFrame, offline: bool = False) -> tuple[float, list]:
@@ -429,47 +535,66 @@ def analyze_stock(symbol: str, name: str = "", df: Optional[pd.DataFrame] = None
                   rules: Optional[dict] = None,
                   holding: bool = False,
                   force_offline: bool = False,
-                  prev_signal: Optional[str] = None) -> StockResult:
+                  prev_signal: Optional[str] = None,
+                  breadth: Optional[tuple] = None) -> StockResult:
     """对单只股票跑四维度评分。risk_gate 为可选函数 signal->(bool, reason)。
 
     force_offline=True 或联网取数失败时，用合成数据「完整跑通全流程」并返回
     带分数/价位/信号的结果（offline=True 仅用于标注与抑制推送），
     不再返回空壳结果——否则看板会一片空白，看着像"没有结果"。
     """
-    weights = weights or DEFAULT_WEIGHTS
+    # 合并默认权重与调用方传入权重，缺失的维度键保留默认，避免 KeyError
+    merged = dict(DEFAULT_WEIGHTS)
+    if isinstance(weights, dict):
+        merged.update({k: v for k, v in weights.items() if k in DEFAULT_WEIGHTS})
+    weights = merged
     if df is None:
         df, offline = load_price(symbol, force_offline=force_offline)
     else:
         offline = False
 
-    sm, n_m = dim_market(df)
-    ss, n_s = dim_sector(df, offline=offline)
+    target_date = df.index[-1]
+    # 趋势（本地量价，离线安全）
+    sm, n_m = dim_trend(df)
     if offline:
-        # 离线不触网：资金维度改用本地量价代理（仍有分数），消息维度置中性
+        # 离线不触网：资金/估值/轮动/regime 全部中性，仅趋势+消息(中性)有分
         sz, n_z = money_proxy(df)
         n_z = [n + "（离线代理）" for n in n_z]
+        sv, n_v = (0.0, ["估值：离线跳过(中性0)"])
+        ss, n_s = (0.0, ["轮动：离线跳过(中性0)"])
+        sreg, n_reg = (0.0, ["regime：离线跳过(中性0)"])
         sn, n_n = dim_news(symbol, offline=True)
     else:
         sz, n_z = dim_money(symbol, df=df)
+        sv, n_v = dim_valuation(symbol, df)
+        ss, n_s = dim_sector_rotation(symbol, df, target_date=target_date)
+        # breadth 由调用方每轮只取一次传入（全A快照慢）；未传入则只用趋势
+        sreg, n_reg = dim_regime(target_date=target_date, breadth=breadth)
         sn, n_n = dim_news(symbol)
 
-    composite = (weights["market"] * sm + weights["money"] * sz +
-                 weights["sector"] * ss + weights["news"] * sn)
-    composite = max(-1.0, min(1.0, composite))
+    # 五因子方向性合成（regime 单独作乘数）
+    comp_dir = (weights["trend"] * sm + weights["money"] * sz +
+                weights["rotation"] * ss + weights["valuation"] * sv +
+                weights["news"] * sn)
+    comp_dir = max(-1.0, min(1.0, comp_dir))
+    # regime 乘数：熊市(reg=-1)压到 0.55，牛市(reg=+1)不压制
+    regime_factor = 0.55 + 0.45 * ((sreg + 1.0) / 2.0)
+    composite = max(-1.0, min(1.0, comp_dir * regime_factor))
     signal, emoji = _map_signal_hyst(composite, prev_signal)
 
     last_price = float(df["close"].iloc[-1])
     # 决策价 = 昨收（最近完成交易日收盘），盘中实时价只用于显示与提示
     decision_price = float(df["close"].iloc[-2]) if len(df) >= 2 else last_price
 
+    all_notes = n_m + n_z + n_v + n_s + n_reg + n_n
     # —— 个性化规则叠加（动态布林下轨、元力建仓区间等）——
     if rules:
         composite, signal, emoji, pnotes = _apply_personal_rules(
-            rules, decision_price, composite, signal, n_m + n_z + n_s + n_n,
+            rules, decision_price, composite, signal, all_notes,
             holding=holding, df=df, live_price=last_price,
             prev_signal=prev_signal)
     else:
-        pnotes = n_m + n_z + n_s + n_n
+        pnotes = all_notes
 
     risk_pass, risk_reason = True, "ok"
     if risk_gate is not None:
@@ -501,7 +626,8 @@ def analyze_stock(symbol: str, name: str = "", df: Optional[pd.DataFrame] = None
 
     res = StockResult(
         symbol=symbol, name=name, offline=offline,
-        market_score=sm, money_score=sz, sector_score=ss, news_score=sn,
+        market_score=sm, money_score=sz, sector_score=ss,
+        valuation_score=sv, news_score=sn, regime_score=sreg,
         composite=composite, signal=signal, signal_emoji=emoji,
         notes=pnotes,
         risk_pass=risk_pass, risk_reason=risk_reason,
@@ -536,7 +662,8 @@ def save_signal_state(results: list, as_of: Optional[str] = None) -> str:
             "name": r.name, "signal": r.signal, "emoji": r.signal_emoji,
             "composite": r.composite,
             "market_score": r.market_score, "money_score": r.money_score,
-            "sector_score": r.sector_score, "news_score": r.news_score,
+            "sector_score": r.sector_score, "valuation_score": r.valuation_score,
+            "news_score": r.news_score, "regime_score": r.regime_score,
             "last_price": r.last_price, "source": r.source,
             "data_date": r.data_date, "offline": r.offline,
             "notes": r.notes, "as_of": as_of,

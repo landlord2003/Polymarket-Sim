@@ -124,10 +124,10 @@ def _volume_anomaly(df: pd.DataFrame) -> float:
 
 
 def _market_score(df: pd.DataFrame) -> tuple:
-    """复用 signal_engine 的行情维度逻辑（RSI/MA/布林）。"""
-    from signal_engine import dim_market
+    """复用 signal_engine 的趋势维度逻辑（RSI/MA/布林 + 多周期动量 + RS）。"""
+    from signal_engine import dim_trend
     try:
-        return dim_market(df)
+        return dim_trend(df)
     except Exception as e:
         return 0.0, [f"行情数据缺失:{e}"]
 

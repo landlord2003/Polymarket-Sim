@@ -98,9 +98,10 @@
     }
   ],
   "weights": {
-    "market": 0.35,
-    "money": 0.3,
-    "sector": 0.2,
+    "trend": 0.28,
+    "money": 0.24,
+    "rotation": 0.18,
+    "valuation": 0.15,
     "news": 0.15
   }
 }

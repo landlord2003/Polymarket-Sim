@@ -27,6 +27,8 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
+import akshare_factors as af  # 阶段1 免费多源因子（市场宽度等）
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
@@ -88,11 +90,19 @@ def get_watchlist_signals(watch: dict, offline: bool = False,
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     if offline or not state_fresh(state, max_age_hours):
+        # 每轮只取一次市场宽度（东财接口慢且易限流），避免每只股票重复调用
+        breadth = None
+        if not offline:
+            try:
+                breadth = af.fetch_market_breadth()
+            except Exception:
+                breadth = None
         results = []
         for item in watch["watchlist"]:
             r = analyze_stock(item["symbol"], item.get("name", ""),
                               rules=item.get("rules"), weights=weights,
-                              holding=holding, force_offline=offline)
+                              holding=holding, force_offline=offline,
+                              breadth=breadth)
             results.append(r)
         as_of = save_signal_state(results) if not offline else now
         return results, as_of
@@ -105,7 +115,8 @@ def get_watchlist_signals(watch: dict, offline: bool = False,
         s = state.get("symbols", {}).get(sym)
         if not s:
             r = analyze_stock(sym, name, rules=item.get("rules"), weights=weights,
-                              holding=holding, force_offline=offline)
+                              holding=holding, force_offline=offline,
+                              breadth=None)
             results.append(r)
             continue
         r = StockResult(

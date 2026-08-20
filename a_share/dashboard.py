@@ -103,8 +103,8 @@ def _watchlist_table(results) -> str:
             f'<td class="score">{_bar(r.composite)}<small>{_fmt(r.composite)}</small></td>'
             f'<td class="px">{price}<br>{pct_html}</td>'
             f'<td class="src">{src_html}<br><small>{escape(ddate)}</small></td>'
-            f'<td class="dims">行情{_fmt(r.market_score)} 资金{_fmt(r.money_score)}<br>'
-            f"板块{_fmt(r.sector_score)} 消息{_fmt(r.news_score)}</td>"
+            f'<td class="dims">趋势{_fmt(r.market_score)} 资金{_fmt(r.money_score)} 轮动{_fmt(r.sector_score)}<br>'
+            f"估值{_fmt(r.valuation_score)} 消息{_fmt(r.news_score)} 大盘{_fmt(r.regime_score)}</td>"
             f'<td class="notes">{escape(notes)}{risk}</td>'
             f'<td class="acts">'
             f'<button class="dtl" onclick="showDetail(\'{sym}\',\'{nm}\')">详情</button>'
@@ -273,7 +273,7 @@ def render_dashboard(results, screener_result: dict = None,
         "<table><thead><tr><th>代码</th><th>名称</th><th>信号</th>"
         "<th>综合分</th><th>最新价<br><small>涨跌</small></th>"
         "<th>数据源<br><small>数据日</small></th>"
-        "<th>四维</th><th>明细/规则</th><th>操作</th></tr></thead>"
+        "<th>六因子</th><th>明细/规则</th><th>操作</th></tr></thead>"
         f"<tbody>{wl}</tbody></table></section>"
         if show_watchlist else ""
     )
@@ -286,7 +286,7 @@ def render_dashboard(results, screener_result: dict = None,
         "document.write('<script src=\"https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js\"><\\/script>');}"
         "</script></head><body>"
         "<div class=\"wrap\">"
-        f"<header><h1>📊 A股四维度信号看板</h1>"
+        f"<header><h1>📊 A股信号看板（六因子）</h1>"
         f'<div class="meta">生成时间 {ts}'
         f'<span class="badge {badge_cls}">{badge_txt}</span></div>'
         f"{summary}</header>"
