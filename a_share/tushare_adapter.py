@@ -87,6 +87,7 @@ def fetch_money_flow_tushare(symbol: str) -> Optional[dict]:
     """Tushare 个股资金流（最新一日）：主力/超大单/大单/中单/小单 净流入(元)。
 
     返回与 datasource.fetch_fund_flow_breakdown 同形 dict；不可用返回 None。
+    Tushare 金额字段单位为「千元」，换算为元。主力 = 大单 + 特大单 净额。
     """
     tok = _load_token()
     if not tok:
@@ -102,15 +103,21 @@ def fetch_money_flow_tushare(symbol: str) -> Optional[dict]:
         if df is None or len(df) == 0:
             return None
         row = df.iloc[0]
-        # 单位：Tushare 资金流为「千元」，换算为元
         k = 1_000.0
+        lg = (float(row.get("buy_lg_amount", 0) or 0)
+              - float(row.get("sell_lg_amount", 0) or 0)) * k
+        elg = (float(row.get("buy_elg_amount", 0) or 0)
+               - float(row.get("sell_elg_amount", 0) or 0)) * k
+        md = (float(row.get("buy_md_amount", 0) or 0)
+              - float(row.get("sell_md_amount", 0) or 0)) * k
+        sm = (float(row.get("buy_sm_amount", 0) or 0)
+              - float(row.get("sell_sm_amount", 0) or 0)) * k
         return {
-            "main": float(row.get("buy_sm_amount", 0) - row.get("sell_sm_amount", 0)) * k
-                    if False else float(row.get("main_net_in", 0) or 0) * k,
-            "huge": float(row.get("hg_net_in", 0) or 0) * k,
-            "big": float(row.get("lg_net_in", 0) or 0) * k,
-            "mid": float(row.get("md_net_in", 0) or 0) * k,
-            "retail": float(row.get("sm_net_in", 0) or 0) * k,
+            "main": lg + elg,
+            "huge": elg,
+            "big": lg,
+            "mid": md,
+            "retail": sm,
             "source": "Tushare(moneyflow)",
         }
     except Exception:  # noqa: BLE001

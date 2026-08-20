@@ -32,6 +32,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
 
+HERE = _os.path.dirname(_os.path.abspath(__file__))
+MONEYFLOW_CACHE_DIR = _os.path.join(HERE, "data", "moneyflow")
+
 # 维度权重（阶段1：五因子 + 新闻；regime 作为整体乘数单独施加）
 # trend=多周期动量+RS+RSI/MA/Boll；money=真实主力净流入；
 # rotation=板块/风格轮动；valuation=估值分位；news=新闻情绪。
@@ -252,6 +255,64 @@ def money_proxy(df: pd.DataFrame, window: int = 5) -> tuple[float, list]:
         return 0.0, [f"资金代理计算失败:{type(e).__name__}"]
 
 
+def money_score_from_inflow(series) -> float:
+    """把「日度主力净流入(元)序列」映射成连续资金强度分 [-1,1]。
+
+    用 5 日累计净额相对其自身 60 日分布的 z 分数（尺度无关，不同市值股可比较）。
+    仅供回测/特征使用；series 必须已切片到 target_date 当日及之前（无未来函数）。
+    """
+    s = pd.Series(series).dropna()
+    if len(s) < 6:
+        return 0.0
+    daily = s.iloc[-60:] if len(s) >= 60 else s
+    mean_d = float(daily.mean())
+    std_d = float(daily.std())
+    if std_d < 1e-9:
+        recent = float(s.iloc[-5:].sum())
+        return max(-0.3, min(0.3, (recent / (abs(recent) + 1e-9)) * 0.3))
+    recent5 = float(s.iloc[-5:].sum())
+    base5 = 5.0 * mean_d
+    z = (recent5 - base5) / (std_d * (5.0 ** 0.5) + 1e-9)
+    return max(-1.0, min(1.0, z / 3.0))
+
+
+def proxy_inflow_series(df: pd.DataFrame) -> pd.Series:
+    """从 K 线构造「日度伪主力净流入(元)」序列（与 money_proxy 同源逻辑）：
+
+    上涨日净额≈当日成交额(正)，下跌日≈负，平盘≈0。用于回测 proxy 模式，
+    与真实资金流走同一套 money_score_from_inflow 打分，保证 A/B 口径一致。
+    """
+    close, high, low, vol = df["close"], df["high"], df["low"], df["volume"]
+    tp = (high + low + close) / 3.0
+    amount = tp * vol
+    chg = close.diff().fillna(0.0)
+    net = np.where(chg > 0, amount.values,
+                   np.where(chg < 0, -amount.values, 0.0))
+    return pd.Series(net, index=df.index)
+
+
+def load_moneyflow_cache(symbol: str) -> Optional[pd.Series]:
+    """读取 Tushare 抓取的资金流缓存 CSV（data/moneyflow/<symbol>.csv）。
+
+    返回 日度主力净流入(元) 的 Series（index=datetime，已排序）。无 tushare 依赖。
+    文件不存在返回 None。
+    """
+    p = _os.path.join(MONEYFLOW_CACHE_DIR, f"{symbol}.csv")
+    if not _os.path.exists(p):
+        return None
+    try:
+        d = pd.read_csv(p)
+        d["trade_date"] = d["trade_date"].astype(str)
+        idx = pd.to_datetime(d["trade_date"], format="%Y%m%d", errors="coerce")
+        mask = ~idx.isna()
+        vals = d["main_net_in"].astype(float).values[mask]
+        out_idx = idx[mask]
+        s = pd.Series(vals, index=out_idx).sort_index()
+        return s
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def dim_money(symbol: str, df: Optional[pd.DataFrame] = None,
               inflow_series: Optional[list] = None) -> tuple[float, list]:
     """资金维度（阶段1）：真实主力净流入优先，失败回退本地量价代理。
@@ -259,6 +320,10 @@ def dim_money(symbol: str, df: Optional[pd.DataFrame] = None,
     inflow_series 由调用方预取（回测只取一次避免重复触网）；为 None 时
     实时尝试 af.fetch_main_inflow（AkShare→东财），再失败用 money_proxy。
     """
+    # 路径0：Tushare 抓取缓存（真实主力净流入，无需 tushare 运行时，无未来函数）
+    cache = load_moneyflow_cache(symbol)
+    if cache is not None and len(cache) >= 6:
+        return money_score_from_inflow(cache), ["主力净流入(真实·Tushare缓存)"]
     flows = inflow_series
     src = "预取序列"
     if flows is None:

@@ -35,6 +35,8 @@ sys.path.insert(0, HERE)
 
 from signal_engine import (dim_trend, money_proxy, dim_valuation,
                            dim_sector_rotation, dim_regime,
+                           money_score_from_inflow, proxy_inflow_series,
+                           load_moneyflow_cache,
                            _map_signal, DEFAULT_WEIGHTS)
 from akshare_factors import fetch_benchmark_histories
 
@@ -88,14 +90,22 @@ def _rsi(close: pd.Series, win: int = 14) -> float:
 
 
 def feat_vector(symbol: str, sub: pd.DataFrame, bench_hist: dict,
-                hs300, tgt) -> tuple:
+                hs300, tgt, money_series=None) -> tuple:
     """返回 (特征向量 ndarray, 5因子分 [trend,money,rotation,valuation,regime])。
 
     所有计算只用 sub（df.iloc[:i+1]）与 target_date=tgt，无未来函数。
+    money_series: 日度主力净流入(元) Series（已对齐 df.index）；为 None 时用
+      本地量价代理 proxy_inflow_series 构造（proxy 模式）。real 模式由调用方
+      预取 Tushare 缓存并传入，内部按 sub.index 切片，无未来函数。
     """
     try:
         sm, _ = dim_trend(sub, idx_df=hs300)
-        sz, _ = money_proxy(sub)
+        if money_series is not None:
+            ms = money_series.reindex(sub.index).dropna()
+            sz = money_score_from_inflow(ms) if len(ms) >= 6 \
+                else money_score_from_inflow(proxy_inflow_series(sub))
+        else:
+            sz = money_score_from_inflow(proxy_inflow_series(sub))
         sv, _ = dim_valuation(symbol, sub)
         ss, _ = dim_sector_rotation(symbol, sub, bench_hist, tgt)
         sreg, _ = dim_regime(bench_hist, tgt, breadth=None)
@@ -277,21 +287,28 @@ class GradientBoosting:
 
 
 # ----------------------------------------------------------- 数据集构建（逐日）
-def build_rows(symbol: str, bench_hist: dict, hs300, horizon: int) -> list:
+def build_rows(symbol: str, bench_hist: dict, hs300, horizon: int,
+                money_cache: Optional[dict] = None) -> list:
     """返回逐日行列表：每行 {X, y, factors:[5因子], date}。
 
     只保留 i 有足够未来（i+horizon < n）且 i>=START_DAYS 的行。
+    money_cache: {symbol: 日度主力净流入(元) Series(日期索引)}；real 模式预取，
+      内部按 df.index 对齐后在 feat_vector 中逐日切片，无未来函数。
     """
     df = load_hist(symbol)
     n = len(df)
     if n < START_DAYS + horizon + 1:
         return []
+    inflow_full = None
+    if money_cache and symbol in money_cache:
+        inflow_full = money_cache[symbol].reindex(df.index)
     closes = df["close"].values.astype(float)
     rows = []
     for i in range(START_DAYS, n - horizon):
         sub = df.iloc[:i + 1]
         tgt = sub.index[-1]
-        vec, fac = feat_vector(symbol, sub, bench_hist, hs300, tgt)
+        vec, fac = feat_vector(symbol, sub, bench_hist, hs300, tgt,
+                               money_series=inflow_full)
         if np.any(~np.isfinite(vec)):
             vec = np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0)
         y = 1.0 if closes[i + horizon] / closes[i] - 1 > 0 else 0.0
@@ -385,7 +402,7 @@ def _model_spec(name: str):
 
 
 def predict_latest(symbol, name, sector, horizon, ModelCls, bench_hist,
-                   hs300, **mk) -> Optional[dict]:
+                   hs300, money_cache=None, **mk) -> Optional[dict]:
     """在全历史训练后，预测「最新一日」未来 N 日上涨概率。返回 dict 或 None。
 
     无未来函数：特征用 df.iloc[:n]（含最新收盘，属「已知」）；标签不参与预测链路。
@@ -394,7 +411,7 @@ def predict_latest(symbol, name, sector, horizon, ModelCls, bench_hist,
     n = len(df)
     if n < START_DAYS + horizon + 1:
         return None
-    rows = build_rows(symbol, bench_hist, hs300, horizon)
+    rows = build_rows(symbol, bench_hist, hs300, horizon, money_cache=money_cache)
     if len(rows) < MIN_TRAIN:
         return None
     y_train = np.array([r["y"] for r in rows])
@@ -405,7 +422,8 @@ def predict_latest(symbol, name, sector, horizon, ModelCls, bench_hist,
     model.fit(X, y_train)
     sub = df.iloc[:n]
     tgt = sub.index[-1]
-    vec, fac = feat_vector(symbol, sub, bench_hist, hs300, tgt)
+    inflow_full = money_cache.get(symbol).reindex(df.index) if (money_cache and symbol in money_cache) else None
+    vec, fac = feat_vector(symbol, sub, bench_hist, hs300, tgt, money_series=inflow_full)
     vec = np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0)
     prob = float(model.predict_proba(vec.reshape(1, -1))[0])
     last = float(df["close"].iloc[-1])
@@ -418,7 +436,8 @@ def predict_latest(symbol, name, sector, horizon, ModelCls, bench_hist,
 
 def auto_recommend(horizon: int = 10, model_name: str = "LR",
                    top_n: int = 12, min_prob: float = 0.6,
-                   bench_hist=None, hs300=None, universe=None) -> tuple:
+                   bench_hist=None, hs300=None, universe=None,
+                   money_cache=None) -> tuple:
     """扫全池，返回 (高置信标的, 全部排序, 跳过列表[(code,name,reason)])。"""
     if bench_hist is None:
         bench_hist = fetch_benchmark_histories(days=400)
@@ -430,7 +449,7 @@ def auto_recommend(horizon: int = 10, model_name: str = "LR",
     for (code, name, sector) in universe:
         try:
             r = predict_latest(code, name, sector, horizon, ModelCls,
-                               bench_hist, hs300, **mk)
+                               bench_hist, hs300, money_cache=money_cache, **mk)
             if r is None:
                 skipped.append((code, name, "数据不足/标签退化"))
                 continue
@@ -541,15 +560,25 @@ def main():
     ap.add_argument("--rec-out", default="D:/WorkBuddy/output/ml_recommend.md")
     ap.add_argument("--horizon", type=int, default=10)
     ap.add_argument("--model", default="LR", help="LR 或 GB")
+    ap.add_argument("--money", default="proxy", choices=["proxy", "real"],
+                    help="资金因子数据源：proxy=本地量价代理；real=Tushare真实主力净流入(缓存)")
     args = ap.parse_args()
 
     if args.recommend:
         bench_hist = fetch_benchmark_histories(days=400)
         hs300 = bench_hist.get("沪深300")
+        money_cache = {}
+        if args.money == "real":
+            for (code, _, _) in build_universe():
+                c = load_moneyflow_cache(code)
+                if c is not None:
+                    money_cache[code] = c
+            print(f"真实资金流缓存：{len(money_cache)}/{len(build_universe())} 只")
         print(f"扫描自动荐股池（{len(build_universe())} 只）…")
         rec, picks, skipped = auto_recommend(
             horizon=args.horizon, model_name=args.model,
-            min_prob=0.6, bench_hist=bench_hist, hs300=hs300)
+            min_prob=0.6, bench_hist=bench_hist, hs300=hs300,
+            money_cache=money_cache or None)
         print(f"  高置信推荐 {len(rec)} 只，全部排序 {len(picks)} 只，跳过 {len(skipped)} 只")
         for r in rec[:15]:
             print(f"    {r['symbol']} {r['name']}  {r['prob']*100:.1f}%  "
@@ -575,11 +604,20 @@ def main():
     hs300 = bench_hist.get("沪深300")
     print(f"  可用基准：{list(bench_hist.keys())}")
 
+    money_cache = {}
+    if args.money == "real":
+        for s in symbols:
+            c = load_moneyflow_cache(s)
+            if c is not None:
+                money_cache[s] = c
+        print(f"真实资金流缓存：{len(money_cache)}/{len(symbols)} 只（--money real）")
+
     table = []
     for h in HORIZONS:
         print(f"\n=== Horizon {h}d ===")
         # 各标的逐日行（同一批次，ML 与规则基线共用 → 公平对比）
-        per_sym = {s: build_rows(s, bench_hist, hs300, h) for s in symbols}
+        per_sym = {s: build_rows(s, bench_hist, hs300, h, money_cache=money_cache)
+                   for s in symbols}
         per_sym = {s: r for s, r in per_sym.items() if r}
         if not per_sym:
             print("  无可用标的")
@@ -618,7 +656,9 @@ def main():
         if table else None
     if best:
         beat = best["prec_up"] > best["rule"]
+        money_label = "Tushare真实主力净流入" if args.money == "real" else "本地量价代理(proxy)"
         summary = (
+            f"- **资金因子数据源：{money_label}**（--money {args.money}）。\n"
             f"- 最优组合：**horizon {best['horizon']}d / {best['model']}**，"
             f"precision_up = **{best['prec_up']*100:.1f}%**，"
             f"规则基线同口径 {best['rule']*100:.1f}%。\n"
