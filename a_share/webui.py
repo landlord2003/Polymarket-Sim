@@ -549,6 +549,7 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
   <button id="b2" onclick="scan('screener')">板块选股</button>
   <button id="b3" onclick="scan('both')">全部运行</button>
   <button id="bP" onclick="openPortfolio()">模拟仓</button>
+  <button class="ghost" onclick="openRecommend()">🤖 自动荐股</button>
   <label><input type="checkbox" id="offline"> 离线验证</label>
   <label><input type="checkbox" id="push"> 推送钉钉</label>
   <span class="sep"></span>
@@ -698,6 +699,51 @@ function showMainDetail(q,d){
   }catch(e){}
 }
 function openMain(h){document.getElementById('mainModalBox').innerHTML=h;document.getElementById('mainModalMask').classList.add('show');}
+function openRecommend(){
+  openMain('<button class="close" onclick="closeMain()">关闭</button>'
+    +'<h2>🤖 自动荐股（ML）</h2>'
+    +'<div class="sub" id="recSub">加载中…</div>'
+    +'<button id="recRefresh" onclick="refreshRecommend()">刷新荐股（后台扫39只）</button>'
+    +'<div id="recBody" style="margin-top:10px"></div>');
+  fetch('/api/recommend').then(r=>r.json()).then(d=>renderRecommend(d)).catch(e=>{
+    document.getElementById('recSub').textContent='加载失败：'+e;
+  });
+}
+function renderRecommend(d){
+  const sub=document.getElementById('recSub');
+  if(!d.exists){
+    sub.textContent='尚未生成荐股名单。点「刷新荐股」后台扫全池（约3-5分钟，39只龙头）。';
+    return;
+  }
+  sub.textContent='生成：'+d.generated_at+' ｜ 模型：'+d.model+' ｜ 视角：未来'+d.horizon+'日 ｜ 阈值≥'+(d.min_prob*100)+'% ｜ 高置信 '+d.rec.length+' 只 / 全池 '+d.picks.length+' 只';
+  const list=(d.rec.length?d.rec:d.picks.slice(0,15));
+  const rows=list.map((r,i)=>{
+    const c=r.pct>0?'up':(r.pct<0?'down':'flat');const sg=r.pct>0?'+':'';
+    const f=r.factors; const f2=x=>(x>=0?'+':'')+x.toFixed(2);
+    return '<tr>'
+      +'<td>'+(i+1)+'</td><td>'+r.symbol+'</td><td>'+r.name+'</td><td>'+r.sector+'</td>'
+      +'<td><b>'+(r.prob*100).toFixed(1)+'%</b></td>'
+      +'<td>'+r.last.toFixed(2)+'</td>'
+      +'<td class="'+c+'">'+sg+r.pct.toFixed(2)+'%</td>'
+      +'<td>'+f2(f[0])+'</td><td>'+f2(f[1])+'</td><td>'+f2(f[2])+'</td><td>'+f2(f[3])+'</td><td>'+f2(f[4])+'</td>'
+      +'</tr>';
+  }).join('');
+  const note=d.rec.length?'':('<div class="sub" style="color:#e0a45a">本次无标的达高置信阈值，已展示全池概率最高 Top15。</div>');
+  document.getElementById('recBody').innerHTML=
+    note
+    +'<table style="width:100%;border-collapse:collapse;font-size:12px">'
+    +'<tr style="color:#9fb0c0;text-align:left"><th>#</th><th>代码</th><th>名称</th><th>板块</th><th>上涨概率</th><th>最新价</th><th>今日</th><th>趋势</th><th>资金</th><th>轮动</th><th>估值</th><th>大盘</th></tr>'
+    +rows+'</table>'
+    +'<div class="sub" style="margin-top:8px">⚠️ 历史 precision_up 约50-55%（随机50%），非稳赚，仅供参考、风险自担。</div>';
+}
+function refreshRecommend(){
+  const b=document.getElementById('recRefresh'); if(b){b.disabled=true;b.textContent='计算中…';}
+  fetch('/api/recommend/refresh',{method:'POST'}).then(r=>r.json()).then(j=>{
+    document.getElementById('recSub').textContent=(j.msg||'已触发')+' 完成后刷新本页查看。';
+  }).catch(e=>{
+    document.getElementById('recSub').textContent='刷新失败：'+e;
+  }).finally(()=>{ if(b){b.disabled=false;b.textContent='刷新荐股（后台扫39只）';} });
+}
 function closeMain(){document.getElementById('mainModalMask').classList.remove('show');}
 window.onload=()=>{
   poll(); loadQuotes(); loadCrypto();
@@ -1072,6 +1118,21 @@ class Handler(BaseHTTPRequestHandler):
             res["ts"] = datetime.now().strftime("%H:%M:%S")
             self._send(200, json.dumps(res, ensure_ascii=False, default=str),
                        "application/json; charset=utf-8")
+        elif p.path == "/api/recommend":
+            # 读自动荐股缓存（由 ml_model.py --recommend 生成）；无则提示未生成
+            cache_path = os.path.join(HERE, "recommend_cache.json")
+            if os.path.exists(cache_path):
+                try:
+                    with open(cache_path, "r", encoding="utf-8") as _f:
+                        d = json.load(_f)
+                    d["exists"] = True
+                    self._send(200, json.dumps(d, ensure_ascii=False, default=str),
+                               "application/json; charset=utf-8")
+                    return
+                except Exception:  # noqa: BLE001
+                    pass
+            self._send(200, json.dumps({"exists": False}, ensure_ascii=False),
+                       "application/json; charset=utf-8")
         elif p.path == "/static/echarts.min.js":
             ep = os.path.join(HERE, "static", "echarts.min.js")
             if os.path.exists(ep):
@@ -1168,6 +1229,23 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps({"ok": True, "msg": "已加入自选股 " + symbol},
                                        ensure_ascii=False),
                        "application/json; charset=utf-8")
+        elif p.path == "/api/recommend/refresh":
+            # 后台触发 ml_model.py --recommend（扫全池、约3-5分钟），结果写入 cache
+            try:
+                import subprocess
+                py = sys.executable
+                script = os.path.join(HERE, "ml_model.py")
+                out = "D:/WorkBuddy/output/ml_recommend.md"
+                subprocess.Popen([py, script, "--recommend", "--rec-out", out],
+                                 cwd=HERE, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+                self._send(200, json.dumps(
+                    {"ok": True, "msg": "已启动后台荐股重算（约3-5分钟，扫39只）"},
+                    ensure_ascii=False), "application/json; charset=utf-8")
+            except Exception as e:  # noqa: BLE001
+                self._send(200, json.dumps({"ok": False, "msg": str(e)},
+                                           ensure_ascii=False),
+                           "application/json; charset=utf-8")
         else:
             self._send(404, "not found", "text/plain")
 

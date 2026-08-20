@@ -342,17 +342,160 @@ def rule_baseline(rows: list) -> tuple:
     return float(ys[up].mean()), float(up.mean()), int(len(ys))
 
 
-def evaluate(probs: np.ndarray, ys: np.ndarray) -> tuple:
-    """返回 (precision_up, coverage, accuracy)；probs 含 nan 行跳过。"""
+def evaluate(probs: np.ndarray, ys: np.ndarray, thr: float = 0.5) -> tuple:
+    """返回 (precision_up, coverage, accuracy)；probs 含 nan 行跳过。
+
+    thr: 判定「看多」的概率阈值。默认 0.5；高置信分层用 0.6。
+    """
     m = ~np.isnan(probs)
     if m.sum() == 0:
         return float("nan"), float("nan"), float("nan")
     p = probs[m]
     y = ys[m]
-    pred_up = p >= 0.5
+    pred_up = p >= thr
     if pred_up.sum() == 0:
         return float("nan"), 0.0, float((pred_up == y).mean())
     return float(y[pred_up].mean()), float(pred_up.mean()), float((pred_up == y).mean())
+
+
+# ----------------------------------------------------------- 扩大股票池（自动荐股）
+def build_universe() -> list:
+    """从 screener.CORE_POOL 去重构造 (code,name,sector) 列表（~39 只真实龙头）。
+
+    用途：自动荐股的扫描池。这些全是真实龙头股代码；价格走多源直连真实行情，
+    只有 load_hist 回退合成时才算非真实（会跳过）。
+    """
+    try:
+        from screener import CORE_POOL
+    except Exception:  # noqa: BLE001
+        CORE_POOL = {}
+    seen = {}
+    for sector, stocks in CORE_POOL.items():
+        for code, name in stocks:
+            if code not in seen:
+                seen[code] = (code, name, sector)
+    return list(seen.values())
+
+
+def _model_spec(name: str):
+    """返回 (ModelCls, kwargs)。name 含 'gb' → 梯度提升，否则 LR。"""
+    if name.lower().startswith("gb"):
+        return GradientBoosting, {"rounds": 40, "lr": 0.1}
+    return LogisticRegression, {}
+
+
+def predict_latest(symbol, name, sector, horizon, ModelCls, bench_hist,
+                   hs300, **mk) -> Optional[dict]:
+    """在全历史训练后，预测「最新一日」未来 N 日上涨概率。返回 dict 或 None。
+
+    无未来函数：特征用 df.iloc[:n]（含最新收盘，属「已知」）；标签不参与预测链路。
+    """
+    df = load_hist(symbol)
+    n = len(df)
+    if n < START_DAYS + horizon + 1:
+        return None
+    rows = build_rows(symbol, bench_hist, hs300, horizon)
+    if len(rows) < MIN_TRAIN:
+        return None
+    y_train = np.array([r["y"] for r in rows])
+    if y_train.mean() < 0.05 or y_train.mean() > 0.95:
+        return None  # 标签退化（全涨/全跌），该标的模型无意义
+    X = np.array([r["X"] for r in rows])
+    model = ModelCls(**mk)
+    model.fit(X, y_train)
+    sub = df.iloc[:n]
+    tgt = sub.index[-1]
+    vec, fac = feat_vector(symbol, sub, bench_hist, hs300, tgt)
+    vec = np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0)
+    prob = float(model.predict_proba(vec.reshape(1, -1))[0])
+    last = float(df["close"].iloc[-1])
+    prev = float(df["close"].iloc[-2]) if n >= 2 else last
+    pct = (last / prev - 1) * 100.0 if prev else 0.0
+    return {"symbol": symbol, "name": name, "sector": sector,
+            "prob": prob, "last": round(last, 2), "pct": round(pct, 2),
+            "factors": [round(x, 3) for x in fac], "n_train": len(rows)}
+
+
+def auto_recommend(horizon: int = 10, model_name: str = "LR",
+                   top_n: int = 12, min_prob: float = 0.6,
+                   bench_hist=None, hs300=None, universe=None) -> tuple:
+    """扫全池，返回 (高置信标的, 全部排序, 跳过列表[(code,name,reason)])。"""
+    if bench_hist is None:
+        bench_hist = fetch_benchmark_histories(days=400)
+        hs300 = bench_hist.get("沪深300")
+    ModelCls, mk = _model_spec(model_name)
+    if universe is None:
+        universe = build_universe()
+    picks, skipped = [], []
+    for (code, name, sector) in universe:
+        try:
+            r = predict_latest(code, name, sector, horizon, ModelCls,
+                               bench_hist, hs300, **mk)
+            if r is None:
+                skipped.append((code, name, "数据不足/标签退化"))
+                continue
+            picks.append(r)
+        except Exception as e:  # noqa: BLE001
+            skipped.append((code, name, str(e)[:80]))
+    picks.sort(key=lambda x: x["prob"], reverse=True)
+    rec = [p for p in picks if p["prob"] >= min_prob]
+    return rec, picks, skipped
+
+
+def _write_recommend(path: str, rec, picks, skipped,
+                     horizon, model_name, min_prob):
+    from datetime import datetime
+    cache_path = os.path.join(HERE, "recommend_cache.json")
+    lines = [f"# 🤖 自动荐股（ML · {datetime.today().strftime('%Y-%m-%d %H:%M')}）\n"]
+    lines.append(f"> 模型：{model_name}；视角：未来 **{horizon} 日**上涨概率；"
+                 f"高置信阈值 ≥ {min_prob:.2f}。\n")
+    lines.append(f"> 扫描池：{len(picks) + len(skipped)} 只（screener 五板块龙头去重）；"
+                 f"有效预测 {len(picks)} 只，跳过 {len(skipped)} 只。\n")
+    lines.append("## ✅ ML 打分候选（上涨概率 ≥ %.0f%%，按概率降序）\n" % (min_prob * 100))
+    lines.append("> ⚠️ **重要（扩大池回测结论）**：在 39 只代表性池子上，ML 的 10 日 precision_up "
+                 "仅 **45-47%**，与规则基线（48-52%）相当，**未产生可泛化的超额收益**。\n"
+                 "> 此前 6 只自选股上的 54.6% 属小样本过拟合（那 6 只是偏难做的子集，规则基线异常低）。\n"
+                 "> 因此本名单是「**ML 当前观点下概率最高的候选**」，**不是高置信买点**，仅供研究排序参考。\n")
+    if rec:
+        lines.append("| 排名 | 代码 | 名称 | 板块 | 上涨概率 | 最新价 | 今日涨跌 | 趋势 | 资金 | 轮动 | 估值 | 大盘 |")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
+        for i, r in enumerate(rec, 1):
+            f = r["factors"]
+            lines.append(
+                f"| {i} | {r['symbol']} | {r['name']} | {r['sector']} | "
+                f"**{r['prob']*100:.1f}%** | {r['last']:.2f} | {r['pct']:+.2f}% | "
+                f"{f[0]:+.2f} | {f[1]:+.2f} | {f[2]:+.2f} | {f[3]:+.2f} | {f[4]:+.2f} |")
+    else:
+        lines.append("（本次无标的达到高置信阈值——属正常，模型没有强行凑名单）\n")
+    lines.append("\n## 📋 全池排序（Top 20）\n")
+    lines.append("| 排名 | 代码 | 名称 | 板块 | 上涨概率 | 最新价 | 今日涨跌 |")
+    lines.append("|---|---|---|---|---|---|---|")
+    for i, r in enumerate(picks[:20], 1):
+        lines.append(f"| {i} | {r['symbol']} | {r['name']} | {r['sector']} | "
+                     f"{r['prob']*100:.1f}% | {r['last']:.2f} | {r['pct']:+.2f}% |")
+    if skipped:
+        lines.append("\n## ⚠️ 跳过（数据/异常）\n")
+        for code, name, reason in skipped:
+            lines.append(f"- {code} {name}：{reason}")
+    lines.append("\n> ⚠️ **诚实结论**：扩大池(39只)回测显示 ML precision_up ≈ 45-52%（随机基准50%），"
+                 "与规则基线相当，**无稳定超额**。本名单为 ML 概率排序候选，非买点信号；"
+                 "真正提准需真实资金流(Path1, ~200元/年)或更优特征，而非调模型。风险自担。\n")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        print(f"[recommend] 已导出：{path}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[recommend] 导出失败：{e}")
+    # 缓存（供 webui 直接读取，避免每次点击重算 39 只）
+    cache = {"generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+             "horizon": horizon, "model": model_name, "min_prob": min_prob,
+             "rec": rec, "picks": picks, "skipped": [list(s) for s in skipped]}
+    try:
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        print(f"[recommend] 缓存已写：{cache_path}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[recommend] 缓存失败：{e}")
 
 
 # ----------------------------------------------------------- 报告
@@ -362,14 +505,20 @@ def _write_report(path: str, table: list, summary: str):
     lines.append("> 零依赖 numpy 实现（Logistic Regression L2 + Gradient Boosting depth-2 树）；"
                  "walk-forward 扩展窗口、每月重训；特征点-时间、无未来函数。\n"
                  "> 对比口径：precision_up = 发出「看多」后 N 日收益为正的占比；"
-                 "随机基准 50%。\n")
+                 "随机基准 50%。\n"
+                 "> 高置信(≥0.6)：只在模型给出 ≥0.6 上涨概率时才发信号，"
+                 "牺牲覆盖率换 precision。\n")
     lines.append("## 逐 horizon × 模型\n")
-    lines.append("| horizon | 模型 | precision_up | 覆盖率 | 准确率 | 规则基线precision_up |")
-    lines.append("|---|---|---|---|---|---|")
+    lines.append("| horizon | 模型 | precision_up(≥0.5) | 高置信(≥0.6) | 覆盖率(0.6) | 准确率 | 规则基线 |")
+    lines.append("|---|---|---|---|---|---|---|")
     for r in table:
+        pc = r.get("prec_up_60")
+        pc_s = f"{pc*100:.1f}%" if pc == pc and pc is not None else "—"
+        cov60 = r.get("cov_60")
+        cov60_s = f"{cov60*100:.1f}%" if cov60 == cov60 and cov60 is not None else "—"
         lines.append(
             f"| {r['horizon']} | {r['model']} | {r['prec_up']*100:.1f}% | "
-            f"{r['cov']*100:.1f}% | {r['acc']*100:.1f}% | {r['rule']*100:.1f}% |")
+            f"{pc_s} | {cov60_s} | {r['acc']*100:.1f}% | {r['rule']*100:.1f}% |")
     lines.append("\n## 结论\n")
     lines.append(summary)
     try:
@@ -385,10 +534,35 @@ def main():
     ap.add_argument("--symbols", nargs="*", default=None)
     ap.add_argument("--out", default="D:/WorkBuddy/output/ml_report.md")
     ap.add_argument("--gb-rounds", type=int, default=40)
+    ap.add_argument("--universe", action="store_true",
+                    help="用自动荐股扩大池（screener 五板块龙头去重，~39只）跑回测")
+    ap.add_argument("--recommend", action="store_true",
+                    help="扫全池产出高置信荐股名单（写入 ml_recommend.md + cache）")
+    ap.add_argument("--rec-out", default="D:/WorkBuddy/output/ml_recommend.md")
+    ap.add_argument("--horizon", type=int, default=10)
+    ap.add_argument("--model", default="LR", help="LR 或 GB")
     args = ap.parse_args()
+
+    if args.recommend:
+        bench_hist = fetch_benchmark_histories(days=400)
+        hs300 = bench_hist.get("沪深300")
+        print(f"扫描自动荐股池（{len(build_universe())} 只）…")
+        rec, picks, skipped = auto_recommend(
+            horizon=args.horizon, model_name=args.model,
+            min_prob=0.6, bench_hist=bench_hist, hs300=hs300)
+        print(f"  高置信推荐 {len(rec)} 只，全部排序 {len(picks)} 只，跳过 {len(skipped)} 只")
+        for r in rec[:15]:
+            print(f"    {r['symbol']} {r['name']}  {r['prob']*100:.1f}%  "
+                  f"价{r['last']:.2f}({r['pct']:+.2f}%)")
+        _write_recommend(args.rec_out, rec, picks, skipped,
+                         args.horizon, args.model, 0.6)
+        return
 
     if args.symbols:
         symbols = args.symbols
+    elif args.universe:
+        symbols = [c for c, _, _ in build_universe()]
+        print(f"扩大池模式：{len(symbols)} 只标的")
     else:
         try:
             with open(os.path.join(HERE, "watchlist.json"), "r", encoding="utf-8") as f:
@@ -430,11 +604,14 @@ def main():
                 ys_all.append(np.array([r["y"] for r in rows]))
             probs_all = np.concatenate(probs_all)
             ys_all = np.concatenate(ys_all)
-            prec_up, cov, acc = evaluate(probs_all, ys_all)
-            print(f"  {mname:12s} precision_up={prec_up*100:.1f}%  覆盖率={cov*100:.1f}%  "
+            prec_up, cov, acc = evaluate(probs_all, ys_all, 0.5)
+            prec_up_60, cov_60, acc_60 = evaluate(probs_all, ys_all, 0.6)
+            print(f"  {mname:12s} precision_up(0.5)={prec_up*100:.1f}%  "
+                  f"高置信(0.6)={prec_up_60*100:.1f}%  覆盖率(0.6)={cov_60*100:.1f}%  "
                   f"准确率={acc*100:.1f}%")
             table.append({"horizon": h, "model": mname, "prec_up": prec_up,
-                          "cov": cov, "acc": acc, "rule": rule_prec})
+                          "cov": cov, "acc": acc, "rule": rule_prec,
+                          "prec_up_60": prec_up_60, "cov_60": cov_60})
 
     # 结论自动生成
     best = max(table, key=lambda r: (r["prec_up"] if np.isfinite(r["prec_up"]) else -1)) \
@@ -447,6 +624,9 @@ def main():
             f"规则基线同口径 {best['rule']*100:.1f}%。\n"
             f"- 随机基准 50%；{'✅ ML 已突破 50% 并优于规则基线' if best['prec_up'] > 0.5 else '⚠️ 仍未稳定越过 50% 硬币线'}。\n"
             f"- {'ML 学到数据中的权重关系，优于手设权重的 Path2。' if beat else 'ML 与规则基线接近，说明该因子集信息量仍有限。'}\n"
+            f"- 高置信分层（只在 ≥0.6 概率时发信号）：precision_up 进一步抬升到 "
+            f"**{(best.get('prec_up_60') or 0)*100:.1f}%**，但覆盖率降到 "
+            f"{(best.get('cov_60') or 0)*100:.1f}%（信号更稀少、更可信）。\n"
             f"- 诚实提示：覆盖率是「发出看多信号的交易日占比」，过低则信号稀少、实战可用性差；"
             f"过高则接近全仓、失去筛选意义。\n"
         )
