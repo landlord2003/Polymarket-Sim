@@ -38,7 +38,7 @@ import re
 from html import escape
 from notify import send_markdown, send_wecom
 from datasource import (fetch_realtime, market_phase, fetch_snapshot,
-                       fetch_fund_flow_breakdown, fetch_financials,
+                       fetch_fund_flow_breakdown, fetch_financials, fetch_news_titles,
                        fetch_crypto_quotes, fetch_kline, DataSourceError)
 import sim_engine
 from dashboard import (render_dashboard, render_stock_detail, render_portfolio)
@@ -165,34 +165,59 @@ def _build_stock_detail(sym):
     "Remote end closed connection without response"。
 
     现改为 fast 模式并发（单源 6s/1 重试）+ 整体 8s 上限：超时的源直接丢弃，
-    用已有数据渲染，保证连接存活、详情页秒开。
-    """
-    synthetic = False; source = ""; data_date = ""; error = None
-    snap = {}; ff = {}; fin = {}; kline = []; news = []
+    用 K 线等兜底数据回填，保证连接存活、详情页秒开。
 
-    def _safe(fn):
+    返回值说明：
+        - error: 仅当完全拿不到价（快照+K线均失败）时才置错误文本。
+        - warnings: 部分源失败的提示列表（如东财快照被限流），
+          上层应显示数据并附带提示，而不是直接报错。
+    """
+    synthetic = False
+    source = ""
+    data_date = ""
+    error = None
+    warnings = []
+    snap = {}
+    ff = {}
+    fin = {}
+    kline = []
+    news = []
+
+    def _safe(fn, label):
         try:
             return fn()
         except Exception as e:  # noqa: BLE001
-            return e
+            # 数据源异常统一转为用户友好的短文本，避免把 urllib 底层异常
+            # 直接显示，让用户误以为是浏览器/服务器连接断了。
+            etype = type(e).__name__
+            detail = str(e)
+            if "Remote end closed" in detail or "RemoteDisconnected" in etype:
+                reason = "连接被数据源关闭/限流"
+            elif "timeout" in detail.lower() or "timed out" in detail.lower():
+                reason = "请求超时"
+            elif "空" in detail or "empty" in detail.lower():
+                reason = "返回空数据"
+            else:
+                reason = etype
+            return DataSourceError(f"{label} 暂时不可用（{reason}）")
 
     import concurrent.futures as cf
     ex = cf.ThreadPoolExecutor(max_workers=5)
     try:
-        f_snap = ex.submit(_safe, lambda: fetch_snapshot(sym, fast=True))
-        f_ff   = ex.submit(_safe, lambda: fetch_fund_flow_breakdown(sym, fast=True))
-        f_fin  = ex.submit(_safe, lambda: fetch_financials(sym, fast=True))
-        f_kl   = ex.submit(_safe, lambda: fetch_kline(sym, days=60, fast=True))
-        f_news = ex.submit(_safe, lambda: fetch_news_titles(sym, limit=8))
+        f_snap = ex.submit(_safe, lambda: fetch_snapshot(sym, fast=True), "快照(东财)")
+        f_ff = ex.submit(_safe, lambda: fetch_fund_flow_breakdown(sym, fast=True), "资金流(东财)")
+        f_fin = ex.submit(_safe, lambda: fetch_financials(sym, fast=True), "财务(东财)")
+        f_kl = ex.submit(_safe, lambda: fetch_kline(sym, days=60, fast=True), "日K(腾讯/东财/新浪)")
+        f_news = ex.submit(_safe, lambda: fetch_news_titles(sym, limit=8), "新闻(东财)")
         done, _ = cf.wait([f_snap, f_ff, f_fin, f_kl, f_news], timeout=8)
         for fut, key in ((f_snap, "snap"), (f_ff, "ff"), (f_fin, "fin"),
                          (f_kl, "kline"), (f_news, "news")):
             if fut not in done:
-                continue  # 超时未完成：保留默认值，绝不阻塞
+                warnings.append(f"{key}: 超时未完成")
+                continue
             r = fut.result()
             if isinstance(r, Exception):
-                if key == "snap":
-                    error = str(r)
+                warnings.append(str(r))
                 continue
             if key == "snap" and isinstance(r, dict):
                 snap = r
@@ -219,8 +244,10 @@ def _build_stock_detail(sym):
     if isinstance(snap, dict):
         source = source or snap.get("source", "")
         data_date = data_date or snap.get("data_date", "")
+
     # 降级：东财快照被限流(snap 为空)时，用腾讯K线最后一根回填现价/开高低/昨收，
     # 保证详情页永远有真实价（K线源最稳）。
+    kline_backfilled = False
     if (not isinstance(snap, dict) or not snap.get("price")) and len(kline) >= 1:
         last = kline[-1]
         prev = kline[-2]["close"] if len(kline) >= 2 else last["open"]
@@ -233,10 +260,28 @@ def _build_stock_detail(sym):
         snap["pct"] = round((last["close"] / prev - 1) * 100, 2) if prev else 0.0
         if not source:
             source = "腾讯财经(前复权K线回填)"
-    return {"snapshot": snap if isinstance(snap, dict) else {},
-            "fund_flow": ff, "financials": fin, "kline": kline, "news": news,
-            "synthetic": synthetic, "source": source, "data_date": data_date,
-            "error": error}
+        kline_backfilled = True
+
+    # 只有当快照和 K 线都失败、完全没有价格数据时，才把错误传给上层阻断显示。
+    has_price = bool(snap.get("price")) or (kline_backfilled and len(kline) >= 1)
+    if not has_price:
+        error = "; ".join(warnings) if warnings else "无法获取行情数据"
+    elif warnings:
+        # 有价格但部分源失败：降级为提示，不阻断页面
+        warnings.append("已用可用数据源回填")
+
+    return {
+        "snapshot": snap if isinstance(snap, dict) else {},
+        "fund_flow": ff,
+        "financials": fin,
+        "kline": kline,
+        "news": news,
+        "synthetic": synthetic,
+        "source": source,
+        "data_date": data_date,
+        "error": error,
+        "warnings": warnings,
+    }
 
 
 def _detail_cache_get(sym):
@@ -452,7 +497,11 @@ function searchStock(){
     .catch(e=>openMain('<div class="sub" style="color:#ef7a66">'+e+'</div>'));
 }
 function showMainDetail(q,d){
-  if(d.error){openMain('<h2>'+q+'</h2><div class="sub" style="color:#ef7a66">'+d.error+'</div>');return;}
+  if(d.error && (!d.snapshot || !d.snapshot.price)){
+    openMain('<h2>'+q+'</h2><div class="sub" style="color:#ef7a66">'+d.error+'</div>');return;
+  }
+  const warn = d.error || (d.warnings && d.warnings.length ? d.warnings.join('；') : '');
+  const warnBanner = warn ? '<div class="sub" style="color:#e0a45a;background:#332712;padding:8px 10px;border-radius:6px;margin-bottom:10px">⚠️ 部分数据源失败，已用可用数据回填：'+warn+'</div>' : '';
   const s=d.snapshot||{}, f=d.fund_flow||{}, fin=d.financials||{};
   const cls=(s.pct||0)>0?'up':((s.pct||0)<0?'down':'flat');const sg=(s.pct||0)>0?'+':'';
   const srcTag=d.synthetic?'<span class="tag-syn">合成数据</span>':'<span class="tag-real">'+(d.source||'真实行情')+'</span>';
@@ -471,6 +520,7 @@ function showMainDetail(q,d){
   const html='<button class="close" onclick="closeMain()">关闭</button>'
     +'<h2>'+(s.name||q)+' '+(d.symbol||'')+'</h2>'
     +'<div class="sub">'+srcTag+' ｜ 数据日 '+(d.data_date||'-')+'</div>'
+    +warnBanner
     +kpi+'<div id="mchart" class="chart"></div>'
     +'<h3 style="font-size:14px;margin:12px 0 4px">资金流向</h3>'+flow;
   openMain(html);

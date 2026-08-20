@@ -321,7 +321,11 @@ function showDetail(symbol, name){
   const _to = setTimeout(()=>_ctrl.abort(), 28000);
   fetch('/api/stock_detail?symbol='+symbol+'&format=json', {signal:_ctrl.signal})
     .then(r=>r.json()).then(d=>{ clearTimeout(_to);
-      if(d.error){ openModal('<button class="close" onclick="closeModal()">关闭</button><h2>'+symbol+' '+name+'</h2><div class="sub" style="color:#ef7a66">'+d.error+'</div>'); return; }
+      if(d.error && !d.snapshot || !d.snapshot.price){
+        openModal('<button class="close" onclick="closeModal()">关闭</button><h2>'+symbol+' '+name+'</h2><div class="sub" style="color:#ef7a66">'+d.error+'</div>'); return;
+      }
+      const warn = d.error || (d.warnings && d.warnings.length ? d.warnings.join('；') : '');
+      const warnBanner = warn ? '<div class="sub" style="color:#e0a45a;background:#332712;padding:8px 10px;border-radius:6px;margin-bottom:10px">⚠️ 部分数据源失败，已用可用数据回填：'+warn+'</div>' : '';
       const s = d.snapshot||{};
       const f = d.fund_flow||{};
       const fin = d.financials||{};
@@ -364,6 +368,7 @@ function showDetail(symbol, name){
         + '<button class="add" data-sym="'+symbol+'" data-name="'+name.replace(/"/g, "")+'" onclick="addToWatchlist(this.dataset.sym, this.dataset.name)">＋加入自选股</button>'
         + '<h2>'+symbol+' '+name+'</h2>'
         + '<div class="sub">'+srcTag+' ｜ 数据日 '+(d.data_date||'—')+'</div>'
+        + warnBanner
         + kpi
         + '<div id="kchart" class="chart"></div>'
         + '<h3 style="font-size:14px;margin:14px 0 4px">资金流向</h3>'+flow
