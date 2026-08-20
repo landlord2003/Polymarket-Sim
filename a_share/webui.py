@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import sys
 import json
+import traceback
 import webbrowser
 import threading
 import time
@@ -697,6 +698,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         p = urlparse(self.path)
+        try:
+            self._do_get(p)
+        except Exception as e:  # noqa: BLE001
+            # 任何未捕获异常都转为可读的 500 页面，避免 socketserver
+            # 直接关连接导致浏览器只能报 "Remote end closed connection"。
+            tb = traceback.format_exc()
+            err_html = (
+                "<!DOCTYPE html><html lang='zh-CN'><head><meta charset='utf-8'>"
+                "<style>body{background:#0b0f14;color:#ff6b6b;font-family:-apple-system,"
+                "'Microsoft YaHei',sans-serif;padding:24px;line-height:1.6}"
+                "pre{background:#161c24;padding:12px;border-radius:8px;overflow:auto;"
+                "color:#e6e6e6;font-size:12px}</style></head><body>"
+                "<h2>🔴 服务器处理请求时出错</h2>"
+                "<p><b>路径：</b>" + escape(self.path) + "</p>"
+                "<p><b>异常：</b>" + escape(str(e)) + "</p>"
+                "<pre>" + escape(tb) + "</pre></body></html>"
+            )
+            self._send(500, err_html, "text/html; charset=utf-8")
+
+    def _do_get(self, p):
         if p.path in ("/", "/index.html"):
             self._send(200, control_html(), "text/html; charset=utf-8")
         elif p.path == "/api/board":
