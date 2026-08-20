@@ -20,8 +20,10 @@ try:
 except ImportError:  # 直接以脚本方式运行时
     import datasource as ds  # type: ignore
 
+import os as _os
+import json as _json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 # 维度权重（可在调用处覆盖）
@@ -50,6 +52,8 @@ class StockResult:
     source: str = ""            # 真实数据来源，如「腾讯财经(前复权)」/「合成随机游走」
     data_date: str = ""         # 最新K线日期，用于判断数据是否新鲜
     pct_change: Optional[float] = None   # 当日涨跌幅 %
+    as_of: str = ""                       # 信号计算时间（每日持久化，盘中不重算买卖）
+    intraday_alert: str = ""              # 盘中实时价相对决策带的提示（仅信息，不改信号）
 
 
 def _market_of(symbol: str) -> str:
@@ -287,28 +291,67 @@ def _map_signal(composite: float) -> tuple[str, str]:
     return "卖出", "🔴"
 
 
-def _apply_personal_rules(rules: dict, last_price: float, base_comp: float,
+def _map_signal_hyst(comp: float, prev: Optional[str] = None) -> tuple[str, str]:
+    """带迟滞死区的信号映射，避免综合分在边界附近抖动导致买卖秒翻。
+
+    - 买入/偏多 要跌破 0.30 才降级（普通映射阈值 0.15）；
+    - 观望 要冲上 0.55 才升级为买入（普通 0.50）；
+    - 减仓/卖出 要回升到 -0.30 以上才脱离。
+    prev=None 时退化为普通映射。
+    """
+    base = _map_signal(comp)
+    if prev is None:
+        return base
+    if prev in ("买入", "偏多"):
+        if comp >= 0.5:
+            return "买入", "🟢"
+        if comp >= 0.30:
+            return "偏多", "🟢"
+        return base
+    if prev in ("减仓", "卖出", "暂停"):
+        if comp <= -0.5:
+            return "卖出", "🔴"
+        if comp <= -0.30:
+            return "减仓", "🔴"
+        return base
+    # prev == 观望
+    if comp >= 0.55:
+        return ("买入", "🟢") if comp >= 0.5 else ("偏多", "🟢")
+    if comp <= -0.55:
+        return ("减仓", "🔴") if comp > -0.5 else ("卖出", "🔴")
+    return "观望", "🟡"
+
+
+
+def _apply_personal_rules(rules: dict, decision_price: float, base_comp: float,
                           base_signal: str, base_notes: list,
                           holding: bool = False,
-                          df: Optional[pd.DataFrame] = None) -> tuple:
+                          df: Optional[pd.DataFrame] = None,
+                          live_price: Optional[float] = None,
+                          prev_signal: Optional[str] = None) -> tuple:
     """把个股个性化阈值（建仓区间/止损/阻力/动态布林买点）叠加进信号。
+
+    ⚠️ 关键修复：决策一律用 **decision_price（昨收/最近完成交易日收盘）**，
+    不再用盘中实时价。盘中 tick 穿越 buy_range 窄带 / 触碰布林下轨，
+    只产生 `intraday_alert` 提示，**不改变信号**——根治「上午买入、下午观望」的秒翻。
 
     空仓语义（holding=False，当前老吴全空仓）：
       - 止损线 = 趋势破位参考线：跌破则偏弱、不接飞刀、不报「卖出」（没有持仓可卖）。
-      - 建仓区间 / 布林下轨 = 回补参考：价格进入才亮「买入」。
+      - 建仓区间 / 布林下轨 = 回补参考：决策价进入才亮「买入」。
     持仓语义（holding=True）：止损线跌破报「卖出」，阻力位触及建议减仓。
 
-    动态布林下轨：use_dynamic_boll=true 时按实时 20日-2σ 计算，避免静态快照（如钢研18.45）
-    过时导致跌穿误判为买点。返回 (composite, signal, emoji, notes)。
+    动态布林下轨：use_dynamic_boll=true 时按「已完成交易日」序列的 20日-2σ 计算
+    （df.iloc[:-1]），决策价用昨收，避免盘中价穿越窄带误判。
+    返回 (composite, signal, emoji, notes)。
     """
     notes = list(base_notes)
     comp = base_comp
     forced = None  # (signal, emoji)
     block_buy = False
 
-    # —— 止损 / 趋势破位参考线 ——
+    # —— 止损 / 趋势破位参考线（决策价=昨收）——
     stop_loss = rules.get("stop_loss")
-    if stop_loss is not None and last_price <= stop_loss:
+    if stop_loss is not None and decision_price <= stop_loss:
         if holding:
             forced = ("卖出", "🔴")
             notes.append(f"触发止损线 {stop_loss}")
@@ -321,7 +364,7 @@ def _apply_personal_rules(rules: dict, last_price: float, base_comp: float,
 
     # —— 阻力位（减仓/止盈参考）——
     resistance = rules.get("resistance")
-    if resistance is not None and last_price >= resistance:
+    if resistance is not None and decision_price >= resistance:
         notes.append(f"触及阻力位 {resistance}，建议减仓/止盈")
         if holding:
             comp = min(comp, -0.4)
@@ -330,7 +373,7 @@ def _apply_personal_rules(rules: dict, last_price: float, base_comp: float,
     buy_range = rules.get("buy_range")
     if isinstance(buy_range, (list, tuple)) and len(buy_range) == 2:
         lo, hi = buy_range
-        if lo <= last_price <= hi:
+        if lo <= decision_price <= hi:
             comp = max(comp, 0.7)
             notes.append(f"进入建仓区间 [{lo}, {hi}]")
             forced = forced or ("买入", "🟢")
@@ -338,11 +381,13 @@ def _apply_personal_rules(rules: dict, last_price: float, base_comp: float,
     # —— 布林下轨买点（动态优先，静态 boll_lower_buy 兼容兜底）——
     use_dyn = rules.get("use_dynamic_boll", False)
     boll_floor = rules.get("boll_lower_buy")
-    lb = live_boll_lower(df) if (use_dyn and df is not None) else None
+    # 用「已完成交易日」序列算下轨，决策价用昨收，避免盘中价穿越窄带秒翻
+    boll_df = df.iloc[:-1] if (df is not None and len(df) >= 2) else df
+    lb = live_boll_lower(boll_df) if (use_dyn and boll_df is not None) else None
     if use_dyn and lb is not None:
         tol = rules.get("boll_tol", 0.03)
-        near = (last_price >= lb * (1 - tol)) and (last_price <= lb * (1 + tol))
-        stable = last_price >= float(df["close"].iloc[-5:].min())
+        near = (decision_price >= lb * (1 - tol)) and (decision_price <= lb * (1 + tol))
+        stable = decision_price >= float(boll_df["close"].iloc[-5:].min())
         if near and stable:
             if block_buy:
                 notes.append(f"贴近动态下轨 {lb:.2f} 但已跌破破位线，暂缓")
@@ -353,7 +398,7 @@ def _apply_personal_rules(rules: dict, last_price: float, base_comp: float,
         elif near and not stable:
             notes.append(f"贴近下轨 {lb:.2f} 但仍在创新低，暂观望")
     elif boll_floor is not None:
-        if last_price <= boll_floor * 1.03:
+        if decision_price <= boll_floor * 1.03:
             if block_buy:
                 notes.append(f"贴近下轨参考 {boll_floor} 但已跌破破位线，暂缓")
             else:
@@ -363,21 +408,28 @@ def _apply_personal_rules(rules: dict, last_price: float, base_comp: float,
 
     cost_avg = rules.get("cost_avg")
     if cost_avg is not None:
-        cmp = "低于" if last_price < cost_avg else "高于"
+        cmp = "低于" if decision_price < cost_avg else "高于"
         notes.append(f"现价 {cmp} 参考成本 {cost_avg}")
+
+    # 盘中实时价提示（仅信息，不改变信号）
+    if live_price is not None and abs(live_price - decision_price) > 1e-6:
+        diff = live_price - decision_price
+        notes.append(f"盘中现价 {live_price:.2f}（决策价=昨收 {decision_price:.2f}，差 {diff:+.2f}）")
 
     comp = max(-1.0, min(1.0, comp))
     if forced:
         return comp, forced[0], forced[1], notes
-    sig, emo = _map_signal(comp)
+    sig, emo = _map_signal_hyst(comp, prev_signal)
     return comp, sig, emo, notes
+
 
 
 def analyze_stock(symbol: str, name: str = "", df: Optional[pd.DataFrame] = None,
                   weights: Optional[dict] = None, risk_gate=None,
                   rules: Optional[dict] = None,
                   holding: bool = False,
-                  force_offline: bool = False) -> StockResult:
+                  force_offline: bool = False,
+                  prev_signal: Optional[str] = None) -> StockResult:
     """对单只股票跑四维度评分。risk_gate 为可选函数 signal->(bool, reason)。
 
     force_offline=True 或联网取数失败时，用合成数据「完整跑通全流程」并返回
@@ -404,15 +456,18 @@ def analyze_stock(symbol: str, name: str = "", df: Optional[pd.DataFrame] = None
     composite = (weights["market"] * sm + weights["money"] * sz +
                  weights["sector"] * ss + weights["news"] * sn)
     composite = max(-1.0, min(1.0, composite))
-    signal, emoji = _map_signal(composite)
+    signal, emoji = _map_signal_hyst(composite, prev_signal)
 
     last_price = float(df["close"].iloc[-1])
+    # 决策价 = 昨收（最近完成交易日收盘），盘中实时价只用于显示与提示
+    decision_price = float(df["close"].iloc[-2]) if len(df) >= 2 else last_price
 
     # —— 个性化规则叠加（动态布林下轨、元力建仓区间等）——
     if rules:
         composite, signal, emoji, pnotes = _apply_personal_rules(
-            rules, last_price, composite, signal, n_m + n_z + n_s + n_n,
-            holding=holding, df=df)
+            rules, decision_price, composite, signal, n_m + n_z + n_s + n_n,
+            holding=holding, df=df, live_price=last_price,
+            prev_signal=prev_signal)
     else:
         pnotes = n_m + n_z + n_s + n_n
 
@@ -452,6 +507,7 @@ def analyze_stock(symbol: str, name: str = "", df: Optional[pd.DataFrame] = None
         risk_pass=risk_pass, risk_reason=risk_reason,
         last_price=last_price,
         source=source, data_date=data_date, pct_change=pct_change,
+        as_of=datetime.now().strftime("%Y-%m-%d %H:%M"),
     )
     if not risk_pass:
         res.signal = "暂停"; res.signal_emoji = "🔴"
@@ -462,3 +518,52 @@ if __name__ == "__main__":
     # 离线自测：合成数据验证逻辑接线
     r = analyze_stock("300034", "钢研高纳")
     print(r)
+
+
+# ------------------------------------------------------- 信号持久化（每日一次）
+# 看板主表信号不再每次刷新实时重算，而是每日算一次存入 signal_state.json，
+# 盘中只更新「现价」与「盘中提示」，彻底杜绝买卖信号随 tick 秒翻。
+STATE_PATH = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                            "signal_state.json")
+
+
+def save_signal_state(results: list, as_of: Optional[str] = None) -> str:
+    """把当日信号快照写入 signal_state.json，返回 as_of 时间戳。"""
+    as_of = as_of or datetime.now().strftime("%Y-%m-%d %H:%M")
+    data = {"as_of": as_of, "symbols": {}}
+    for r in results:
+        data["symbols"][r.symbol] = {
+            "name": r.name, "signal": r.signal, "emoji": r.signal_emoji,
+            "composite": r.composite,
+            "market_score": r.market_score, "money_score": r.money_score,
+            "sector_score": r.sector_score, "news_score": r.news_score,
+            "last_price": r.last_price, "source": r.source,
+            "data_date": r.data_date, "offline": r.offline,
+            "notes": r.notes, "as_of": as_of,
+        }
+    try:
+        with open(STATE_PATH, "w", encoding="utf-8") as f:
+            _json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:  # noqa: BLE001
+        pass
+    return as_of
+
+
+def load_signal_state() -> dict:
+    try:
+        with open(STATE_PATH, "r", encoding="utf-8") as f:
+            return _json.load(f)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def state_fresh(state: dict, max_age_hours: int = 24) -> bool:
+    """信号状态是否在有效期内（默认 24h 内算当日有效）。"""
+    if not state or not state.get("as_of"):
+        return False
+    try:
+        dt = datetime.strptime(state["as_of"], "%Y-%m-%d %H:%M")
+        return (datetime.now() - dt) <= timedelta(hours=max_age_hours)
+    except Exception:  # noqa: BLE001
+        return False
+

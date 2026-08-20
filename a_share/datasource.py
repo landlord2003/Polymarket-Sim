@@ -337,6 +337,60 @@ def fetch_snapshot(symbol: str, fast: bool = False) -> dict:
     return snap
 
 
+# ----------------------------------------------------- 腾讯实时快照(更稳)
+def fetch_snapshot_tencent(symbol: str, fast: bool = False) -> dict:
+    """腾讯实时快照 qt.gtimg.cn（比东财稳，几乎不限流）。
+
+    返回与 fetch_snapshot 同形 dict（金额单位：元）。任一核心字段缺失置 None。
+    失败抛 DataSourceError。市值类字段腾讯单位为「亿元」，内部已换算为元。
+    """
+    code = _qt_code(symbol)
+    url = f"https://qt.gtimg.cn/q={code}"
+    text = _http_get(url, encoding="gbk",
+                     timeout=6 if fast else TIMEOUT,
+                     retries=1 if fast else 3)
+    if "=" not in text or ";" not in text:
+        raise DataSourceError(f"{symbol} 腾讯快照返回异常")
+    payload = text.split("=", 1)[1].strip().rstrip(";").strip('"')
+    p = payload.split("~")
+    if len(p) < 33 or not p[3]:
+        raise DataSourceError(f"{symbol} 腾讯快照字段不足")
+    try:
+        price = float(p[3])
+    except (ValueError, TypeError):
+        raise DataSourceError(f"{symbol} 腾讯快照无现价")
+
+    def _f(i, t=float):
+        try:
+            v = p[i]
+            return t(v) if v not in ("", "-", "0.000") else None
+        except (IndexError, ValueError, TypeError):
+            return None
+
+    snap = {
+        "symbol": symbol,
+        "name": p[1] or None,
+        "price": price,
+        "pct": _f(30),
+        "change": _f(29),
+        "high": _f(31),
+        "low": _f(32),
+        "open": _f(5),
+        "prev_close": _f(4),
+        "volume": (_f(6) or 0) * 100,        # 手→股
+        "amount": None,                       # 该接口不直接给成交额（嵌套字段复杂，留空）
+        "amplitude": _f(45),
+        "vol_ratio": None,
+        "mktcap": (_f(36) or 0) * 1e8,        # 亿元→元
+        "float_mktcap": (_f(37) or 0) * 1e8,
+        "pe": _f(39) or _f(34),               # 动市盈率优先，回退 TTM
+        "pb": _f(40) or _f(35),
+        "turnover": _f(38),
+        "source": "腾讯实时快照(qt.gtimg.cn)",
+    }
+    return snap
+
+
 # ----------------------------------------------------- 资金流向分项(主/大/中/小单)
 
 def fetch_fund_flow_breakdown(symbol: str, fast: bool = False) -> dict:

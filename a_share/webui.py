@@ -32,14 +32,103 @@ sys.path.insert(0, HERE)
 
 import run_daily
 from run_daily import load_watchlist, build_report, WATCHLIST
-from signal_engine import analyze_stock, StockResult
+from signal_engine import (analyze_stock, StockResult, load_signal_state,
+                           save_signal_state, state_fresh)
 from screener import run_screener, load_sectors
 import re
 from html import escape
 from notify import send_markdown, send_wecom
 from datasource import (fetch_realtime, market_phase, fetch_snapshot,
-                       fetch_fund_flow_breakdown, fetch_financials, fetch_news_titles,
+                       fetch_snapshot_tencent, fetch_fund_flow_breakdown,
+                       fetch_financials, fetch_news_titles,
                        fetch_crypto_quotes, fetch_kline, DataSourceError)
+
+
+# ----------------------------------------------------- 信号持久化读取（每日一次）
+def _fetch_live_price(symbol: str):
+    """轻量实时价（新浪批量），仅用于显示与盘中提示；失败返回 None。"""
+    try:
+        d = fetch_realtime([symbol])
+        return d.get(symbol)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _intraday_alert(item: dict, live_price):
+    """盘中实时价相对决策带（建仓区/趋势线/阻力位）的提示，仅信息不改信号。"""
+    rules = item.get("rules") or {}
+    if live_price is None:
+        return ""
+    br = rules.get("buy_range")
+    sl = rules.get("stop_loss")
+    rs = rules.get("resistance")
+    if sl is not None and live_price <= sl:
+        return f"⚠️ 盘中跌破趋势线 {sl}"
+    if isinstance(br, (list, tuple)) and len(br) == 2 and br[0] <= live_price <= br[1]:
+        return f"✅ 盘中处于建仓区 {br[0]}~{br[1]}"
+    if rs is not None and live_price >= rs:
+        return f"📈 盘中触及阻力位 {rs}"
+    return ""
+
+
+def get_watchlist_signals(watch: dict, offline: bool = False,
+                          max_age_hours: int = 24):
+    """返回 (results, as_of)。
+
+    - 状态缺失或超 24h：实时重算四维度信号并持久化（每日一次，代价可控）。
+    - 状态新鲜：直接复用持久化信号（稳定，不再随盘中 tick 秒翻），
+      仅拉轻量实时价更新「现价」与「盘中提示」。
+
+    根治「万丰奥威上午买入、下午观望」：信号是每日收盘决策，盘中价只做提示。
+    """
+    weights = watch.get("weights")
+    holding = watch.get("holding", False)
+    state = load_signal_state()
+    state_as_of = state.get("as_of", "")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    if offline or not state_fresh(state, max_age_hours):
+        results = []
+        for item in watch["watchlist"]:
+            r = analyze_stock(item["symbol"], item.get("name", ""),
+                              rules=item.get("rules"), weights=weights,
+                              holding=holding, force_offline=offline)
+            results.append(r)
+        as_of = save_signal_state(results) if not offline else now
+        return results, as_of
+
+    # 状态新鲜：用持久化信号重建，避免每条都重算导致秒翻
+    results = []
+    for item in watch["watchlist"]:
+        sym = item["symbol"]
+        name = item.get("name", "")
+        s = state.get("symbols", {}).get(sym)
+        if not s:
+            r = analyze_stock(sym, name, rules=item.get("rules"), weights=weights,
+                              holding=holding, force_offline=offline)
+            results.append(r)
+            continue
+        r = StockResult(
+            symbol=sym, name=s.get("name", name),
+            market_score=s.get("market_score", 0.0),
+            money_score=s.get("money_score", 0.0),
+            sector_score=s.get("sector_score", 0.0),
+            news_score=s.get("news_score", 0.0),
+            composite=s.get("composite", 0.0),
+            signal=s.get("signal", ""), signal_emoji=s.get("emoji", ""),
+            notes=s.get("notes", []), source=s.get("source", ""),
+            data_date=s.get("data_date", ""), offline=s.get("offline", False),
+            as_of=s.get("as_of", state_as_of),
+        )
+        live = _fetch_live_price(sym)
+        if live:
+            r.last_price = live.get("price")
+            r.pct_change = live.get("pct")
+            r.intraday_alert = _intraday_alert(item, live.get("price"))
+        else:
+            r.intraday_alert = _intraday_alert(item, r.last_price)
+        results.append(r)
+    return results, state_as_of
 import sim_engine
 from dashboard import (render_dashboard, render_stock_detail, render_portfolio)
 
@@ -157,6 +246,59 @@ def _log_err(msg):
         pass
 
 
+def _fetch_snapshot_best(sym):
+    """快照优先腾讯(稳)，失败/缺价回退东财；估值字段优先用东财补全。"""
+    snap_t = snap_e = None
+    try:
+        snap_t = fetch_snapshot_tencent(sym, fast=True)
+    except Exception:  # noqa: BLE001
+        snap_t = None
+    try:
+        snap_e = fetch_snapshot(sym, fast=True)
+    except Exception:  # noqa: BLE001
+        snap_e = None
+    if not snap_t and not snap_e:
+        raise DataSourceError("快照(腾讯/东财)均不可用")
+    snap = snap_t or snap_e
+    # 用东财补全腾讯缺失的估值字段（pe/pb/市值/换手等）
+    if snap is snap_t and snap_e:
+        for k in ("pe", "pb", "mktcap", "float_mktcap", "turnover",
+                  "amplitude", "vol_ratio", "amount"):
+            if not snap.get(k) and snap_e.get(k) is not None:
+                snap[k] = snap_e[k]
+    return snap
+
+
+def _fetch_financials_best(sym):
+    try:
+        return fetch_financials(sym, fast=True)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from tushare_adapter import fetch_financials_tushare
+        r = fetch_financials_tushare(sym)
+        if r:
+            return r
+    except Exception:  # noqa: BLE001
+        pass
+    return DataSourceError("财务(东财/Tushare)均不可用")
+
+
+def _fetch_flow_best(sym):
+    try:
+        return fetch_fund_flow_breakdown(sym, fast=True)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from tushare_adapter import fetch_money_flow_tushare
+        r = fetch_money_flow_tushare(sym)
+        if r:
+            return r
+    except Exception:  # noqa: BLE001
+        pass
+    return DataSourceError("资金流(东财/Tushare)均不可用")
+
+
 def _build_stock_detail(sym):
     """并发抓取详情数据，整体 8s 硬上限。
 
@@ -204,9 +346,9 @@ def _build_stock_detail(sym):
     import concurrent.futures as cf
     ex = cf.ThreadPoolExecutor(max_workers=5)
     try:
-        f_snap = ex.submit(_safe, lambda: fetch_snapshot(sym, fast=True), "快照(东财)")
-        f_ff = ex.submit(_safe, lambda: fetch_fund_flow_breakdown(sym, fast=True), "资金流(东财)")
-        f_fin = ex.submit(_safe, lambda: fetch_financials(sym, fast=True), "财务(东财)")
+        f_snap = ex.submit(_safe, lambda: _fetch_snapshot_best(sym), "快照(腾讯/东财)")
+        f_ff = ex.submit(_safe, lambda: _fetch_flow_best(sym), "资金流(东财/Tushare)")
+        f_fin = ex.submit(_safe, lambda: _fetch_financials_best(sym), "财务(东财/Tushare)")
         f_kl = ex.submit(_safe, lambda: fetch_kline(sym, days=60, fast=True), "日K(腾讯/东财/新浪)")
         f_news = ex.submit(_safe, lambda: fetch_news_titles(sym, limit=8), "新闻(东财)")
         done, _ = cf.wait([f_snap, f_ff, f_fin, f_kl, f_news], timeout=8)
@@ -564,14 +706,10 @@ def _run_scan(mode: str, offline: bool, push: bool, sectors: list = None):
         holding = watch.get("holding", False)  # 顶层持仓状态：False=空仓
         results = []
         any_offline = False
+        as_of = ""
         if mode in ("daily", "both"):
-            for item in watch["watchlist"]:
-                r = analyze_stock(item["symbol"], item.get("name", ""),
-                                  rules=item.get("rules"), weights=weights,
-                                  holding=holding, force_offline=offline)
-                if r.offline:
-                    any_offline = True
-                results.append(r)
+            results, as_of = get_watchlist_signals(watch, offline=offline)
+            any_offline = any(r.offline for r in results)
 
         scr = None
         show_wl = mode in ("daily", "both")
@@ -588,7 +726,7 @@ def _run_scan(mode: str, offline: bool, push: bool, sectors: list = None):
         mode_tag = "offline" if (offline or any_offline) else "online"
         html = render_dashboard(results if show_wl else [],
                                 screener_result=scr, mode=mode_tag,
-                                show_watchlist=show_wl)
+                                show_watchlist=show_wl, as_of=as_of)
 
         pushed = False
         if push and not offline and not any_offline and mode in ("daily", "both"):

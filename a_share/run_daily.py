@@ -18,7 +18,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from signal_engine import analyze_stock, StockResult
+from signal_engine import analyze_stock, StockResult, save_signal_state
 from notify import send_markdown, send_wecom
 from screener import run_screener, build_screener_report
 from dashboard import write_dashboard
@@ -86,6 +86,10 @@ def main():
         if r.offline:
             offline_any = True
         results.append(r)
+
+    # 持久化当日信号（看板主表每日读它，不再盘中重算秒翻）
+    if not args.offline:
+        save_signal_state(results)
 
     report = build_report(results)
 

@@ -96,7 +96,10 @@ def _watchlist_table(results) -> str:
             f"<tr{tr_cls}>"
             f'<td class="code">{sym}</td>'
             f"<td>{nm}</td>"
-            f'<td class="sig">{r.signal_emoji} {escape(r.signal)}</td>'
+            f'<td class="sig">{r.signal_emoji} {escape(r.signal)}'
+            + (f'<br><span class="ialert">{escape(r.intraday_alert)}</span>'
+               if getattr(r, "intraday_alert", "") else "")
+            + f'</td>'
             f'<td class="score">{_bar(r.composite)}<small>{_fmt(r.composite)}</small></td>'
             f'<td class="px">{price}<br>{pct_html}</td>'
             f'<td class="src">{src_html}<br><small>{escape(ddate)}</small></td>'
@@ -191,6 +194,7 @@ td.src { white-space:nowrap; font-size:12px; }
 td.src small { color:#777; }
 .code { font-family:"SFMono-Regular",Consolas,monospace; color:#7fb4ff; white-space:nowrap; }
 .sig { white-space:nowrap; font-weight:600; }
+.ialert { font-size:11px; font-weight:400; color:#7fb4ff; display:block; margin-top:2px; }
 .score { min-width:130px; }
 .bar { height:8px; background:#2a3340; border-radius:5px; overflow:hidden; }
 .bar span { display:block; height:100%; border-radius:5px; }
@@ -249,7 +253,8 @@ footer { color:#6b7888; font-size:12px; border-top:1px solid #2a3340;
 
 
 def render_dashboard(results, screener_result: dict = None,
-                     mode: str = "online", show_watchlist: bool = True) -> str:
+                     mode: str = "online", show_watchlist: bool = True,
+                     as_of: str = "") -> str:
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     badge_cls = "online" if mode == "online" else "offline"
     badge_txt = "联网真实信号" if mode == "online" else "离线合成·仅验证"
@@ -260,8 +265,11 @@ def render_dashboard(results, screener_result: dict = None,
         f'<section><h2>🔎 五板块自动选股推荐</h2>{scr}</section>'
         if scr else ""
     )
+    asof_note = (f'<div class="meta">信号截至 {as_of}（每日更新，盘中仅提示价突破，'
+                 f'买卖信号不随分时抖动）</div>') if as_of else ""
     wl_section = (
         "<section><h2>👁 自选股信号总览</h2>"
+        f"{asof_note}"
         "<table><thead><tr><th>代码</th><th>名称</th><th>信号</th>"
         "<th>综合分</th><th>最新价<br><small>涨跌</small></th>"
         "<th>数据源<br><small>数据日</small></th>"
