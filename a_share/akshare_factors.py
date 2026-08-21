@@ -30,6 +30,8 @@ except Exception:  # pragma: no cover
 try:
     from . import datasource as ds  # type: ignore
 except ImportError:  # 直接以脚本方式运行时
+    import sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
     import datasource as ds  # type: ignore
 
 HERE = _os.path.dirname(_os.path.abspath(__file__))
