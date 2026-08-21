@@ -1,17 +1,20 @@
-"""深化订单流微观结构（①）：非线性交互特征重测 IC。
+"""扩池复核（③）：拉长历史 + 扩大股票池，确认 IC 稳健性、是否小样本过拟合。
 
-对比 walk-forward 横截面下的四种配置（无未来函数）：
-  (A) X_old  = 24维（5因子+9extra+10订单流）        —— 旧基线 IC≈0.0845
-  (B) X_new  = 32维（+8维订单流非线性交互）          —— ① 主测试
-  (C) X_full = 43维（+11维正交因子）                 —— 叠加 alt
-  (D) GBT(X_new) = 非线性模型能否更好利用交互        —— 模型对比
+两种运行（组合）：
+  real  + core(39只, 有真实资金流)   -> 检验「订单流 edge」在长历史大截面是否稳健
+  proxy + extended(110+只)           -> 检验「基础价量因子」在扩池下是否仍无 edge（稳健）
 
-主指标：横截面 IC（Spearman）、IC>0 占比、多-空每期收益、多空年化。
-另报告 8 个交互特征与 11 个 alt 因子的单因子 IC（定位真 edge）。
+real 模式仅用 core 池：扩池股票当前无真实资金流数据（Tushare token 未配置 / 东财
+资金流接口被 WAF 掐断），故 real 不扩池；core 池 K 线拉长到 ~10 年（days=2400），
+并过滤到 moneyflow 起始日(2019)之后，保证标签与订单流对齐。
+proxy 模式用 extended 池全历史，价量构造订单流，验证基础因子泛化。
+
+输出：整体 IC / IC>0 占比 / t 值 / 分年度 IC，以及 X_old(24)/X_new(32)/X_full(43)/GBT 对照。
 """
 import os
 import sys
 import json
+import glob
 import numpy as np
 import pandas as pd
 from datetime import datetime
@@ -27,6 +30,66 @@ TOP_BOT = 0.30
 OUT_DIR = "D:/WorkBuddy/output"
 OLD_DIM = 24          # 旧版 X 维度（feat_vector14 + orderflow10）
 INT_DIM = 8           # 新增交互维度
+
+# 扩池：在 CORE_POOL(39只) 之外补充主流蓝筹/成长/各板块代表，去重后约 120 只。
+EXTRA_POOL = [
+    # 银行
+    ("600036", "招商银行", "银行"), ("601166", "兴业银行", "银行"), ("600000", "浦发银行", "银行"),
+    ("601398", "工商银行", "银行"), ("601328", "交通银行", "银行"), ("601288", "农业银行", "银行"),
+    ("600919", "江苏银行", "银行"), ("002142", "宁波银行", "银行"),
+    # 保险
+    ("601318", "中国平安", "保险"), ("601628", "中国人寿", "保险"), ("601601", "中国太保", "保险"),
+    # 券商
+    ("600030", "中信证券", "券商"), ("600837", "海通证券", "券商"), ("601688", "华泰证券", "券商"),
+    ("000776", "广发证券", "券商"), ("600999", "招商证券", "券商"), ("601211", "国泰君安", "券商"),
+    # 白酒食饮
+    ("600519", "贵州茅台", "消费"), ("000858", "五粮液", "消费"), ("000568", "泸州老窖", "消费"),
+    ("600809", "山西汾酒", "消费"), ("000596", "古井贡酒", "消费"), ("603369", "今世缘", "消费"),
+    ("600887", "伊利股份", "消费"),
+    # 家电
+    ("000333", "美的集团", "消费"), ("000651", "格力电器", "消费"), ("002032", "苏泊尔", "消费"),
+    ("600690", "海尔智家", "消费"),
+    # 医药
+    ("600276", "恒瑞医药", "医药"), ("300760", "迈瑞医疗", "医药"), ("600196", "复星医药", "医药"),
+    ("300347", "泰格医药", "医药"), ("600436", "片仔癀", "医药"), ("002821", "凯莱英", "医药"),
+    ("300015", "爱尔眼科", "医药"), ("600763", "通策医疗", "医药"),
+    # 汽车
+    ("600104", "上汽集团", "汽车"), ("601238", "广汽集团", "汽车"), ("000625", "长安汽车", "汽车"),
+    ("601633", "长城汽车", "汽车"), ("601127", "赛力斯", "汽车"),
+    # 能源电力
+    ("600028", "中国石化", "能源"), ("601857", "中国石油", "能源"), ("600900", "长江电力", "能源"),
+    ("601985", "中国核电", "能源"), ("600905", "三峡能源", "能源"), ("600886", "国投电力", "能源"),
+    # 化工材料
+    ("600585", "海螺水泥", "材料"), ("600346", "恒力石化", "材料"), ("600309", "万华化学", "材料"),
+    ("002493", "荣盛石化", "材料"), ("601216", "君正集团", "材料"),
+    # 地产建筑
+    ("000002", "万科A", "地产"), ("001979", "招商蛇口", "地产"), ("600048", "保利发展", "地产"),
+    ("601668", "中国建筑", "地产"), ("601390", "中国中铁", "地产"), ("601186", "中国铁建", "地产"),
+    ("601800", "中国交建", "地产"), ("601669", "中国电建", "地产"), ("600153", "建发股份", "地产"),
+    # 机械
+    ("600031", "三一重工", "机械"), ("000157", "中联重科", "机械"), ("601100", "恒立液压", "机械"),
+    ("603338", "浙江鼎力", "机械"),
+    # 通信/TMT
+    ("000063", "中兴通讯", "TMT"), ("600050", "中国联通", "TMT"), ("600941", "中国移动", "TMT"),
+    ("002241", "歌尔股份", "TMT"), ("300433", "蓝思科技", "TMT"), ("002475", "立讯精密", "TMT"),
+    ("300782", "卓胜微", "TMT"), ("688981", "中芯国际", "TMT"),
+    # 传媒互联
+    ("300059", "东方财富", "TMT"), ("600570", "恒生电子", "TMT"), ("600588", "用友网络", "TMT"),
+    ("002410", "广联达", "TMT"),
+    # 农业
+    ("002714", "牧原股份", "农业"), ("300498", "温氏股份", "农业"), ("600598", "北大荒", "农业"),
+    # 免税
+    ("601888", "中国中免", "消费"),
+]
+
+
+def extended_universe():
+    base = M.build_universe()
+    seen = {c: (c, n, s) for c, n, s in base}
+    for c, n, s in EXTRA_POOL:
+        if c not in seen:
+            seen[c] = (c, n, s)
+    return list(seen.values())
 
 
 def spearman(x, y):
@@ -59,24 +122,35 @@ def standardize(X, mu=None, sd=None):
     return (X - mu) / sd, mu, sd
 
 
-def build_panel(symbols, money_mode):
+def build_panel(symbols, money_mode, days):
     """返回 list of dict：含 X_old(24)/X_new(32)/X_int(8)/X_full_old(35)/X_full_new(43)/alt(11)/fwd。"""
-    money_cache = {}
+    money_cache, mstart = {}, {}
     if money_mode == "real":
         for (s, _, _) in symbols:
             c = load_moneyflow_full(s)
-            if c is not None:
+            if c is not None and len(c) > 0:
                 money_cache[s] = c
+                mstart[s] = str(c["trade_date"].min())
     bench_hist = M.fetch_benchmark_histories(days=400)
     hs300 = bench_hist.get("沪深300")
     panel = []
+    skipped_synth = []
     for (s, name, sector) in symbols:
-        df = M.load_hist(s)
+        df = M.load_hist(s, days)
+        if getattr(df, "attrs", {}).get("synthetic"):
+            skipped_synth.append(s)
+            continue
         n = len(df)
         if n < M.START_DAYS + HORIZON + 1:
             continue
         rows = M.build_rows(s, bench_hist, hs300, HORIZON, money_cache=money_cache)
         if not rows:
+            continue
+        # real 模式：过滤到 moneyflow 起始日之后，保证订单流/标签对齐
+        if money_mode == "real" and s in mstart:
+            cut = pd.Timestamp(mstart[s])
+            rows = [r for r in rows if pd.Timestamp(r["date"]) >= cut]
+        if len(rows) < 5:
             continue
         dates = [r["date"] for r in rows]
         X = np.array([r["X"] for r in rows], float)        # 32维（24+8）
@@ -93,6 +167,8 @@ def build_panel(symbols, money_mode):
                       "X_old": X_old, "X_new": X, "X_int": X_int,
                       "X_full_old": X_full_old, "X_full_new": X_full_new,
                       "alt": alt, "fwd": np.array(fwd, float)})
+    if skipped_synth:
+        print(f"  [skip-synth] 联网失败降级合成，已跳过 {len(skipped_synth)} 只: {skipped_synth[:12]}")
     return panel
 
 
@@ -115,11 +191,30 @@ def main():
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--money", default="real", choices=["proxy", "real"])
+    ap.add_argument("--days", type=int, default=2400)
+    ap.add_argument("--universe", default="core", choices=["core", "extended"])
+    ap.add_argument("--limit", type=int, default=0, help="只取 universe 前 N 只（分批跑用）")
+    ap.add_argument("--offset", type=int, default=0, help="universe 切片偏移（分批跑用）")
+    ap.add_argument("--tag", default="", help="输出文件名后缀，便于分批区分")
     args = ap.parse_args()
-    mm = args.money
-    print(f"[{datetime.now():%H:%M:%S}] 构建横截面面板 (horizon={HORIZON}, money={mm}) ...")
-    symbols = M.build_universe()
-    panel = build_panel(symbols, mm)
+    mm, days, uni = args.money, args.days, args.universe
+
+    # real 模式无扩池股票真实资金流 -> 强制 core
+    if mm == "real" and uni == "extended":
+        print("[warn] real 模式无扩池股票资金流，强制 core 池")
+        uni = "core"
+    symbols = M.build_universe() if uni == "core" else extended_universe()
+    if args.offset:
+        symbols = symbols[args.offset:]
+    if args.limit:
+        symbols = symbols[:args.limit]
+
+    # 注：不再在此处删除 K 线缓存（会触发沙箱安全删除拦截导致中断）。
+    # 长历史由独立的 _prefetch_kline.py 直接覆盖写缓存完成，_xsec 只读取。
+
+    print(f"[{datetime.now():%H:%M:%S}] 构建横截面面板 (horizon={HORIZON}, money={mm}, "
+          f"universe={uni}, days={days}) ...")
+    panel = build_panel(symbols, mm, days)
     if not panel:
         print("  [warn] 无有效标的")
         return
@@ -148,7 +243,6 @@ def main():
 
     for k, rb in enumerate(reb_dates):
         rb_ts = pd.Timestamp(rb)
-        # 训练集（rb 之前）
         Xtr_o, Xtr_n, Xtr_full, ytr = [], [], [], []
         for p in panel:
             ds = p["dates"]
@@ -162,7 +256,6 @@ def main():
         Xtr_o = np.array(Xtr_o); Xtr_n = np.array(Xtr_n)
         Xtr_full = np.array(Xtr_full); ytr = np.array(ytr)
 
-        # 评分集（<=rb 的最新一行）
         so, sn, sf, gi, ga, fwds = [], [], [], [], [], []
         for p in panel:
             best = -1
@@ -199,7 +292,7 @@ def main():
         rec_new.append({"reb": str(rb), "ic": ic_new, "n": len(sn)})
         rec_full.append({"reb": str(rb), "ic": ic_full, "n": len(sf)})
         rec_gbt.append({"reb": str(rb), "ic": ic_gbt, "n": len(sn)})
-        if k % 6 == 0:
+        if k % 12 == 0:
             print(f"    {rb} n={len(so)} IC_old={ic_old:+.3f} IC_new={ic_new:+.3f} "
                   f"IC_full={ic_full:+.3f} IC_gbt={ic_gbt:+.3f}")
 
@@ -220,11 +313,26 @@ def main():
     pf_alt = {n: float(np.mean(v)) for n, v in per_alt.items()}
     pf_pos_alt = {n: float((np.array(v) > 0).mean()) for n, v in per_alt.items()}
 
-    print("\n=== 订单流交互特征重测 (horizon=%d) ===" % HORIZON)
+    # 分年度 IC（X_new）
+    years = {}
+    for r in rec_new:
+        years.setdefault(r["reb"][:4], []).append(r["ic"])
+    year_stats = {y: {"mean_ic": float(np.mean(v)), "ic_pos": float((np.array(v) > 0).mean()),
+                      "n": len(v)} for y, v in sorted(years.items())}
+    # 整体 t 值
+    a = np.array([r["ic"] for r in rec_new])
+    t_stat = float(a.mean() / (a.std(ddof=1) / np.sqrt(len(a)))) if a.std() > 0 else 0.0
+
+    print("\n=== 扩池复核 (horizon=%d, money=%s, universe=%s, days=%d) ===" %
+          (HORIZON, mm, uni, days))
+    print(f"  截面数: {len(rec_old)}  |  IC_new 整体 t 值: {t_stat:+.2f} (|t|>2≈p<0.05)")
     print(f"  IC(A) X_old 24维      : {mo_old:+.4f}  IC>0 {(po_old*100):.1f}%   (旧基线)")
     print(f"  IC(B) X_new 32维(+交互): {mo_new:+.4f}  IC>0 {(po_new*100):.1f}%   Δ={mo_new-mo_old:+.4f}")
     print(f"  IC(C) X_full 43维      : {mo_full:+.4f}  IC>0 {(po_full*100):.1f}%")
     print(f"  IC(D) GBT(X_new)      : {mo_gbt:+.4f}  IC>0 {(po_gbt*100):.1f}%")
+    print("  分年度 IC(B) X_new：")
+    for y, st in year_stats.items():
+        print(f"    {y}: IC={st['mean_ic']:+.4f}  IC>0={(st['ic_pos']*100):.1f}%  n={st['n']}")
     print("  交互特征单因子 IC（按 |IC| 排序）：")
     for name in sorted(pf_int, key=lambda x: -abs(pf_int[x])):
         print(f"    {name:24s} IC={pf_int[name]:+.4f}  IC>0={(pp_int[name]*100):.1f}%")
@@ -234,7 +342,9 @@ def main():
 
     out = {
         "horizon": HORIZON, "top_bot": TOP_BOT, "money_mode": mm,
-        "n_cross_sections": len(rec_old),
+        "universe": uni, "days": days,
+        "n_symbols": len(panel), "n_cross_sections": len(rec_old),
+        "t_stat_new": t_stat,
         "mean_ic_old_24": mo_old, "ic_pos_old": po_old,
         "mean_ic_new_32": mo_new, "ic_pos_new": po_new,
         "mean_ic_full_43": mo_full, "ic_pos_full": po_full,
@@ -242,10 +352,12 @@ def main():
         "interaction_contrib": mo_new - mo_old,
         "per_interaction_ic": pf_int, "per_interaction_pos": pp_int,
         "per_alt_ic": pf_alt, "per_alt_pos": pf_pos_alt,
+        "year_stats": year_stats,
         "records_old": rec_old, "records_new": rec_new,
         "records_full": rec_full, "records_gbt": rec_gbt,
     }
-    out_name = "ml_xsec_interact.json" if mm == "real" else "ml_xsec_interact_proxy.json"
+    tag = f"_{args.tag}" if args.tag else ""
+    out_name = f"ml_xsec_expand_{mm}_{uni}_{days}{tag}.json"
     with open(os.path.join(OUT_DIR, out_name), "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=2, default=str)
     print(f"\n[done] -> D:/WorkBuddy/output/{out_name}")
