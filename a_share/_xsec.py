@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ml_model as M
 from signal_engine import load_moneyflow_full, OF_INTERACT_NAMES
 import alt_factors as AF
+import l2_features as L2
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HORIZON = 10
@@ -172,6 +173,92 @@ def build_panel(symbols, money_mode, days):
     return panel
 
 
+def build_panel_l2(symbols, days, src="synth"):
+    """L2 模式面板：特征由 l2_features.build 提供（L2_DIM 维），标签 fwd 由 K 线算。
+
+    X_old = X_new = L2 特征；X_int 置零（L2 不做交互块）；X_full_* = hstack(L2, alt)。
+    下游 walk-forward 与 daily 模式共用同一循环（panel 字典 schema 一致）。
+    """
+    bench_hist = M.fetch_benchmark_histories(days=400)
+    hs300 = bench_hist.get("沪深300")
+    panel = []
+    for (s, name, sector) in symbols:
+        df = M.load_hist(s, days)
+        if getattr(df, "attrs", {}).get("synthetic"):
+            continue
+        n = len(df)
+        if n < M.START_DAYS + HORIZON + 1:
+            continue
+        closes_v = df["close"].values.astype(float)
+        valid, fwd = [], []
+        for j in range(M.START_DAYS, n - HORIZON):
+            if j + HORIZON >= n:
+                continue
+            valid.append(df.index[j])
+            fwd.append(closes_v[j + HORIZON] / closes_v[j] - 1)
+        if len(valid) < 5:
+            continue
+        l2 = L2.build(s, valid, df["close"], src=src)
+        if l2 is None or len(l2) == 0:
+            continue
+        l2 = l2.loc[[pd.Timestamp(d) for d in valid]]
+        if len(l2) != len(valid):
+            continue
+        X = l2.values.astype(float)
+        if np.any(~np.isfinite(X)):
+            X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+        dates = [pd.Timestamp(d) for d in valid]
+        alt = AF.build(s, dates, df["close"]).values.astype(float)
+        X_int = np.zeros((X.shape[0], INT_DIM))
+        X_full_old = np.hstack([X, alt])
+        X_full_new = np.hstack([X, alt])
+        panel.append({"symbol": s, "name": name, "dates": dates,
+                      "X_old": X, "X_new": X, "X_int": X_int,
+                      "X_full_old": X_full_old, "X_full_new": X_full_new,
+                      "alt": alt, "fwd": np.array(fwd, float)})
+    return panel
+
+
+def report_l2(panel, rec_new, days, src, tag):
+    """L2 模式专属报告（与 daily 报告的 old/new/full 结构不同）。"""
+    recs = rec_new
+    if not recs:
+        print("  [warn] L2 无足够截面")
+        return
+    a = np.array([r["ic"] for r in recs])
+    mo = float(a.mean()); po = float((a > 0).mean())
+    t_stat = float(a.mean() / (a.std(ddof=1) / np.sqrt(len(a)))) if a.std() > 0 else 0.0
+    years = {}
+    for r in recs:
+        years.setdefault(r["reb"][:4], []).append(r["ic"])
+    year_stats = {y: {"mean_ic": float(np.mean(v)), "ic_pos": float((np.array(v) > 0).mean()),
+                      "n": len(v)} for y, v in sorted(years.items())}
+    Xall = np.vstack([p["X_new"] for p in panel])
+    fall = np.concatenate([p["fwd"] for p in panel])
+    per_feat = {n: float(spearman(Xall[:, c], fall)) for c, n in enumerate(L2.L2_NAMES)}
+    print("\n=== L2 订单流因子 walk-forward IC (horizon=%d, src=%s, days=%d) ===" %
+          (HORIZON, src, days))
+    print(f"  标的={len(panel)} 截面数={len(recs)} L2维={Xall.shape[1]}")
+    print(f"  IC(L2 12维模型) 整体: {mo:+.4f}  IC>0 {(po*100):.1f}%  t={t_stat:+.2f} (|t|>2≈p<0.05)")
+    print("  分年度 IC：")
+    for y, st in year_stats.items():
+        print(f"    {y}: IC={st['mean_ic']:+.4f}  IC>0={(st['ic_pos']*100):.1f}%  n={st['n']}")
+    print("  单因子 IC（L2 12 维，按 |IC| 排序）：")
+    for name in sorted(per_feat, key=lambda x: -abs(per_feat[x])):
+        print(f"    {name:18s} IC={per_feat[name]:+.4f}")
+    print("  ⚠️ src=synth 为合成数据(无真实信号)，IC≈0 属预期，本跑仅验证 pipeline 不崩/维度对。")
+    print("     src=akshare 仅当日1天，不能跑 walk-forward；真实 edge 验证需付费历史逐笔(财富通 600元/年)。")
+    out = {"mode": "l2", "src": src, "horizon": HORIZON, "days": days,
+           "n_symbols": len(panel), "n_cross_sections": len(recs),
+           "ic_l2": mo, "ic_pos": po, "t_stat": t_stat,
+           "year_stats": year_stats, "per_feature_ic": per_feat, "records": recs}
+    tg = f"_{tag}" if tag else ""
+    out_name = f"ml_xsec_l2_{src}_{days}{tg}.json"
+    with open(os.path.join(OUT_DIR, out_name), "w", encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False, indent=2, default=str)
+    print(f"\n[done] -> D:/WorkBuddy/output/{out_name}")
+
+
 def fit_score_lr(Xtr, ytr, Xsc, Xref=None):
     Xtr_s, mu, sd = standardize(Xtr)
     m = M.LogisticRegression()
@@ -196,6 +283,10 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="只取 universe 前 N 只（分批跑用）")
     ap.add_argument("--offset", type=int, default=0, help="universe 切片偏移（分批跑用）")
     ap.add_argument("--tag", default="", help="输出文件名后缀，便于分批区分")
+    ap.add_argument("--features", default="daily", choices=["daily", "l2"],
+                    help="特征来源: daily=原日频(24+8维) | l2=逐笔订单流(L2_DIM维)")
+    ap.add_argument("--l2-src", default="synth", choices=["synth", "akshare"],
+                    help="l2 模式数据: synth=合成多日(全链路验证) | akshare=真实当日(仅解析校验)")
     args = ap.parse_args()
     mm, days, uni = args.money, args.days, args.universe
 
@@ -213,13 +304,16 @@ def main():
     # 长历史由独立的 _prefetch_kline.py 直接覆盖写缓存完成，_xsec 只读取。
 
     print(f"[{datetime.now():%H:%M:%S}] 构建横截面面板 (horizon={HORIZON}, money={mm}, "
-          f"universe={uni}, days={days}) ...")
-    panel = build_panel(symbols, mm, days)
+          f"universe={uni}, days={days}, features={args.features}) ...")
+    if args.features == "l2":
+        panel = build_panel_l2(symbols, days, src=args.l2_src)
+    else:
+        panel = build_panel(symbols, mm, days)
     if not panel:
         print("  [warn] 无有效标的")
         return
-    print(f"  有效标的：{len(panel)} 只 | old={panel[0]['X_old'].shape[1]} "
-          f"new={panel[0]['X_new'].shape[1]} int={INT_DIM} alt={len(AF.FACTOR_NAMES)}")
+    print(f"  有效标的：{len(panel)} 只 | 特征模式={args.features} | "
+          f"X维={panel[0]['X_new'].shape[1]} int={INT_DIM} alt={len(AF.FACTOR_NAMES)}")
 
     all_dates = set()
     for p in panel:
@@ -322,6 +416,10 @@ def main():
     # 整体 t 值
     a = np.array([r["ic"] for r in rec_new])
     t_stat = float(a.mean() / (a.std(ddof=1) / np.sqrt(len(a)))) if a.std() > 0 else 0.0
+
+    if args.features == "l2":
+        report_l2(panel, rec_new, days, args.l2_src, args.tag)
+        return
 
     print("\n=== 扩池复核 (horizon=%d, money=%s, universe=%s, days=%d) ===" %
           (HORIZON, mm, uni, days))
