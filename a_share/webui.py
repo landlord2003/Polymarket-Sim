@@ -701,7 +701,7 @@ function showMainDetail(q,d){
 function openMain(h){document.getElementById('mainModalBox').innerHTML=h;document.getElementById('mainModalMask').classList.add('show');}
 function openRecommend(){
   openMain('<button class="close" onclick="closeMain()">关闭</button>'
-    +'<h2>🤖 自动荐股（ML）</h2>'
+    +'<h2>🤖 横截面相对排名荐股（相对沪深300多空）</h2>'
     +'<div class="sub" id="recSub">加载中…</div>'
     +'<button id="recRefresh" onclick="refreshRecommend()">刷新荐股（后台扫39只）</button>'
     +'<div id="recBody" style="margin-top:10px"></div>');
@@ -715,6 +715,20 @@ function renderRecommend(d){
     sub.textContent='尚未生成荐股名单。点「刷新荐股」后台扫全池（约3-5分钟，39只龙头）。';
     return;
   }
+  if(d.version==='xsec'){
+    const ver = (d.label_mode==='rel_hs300') ? '相对沪深300' : '绝对涨跌';
+    sub.innerHTML='生成：'+d.generated_at+' ｜ 标签：<b>'+ver+'</b> ｜ 视角：未来'+d.horizon+'日 ｜ 多头/空头各 '+d.top_n+' 只 ｜ 有效 '+d.n_valid+'/'+d.n_universe;
+    const longRows=(d.longs||[]).map((r,i)=>recRow(r,i+1)).join('');
+    const shortRows=(d.shorts||[]).map((r,i)=>recRow(r,i+1)).join('');
+    document.getElementById('recBody').innerHTML=
+      '<div class="sub" style="color:#8fd">🟢 <b>多头候选</b>（最看好像跑赢沪深300，Top '+d.top_n+'）</div>'
+      +recTable(longRows)
+      +'<div class="sub" style="color:#f99;margin-top:10px">🔴 <b>空头候选</b>（最看好像跑输沪深300，Bottom '+d.top_n+'）</div>'
+      +recTable(shortRows)
+      +'<div class="sub" style="margin-top:8px">⚠️ 横截面 IC≈0.08 为<b>弱因子</b>；本名单是「相对沪深300排名最高候选」，多头部/空尾部思路，<b>非单票买卖点</b>，切勿重仓押注，风险自担。</div>';
+    return;
+  }
+  // legacy 旧版（绝对方向 ML 评分）
   sub.textContent='生成：'+d.generated_at+' ｜ 模型：'+d.model+' ｜ 视角：未来'+d.horizon+'日 ｜ 评分阈值≥'+(d.min_prob*100)+'% ｜ 高置信 '+d.rec.length+' 只 / 全池 '+d.picks.length+' 只';
   const list=(d.rec.length?d.rec:d.picks.slice(0,15));
   const rows=list.map((r,i)=>{
@@ -735,6 +749,20 @@ function renderRecommend(d){
     +'<tr style="color:#9fb0c0;text-align:left"><th>#</th><th>代码</th><th>名称</th><th>板块</th><th>ML 评分</th><th>最新价</th><th>今日</th><th>趋势</th><th>资金</th><th>轮动</th><th>估值</th><th>大盘</th></tr>'
     +rows+'</table>'
     +'<div class="sub" style="margin-top:8px">⚠️ 历史回测 precision_up 约45-52%（随机基准50%），模型暂无稳定方向 alpha；本「ML 评分」为未校准相对排序、非涨跌概率，仅供参考、风险自担。</div>';
+}
+function recRow(r,i){
+  const c=r.pct>0?'up':(r.pct<0?'down':'flat');const sg=r.pct>0?'+':'';
+  return '<tr>'
+    +'<td>'+i+'</td><td>'+r.symbol+'</td><td>'+r.name+'</td><td>'+r.sector+'</td>'
+    +'<td><b>'+(r.prob*100).toFixed(1)+'%</b></td>'
+    +'<td>'+r.last.toFixed(2)+'</td>'
+    +'<td class="'+c+'">'+sg+r.pct.toFixed(2)+'%</td>'
+    +'</tr>';
+}
+function recTable(rows){
+  return '<table style="width:100%;border-collapse:collapse;font-size:12px">'
+    +'<tr style="color:#9fb0c0;text-align:left"><th>#</th><th>代码</th><th>名称</th><th>板块</th><th>跑赢概率</th><th>最新价</th><th>今日</th></tr>'
+    +rows+'</table>';
 }
 function refreshRecommend(){
   const b=document.getElementById('recRefresh'); if(b){b.disabled=true;b.textContent='计算中…';}
@@ -1119,13 +1147,26 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps(res, ensure_ascii=False, default=str),
                        "application/json; charset=utf-8")
         elif p.path == "/api/recommend":
-            # 读自动荐股缓存（由 ml_model.py --recommend 生成）；无则提示未生成
-            cache_path = os.path.join(HERE, "recommend_cache.json")
+            # 优先读横截面相对排名荐股缓存（新版，相对沪深300多空）；旧版兜底
+            cache_path = os.path.join(HERE, "xsec_recommend_cache.json")
             if os.path.exists(cache_path):
                 try:
                     with open(cache_path, "r", encoding="utf-8") as _f:
                         d = json.load(_f)
                     d["exists"] = True
+                    d["version"] = "xsec"
+                    self._send(200, json.dumps(d, ensure_ascii=False, default=str),
+                               "application/json; charset=utf-8")
+                    return
+                except Exception:  # noqa: BLE001
+                    pass
+            old = os.path.join(HERE, "recommend_cache.json")
+            if os.path.exists(old):
+                try:
+                    with open(old, "r", encoding="utf-8") as _f:
+                        d = json.load(_f)
+                    d["exists"] = True
+                    d["version"] = "legacy"
                     self._send(200, json.dumps(d, ensure_ascii=False, default=str),
                                "application/json; charset=utf-8")
                     return
@@ -1230,17 +1271,18 @@ class Handler(BaseHTTPRequestHandler):
                                        ensure_ascii=False),
                        "application/json; charset=utf-8")
         elif p.path == "/api/recommend/refresh":
-            # 后台触发 ml_model.py --recommend（扫全池、约3-5分钟），结果写入 cache
+            # 后台触发横截面相对排名荐股（相对沪深300多空版），结果写入 xsec_recommend_cache.json
             try:
                 import subprocess
                 py = sys.executable
                 script = os.path.join(HERE, "ml_model.py")
-                out = "D:/WorkBuddy/output/ml_recommend.md"
-                subprocess.Popen([py, script, "--recommend", "--rec-out", out],
+                subprocess.Popen([py, script, "--xsec-recommend", "--money", "real",
+                                  "--xsec-label", "rel_hs300", "--xsec-top-n", "12",
+                                  "--horizon", "10", "--model", "LR"],
                                  cwd=HERE, stdout=subprocess.DEVNULL,
                                  stderr=subprocess.DEVNULL)
                 self._send(200, json.dumps(
-                    {"ok": True, "msg": "已启动后台荐股重算（约3-5分钟，扫39只）"},
+                    {"ok": True, "msg": "已启动后台横截面荐股重算（约3-5分钟，扫39只）"},
                     ensure_ascii=False), "application/json; charset=utf-8")
             except Exception as e:  # noqa: BLE001
                 self._send(200, json.dumps({"ok": False, "msg": str(e)},

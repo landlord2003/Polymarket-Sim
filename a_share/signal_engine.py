@@ -474,6 +474,47 @@ def refined_money_block(pre: dict, i: int, has_real: bool) -> list:
     return out
 
 
+# 订单流非线性交互特征（8维）——让线性模型也能表达微观结构的交互效应
+OF_INTERACT_DIM = 8
+OF_INTERACT_NAMES = [
+    "ofi_elg_lg_x_strength",   # 特大单-大单背离 × 主力强度
+    "ofi_inst_x_mainnet",      # 机构-散户分化 × 主力净流
+    "ofi_div_x_strength",      # 价格-资金背离 × 主力强度
+    "ofi_consec_x_mainnet",    # 连续净流入 × 主力净流（加速）
+    "ofi_mfi_x_adi",           # 资金强度 × 资金趋势（共振）
+    "ofi_elg_lg_sq",           # 特大单主导幅度（平方，非线性）
+    "ofi_mainnet_sq",          # 主力净流极端度（平方）
+    "ofi_elg_x_lg_slope",      # 特大单 × 大单 趋势共振
+]
+
+
+def order_flow_interactions(base10: list, has_real: bool) -> list:
+    """由 refined_money_block 的 10 维输出构造 8 维非线性交互特征。
+
+    proxy 模式（has_real=False）返回全 0，保持与价量隔离一致（避免凭空制造信号）。
+    交互项让 LR（本身线性）也能刻画订单档位博弈的非线性结构；同时作为
+    单因子 IC 诊断项，定位哪些交互真有 edge。
+    """
+    if not has_real:
+        return [0.0] * OF_INTERACT_DIM
+    b = [float(x) for x in base10]
+    def clip(v):
+        return max(-3.0, min(3.0, v))
+    elg_lg = b[3]; inst = b[4]; strength = b[5]; net = b[0]
+    div = b[9]; consec = b[6]; mfi = b[7]; adi = b[8]
+    elg_s = b[1]; lg_s = b[2]
+    out = [0.0] * OF_INTERACT_DIM
+    out[0] = clip(elg_lg * strength)
+    out[1] = clip(inst * net)
+    out[2] = clip(div * strength)
+    out[3] = clip(consec * net)
+    out[4] = clip(mfi * adi)
+    out[5] = clip(elg_lg * elg_lg)
+    out[6] = clip(net * net)
+    out[7] = clip(elg_s * lg_s)
+    return out
+
+
 def dim_money(symbol: str, df: Optional[pd.DataFrame] = None,
               inflow_series: Optional[list] = None) -> tuple[float, list]:
     """资金维度（阶段1）：真实主力净流入优先，失败回退本地量价代理。

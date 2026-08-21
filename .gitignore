@@ -17,6 +17,7 @@ pip_install*.log
 
 # 自动荐股缓存（运行时生成，不入库）
 a_share/recommend_cache.json
+a_share/xsec_recommend_cache.json
 
 # 生成的看板产物（每次运行重生成，不入库）
 output/dashboard.html

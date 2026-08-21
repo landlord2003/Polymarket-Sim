@@ -39,7 +39,8 @@ from signal_engine import (dim_trend, money_proxy, dim_valuation,
                            dim_sector_rotation, dim_regime,
                            money_score_from_inflow, proxy_inflow_series,
                            load_moneyflow_cache, load_moneyflow_full,
-                           refined_money_block, _mfi_series, _adi_series,
+                           refined_money_block, order_flow_interactions,
+                           _mfi_series, _adi_series,
                            _map_signal, DEFAULT_WEIGHTS)
 from akshare_factors import fetch_benchmark_histories
 
@@ -405,7 +406,9 @@ def build_rows(symbol: str, bench_hist: dict, hs300, horizon: int,
         vec, fac = feat_vector(symbol, sub, bench_hist, hs300, tgt,
                                money_series=inflow_full)
         rb = refined_money_block(pre, i, has_real)
-        vec = np.concatenate([vec, np.asarray(rb, dtype=float)])
+        oi = order_flow_interactions(rb, has_real)
+        vec = np.concatenate([vec, np.asarray(rb, dtype=float),
+                              np.asarray(oi, dtype=float)])
         if np.any(~np.isfinite(vec)):
             vec = np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0)
         y = 1.0 if closes[i + horizon] / closes[i] - 1 > 0 else 0.0
@@ -522,7 +525,9 @@ def predict_latest(symbol, name, sector, horizon, ModelCls, bench_hist,
     pre, has_real, inflow_full = _build_pre(symbol, df, money_cache)
     vec, fac = feat_vector(symbol, sub, bench_hist, hs300, tgt, money_series=inflow_full)
     rb = refined_money_block(pre, n - 1, has_real)
-    vec = np.concatenate([vec, np.asarray(rb, dtype=float)])
+    oi = order_flow_interactions(rb, has_real)
+    vec = np.concatenate([vec, np.asarray(rb, dtype=float),
+                          np.asarray(oi, dtype=float)])
     vec = np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0)
     prob = float(model.predict_proba(vec.reshape(1, -1))[0])
     last = float(df["close"].iloc[-1])
@@ -616,6 +621,158 @@ def _write_recommend(path: str, rec, picks, skipped,
         print(f"[recommend] 缓存失败：{e}")
 
 
+# ----------------------------------------------------------- 横截面相对排名荐股（相对沪深300多空版）
+def _hs300_nret(hs300_close, hs300_idx, date, horizon):
+    """返回 hs300 从 date（对齐到 >=date 的首个交易日）起 horizon 日收益；不可算返回 0。"""
+    t = pd.Timestamp(date)
+    pos = None
+    for i, d in enumerate(hs300_idx):
+        if pd.Timestamp(d) >= t:
+            pos = i
+            break
+    if pos is None or pos + horizon >= len(hs300_close):
+        return 0.0
+    return float(hs300_close[pos + horizon] / hs300_close[pos] - 1.0)
+
+
+def xsec_recommend(horizon: int = 10, model_name: str = "LR", top_n: int = 12,
+                   label_mode: str = "rel_hs300",
+                   bench_hist=None, hs300=None, universe=None, money_cache=None,
+                   out_md: str = "D:/WorkBuddy/output/ml_xsec_recommend.md") -> tuple:
+    """横截面相对排名荐股（相对沪深300多空版）。
+
+    逻辑：pooled LR 在「全历史」上训练（标签 = 个股N日收益 是否跑赢沪深300），
+    对最新截面（每只票最后一行）打分排序，输出多头(前top_n)/空头(后top_n)。
+    无未来函数：特征用 sub=data[:i+1]，标签仅由「已知」收盘价计算得。
+
+    返回 (long_list, short_list, ranked_all, meta)。
+    long_list：最看好像「跑赢沪深300」的标的（多头部）；
+    short_list：最看好像「跑输沪深300」的标的（空尾部）。
+    """
+    if bench_hist is None:
+        bench_hist = fetch_benchmark_histories(days=400)
+        hs300 = bench_hist.get("沪深300")
+    use_rel = (label_mode == "rel_hs300") and hs300 is not None and len(hs300) >= horizon + 2
+    eff_label = "rel_hs300" if use_rel else "abs"
+    ModelCls, mk = _model_spec(model_name)
+    if universe is None:
+        universe = build_universe()
+    if money_cache is None:
+        money_cache = {}
+        for (s, _, _) in universe:
+            c = load_moneyflow_full(s)
+            if c is not None:
+                money_cache[s] = c
+    hs300_close = hs300["close"].values.astype(float) if (use_rel and hs300 is not None) else None
+    hs300_idx = list(hs300.index) if (use_rel and hs300 is not None) else None
+
+    Xrows, ys, meta_rows = [], [], []
+    for (code, name, sector) in universe:
+        df = load_hist(code)
+        n = len(df)
+        if n < START_DAYS + horizon + 1:
+            continue
+        rows = build_rows(code, bench_hist, hs300, horizon, money_cache=money_cache)
+        if not rows:
+            continue
+        X = np.array([r["X"] for r in rows], float)
+        closes = df["close"].values.astype(float)
+        fwd = np.array([closes[i + horizon] / closes[i] - 1.0
+                        for i, r in enumerate(rows)], float)
+        if use_rel and hs300_close is not None:
+            hs300_fwd = np.array([_hs300_nret(hs300_close, hs300_idx, r["date"], horizon)
+                                  for r in rows], float)
+            rel = fwd - hs300_fwd
+        else:
+            rel = fwd
+        yv = (rel > 0).astype(float)
+        Xrows.append(X); ys.append(yv); meta_rows.append((code, name, sector, rows, fwd, rel))
+    if not Xrows:
+        return [], [], [], {"label_mode": eff_label, "error": "无有效标的"}
+    yall = np.concatenate(ys)
+    if yall.mean() < 0.05 or yall.mean() > 0.95:
+        ys = [(meta_rows[k][5] > 0).astype(float) for k in range(len(meta_rows))]
+        yall = np.concatenate(ys)
+        eff_label = "abs"
+    Xall = np.vstack(Xrows)
+    model = ModelCls(**mk)
+    model.fit(Xall, yall)
+    scored = []
+    for k, (code, name, sector, rows, fwd, rel) in enumerate(meta_rows):
+        x_last = Xrows[k][-1:]
+        prob = float(model.predict_proba(x_last)[0])
+        df = load_hist(code)
+        last = float(df["close"].iloc[-1])
+        prev = float(df["close"].iloc[-2]) if len(df) >= 2 else last
+        pct = (last / prev - 1) * 100.0 if prev else 0.0
+        scored.append({"symbol": code, "name": name, "sector": sector,
+                       "prob": prob, "last": round(last, 2), "pct": round(pct, 2),
+                       "rel_exp": round(float(rel[-1]) * 100, 2)})
+    scored.sort(key=lambda x: x["prob"], reverse=True)
+    long_list = scored[:top_n]
+    short_list = list(reversed(scored[-top_n:]))
+    meta = {"label_mode": eff_label, "money_mode": "real",
+            "horizon": horizon, "model": model_name, "top_n": top_n,
+            "n_universe": len(universe), "n_valid": len(scored)}
+    _write_xsec_recommend(out_md, long_list, short_list, scored, meta)
+    return long_list, short_list, scored, meta
+
+
+def _write_xsec_recommend(path_md, longs, shorts, ranked, meta):
+    from datetime import datetime
+    cache_path = os.path.join(HERE, "xsec_recommend_cache.json")
+    lines = [f"# 🤖 横截面相对排名荐股（相对沪深300多空版 · {datetime.today().strftime('%Y-%m-%d %H:%M')}）\n"]
+    lm = meta.get("label_mode", "rel_hs300")
+    lines.append(f"> 模型：{meta.get('model')}；标签：**相对沪深300**（{lm}）；视角：未来 **{meta.get('horizon')} 日**；"
+                 f"资金流：{meta.get('money_mode')}（精细订单流，横截面 IC≈0.08）。\n")
+    lines.append(f"> 扫描池：{meta.get('n_universe')} 只；有效预测 {meta.get('n_valid')} 只；"
+                 f"多头 Top{meta.get('top_n')} / 空头 Bottom{meta.get('top_n')}。\n")
+    lines.append("## 策略说明\n")
+    lines.append("> 本荐股**不是**「预测绝对涨跌」，而是横截面**相对排名**：\n"
+                 "> 在 39 只龙头里，模型对「未来10日能否跑赢沪深300」打分，多头=最看好像跑赢的、"
+                 "空头=最看好像跑输的。\n> 实盘思路是**多头部/空尾部**（或仅做多头部对冲沪深300），"
+                 "而非单边买卖。IC≈0.08 属**弱因子**，需组合+风控，非单票押注。\n")
+    lines.append("## 🟢 多头候选（相对沪深300看多，Top %d）\n" % meta.get("top_n"))
+    lines.append("| 排名 | 代码 | 名称 | 板块 | 跑赢概率 | 最新价 | 今日 |")
+    lines.append("|---|---|---|---|---|---|---|")
+    for i, r in enumerate(longs, 1):
+        lines.append(f"| {i} | {r['symbol']} | {r['name']} | {r['sector']} | "
+                     f"**{r['prob']*100:.1f}%** | {r['last']:.2f} | {r['pct']:+.2f}% |")
+    lines.append("\n## 🔴 空头候选（相对沪深300看空，Bottom %d）\n" % meta.get("top_n"))
+    lines.append("| 排名 | 代码 | 名称 | 板块 | 跑赢概率 | 最新价 | 今日 |")
+    lines.append("|---|---|---|---|---|---|---|")
+    for i, r in enumerate(shorts, 1):
+        lines.append(f"| {i} | {r['symbol']} | {r['name']} | {r['sector']} | "
+                     f"{r['prob']*100:.1f}% | {r['last']:.2f} | {r['pct']:+.2f}% |")
+    lines.append("\n## 📋 全池排序（Top 20）\n")
+    lines.append("| 排名 | 代码 | 名称 | 板块 | 跑赢概率 | 最新价 | 今日 |")
+    lines.append("|---|---|---|---|---|---|---|")
+    for i, r in enumerate(ranked[:20], 1):
+        lines.append(f"| {i} | {r['symbol']} | {r['name']} | {r['sector']} | "
+                     f"{r['prob']*100:.1f}% | {r['last']:.2f} | {r['pct']:+.2f}% |")
+    lines.append("\n> ⚠️ **诚实结论**：横截面 IC≈0.08 为弱因子（回测 18 截面平均），"
+                 "单票胜率仅略高于50%；多空组合期望超额为正但波动大。**切勿单票重仓押注**。"
+                 "本名单为「相对沪深300排名最高的候选」，仅供研究，风险自担。\n")
+    try:
+        with open(path_md, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        print(f"[xsec_recommend] 已导出：{path_md}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[xsec_recommend] 导出失败：{e}")
+    cache = {"exists": True, "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+             "label_mode": meta.get("label_mode"), "money_mode": meta.get("money_mode"),
+             "horizon": meta.get("horizon"), "model": meta.get("model"),
+             "top_n": meta.get("top_n"), "n_universe": meta.get("n_universe"),
+             "n_valid": meta.get("n_valid"),
+             "longs": longs, "shorts": shorts, "ranked": ranked}
+    try:
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        print(f"[xsec_recommend] 缓存已写：{cache_path}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[xsec_recommend] 缓存失败：{e}")
+
+
 # ----------------------------------------------------------- 报告
 def _write_report(path: str, table: list, summary: str):
     from datetime import datetime
@@ -661,6 +818,12 @@ def main():
     ap.add_argument("--model", default="LR", help="LR 或 GB")
     ap.add_argument("--money", default="proxy", choices=["proxy", "real"],
                     help="资金因子数据源：proxy=本地量价代理；real=Tushare真实主力净流入(缓存)")
+    ap.add_argument("--xsec-recommend", action="store_true",
+                    help="横截面相对排名荐股（相对沪深300多空版）：写入 ml_xsec_recommend.md + cache")
+    ap.add_argument("--xsec-label", default="rel_hs300", choices=["rel_hs300", "abs"],
+                    help="横截面标签：rel_hs300=跑赢沪深300；abs=绝对涨跌")
+    ap.add_argument("--xsec-top-n", type=int, default=12,
+                    help="多头/空头各取前/后 N 只")
     args = ap.parse_args()
 
     if args.recommend:
@@ -684,6 +847,24 @@ def main():
                   f"价{r['last']:.2f}({r['pct']:+.2f}%)")
         _write_recommend(args.rec_out, rec, picks, skipped,
                          args.horizon, args.model, 0.6)
+        return
+
+    if args.xsec_recommend:
+        bench_hist = fetch_benchmark_histories(days=400)
+        hs300 = bench_hist.get("沪深300")
+        money_cache = {}
+        for (code, _, _) in build_universe():
+            c = load_moneyflow_full(code)
+            if c is not None:
+                money_cache[code] = c
+        print(f"横截面相对排名荐股（标签={args.xsec_label}, top_n={args.xsec_top_n}）…")
+        longs, shorts, ranked, meta = xsec_recommend(
+            horizon=args.horizon, model_name=args.model,
+            top_n=args.xsec_top_n, label_mode=args.xsec_label,
+            bench_hist=bench_hist, hs300=hs300, money_cache=money_cache or None)
+        print(f"  多头 {len(longs)} 只 / 空头 {len(shorts)} 只 / 全排序 {len(ranked)} 只")
+        for r in longs[:15]:
+            print(f"    多 {r['symbol']} {r['name']}  {r['prob']*100:.1f}%")
         return
 
     if args.symbols:
