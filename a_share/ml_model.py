@@ -500,7 +500,7 @@ def _model_spec(name: str):
 
 def predict_latest(symbol, name, sector, horizon, ModelCls, bench_hist,
                    hs300, money_cache=None, **mk) -> Optional[dict]:
-    """在全历史训练后，预测「最新一日」未来 N 日上涨概率。返回 dict 或 None。
+    """在全历史训练后，预测「最新一日」未来 N 日的 ML 相对评分（非校准概率，仅供排序）。返回 dict 或 None。
 
     无未来函数：特征用 df.iloc[:n]（含最新收盘，属「已知」）；标签不参与预测链路。
     """
@@ -565,17 +565,17 @@ def _write_recommend(path: str, rec, picks, skipped,
     from datetime import datetime
     cache_path = os.path.join(HERE, "recommend_cache.json")
     lines = [f"# 🤖 自动荐股（ML · {datetime.today().strftime('%Y-%m-%d %H:%M')}）\n"]
-    lines.append(f"> 模型：{model_name}；视角：未来 **{horizon} 日**上涨概率；"
+    lines.append(f"> 模型：{model_name}；视角：未来 **{horizon} 日** ML 相对评分（非校准概率，仅供排序）；"
                  f"高置信阈值 ≥ {min_prob:.2f}。\n")
     lines.append(f"> 扫描池：{len(picks) + len(skipped)} 只（screener 五板块龙头去重）；"
                  f"有效预测 {len(picks)} 只，跳过 {len(skipped)} 只。\n")
-    lines.append("## ✅ ML 打分候选（上涨概率 ≥ %.0f%%，按概率降序）\n" % (min_prob * 100))
+    lines.append("## ✅ ML 打分候选（ML 评分 ≥ %.0f%%，按评分降序）\n" % (min_prob * 100))
     lines.append("> ⚠️ **重要（扩大池回测结论）**：在 39 只代表性池子上，ML 的 10 日 precision_up "
                  "仅 **45-47%**，与规则基线（48-52%）相当，**未产生可泛化的超额收益**。\n"
                  "> 此前 6 只自选股上的 54.6% 属小样本过拟合（那 6 只是偏难做的子集，规则基线异常低）。\n"
                  "> 因此本名单是「**ML 当前观点下概率最高的候选**」，**不是高置信买点**，仅供研究排序参考。\n")
     if rec:
-        lines.append("| 排名 | 代码 | 名称 | 板块 | 上涨概率 | 最新价 | 今日涨跌 | 趋势 | 资金 | 轮动 | 估值 | 大盘 |")
+        lines.append("| 排名 | 代码 | 名称 | 板块 | ML 评分 | 最新价 | 今日涨跌 | 趋势 | 资金 | 轮动 | 估值 | 大盘 |")
         lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
         for i, r in enumerate(rec, 1):
             f = r["factors"]
@@ -586,7 +586,7 @@ def _write_recommend(path: str, rec, picks, skipped,
     else:
         lines.append("（本次无标的达到高置信阈值——属正常，模型没有强行凑名单）\n")
     lines.append("\n## 📋 全池排序（Top 20）\n")
-    lines.append("| 排名 | 代码 | 名称 | 板块 | 上涨概率 | 最新价 | 今日涨跌 |")
+    lines.append("| 排名 | 代码 | 名称 | 板块 | ML 评分 | 最新价 | 今日涨跌 |")
     lines.append("|---|---|---|---|---|---|---|")
     for i, r in enumerate(picks[:20], 1):
         lines.append(f"| {i} | {r['symbol']} | {r['name']} | {r['sector']} | "

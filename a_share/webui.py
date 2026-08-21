@@ -715,7 +715,7 @@ function renderRecommend(d){
     sub.textContent='尚未生成荐股名单。点「刷新荐股」后台扫全池（约3-5分钟，39只龙头）。';
     return;
   }
-  sub.textContent='生成：'+d.generated_at+' ｜ 模型：'+d.model+' ｜ 视角：未来'+d.horizon+'日 ｜ 阈值≥'+(d.min_prob*100)+'% ｜ 高置信 '+d.rec.length+' 只 / 全池 '+d.picks.length+' 只';
+  sub.textContent='生成：'+d.generated_at+' ｜ 模型：'+d.model+' ｜ 视角：未来'+d.horizon+'日 ｜ 评分阈值≥'+(d.min_prob*100)+'% ｜ 高置信 '+d.rec.length+' 只 / 全池 '+d.picks.length+' 只';
   const list=(d.rec.length?d.rec:d.picks.slice(0,15));
   const rows=list.map((r,i)=>{
     const c=r.pct>0?'up':(r.pct<0?'down':'flat');const sg=r.pct>0?'+':'';
@@ -732,9 +732,9 @@ function renderRecommend(d){
   document.getElementById('recBody').innerHTML=
     note
     +'<table style="width:100%;border-collapse:collapse;font-size:12px">'
-    +'<tr style="color:#9fb0c0;text-align:left"><th>#</th><th>代码</th><th>名称</th><th>板块</th><th>上涨概率</th><th>最新价</th><th>今日</th><th>趋势</th><th>资金</th><th>轮动</th><th>估值</th><th>大盘</th></tr>'
+    +'<tr style="color:#9fb0c0;text-align:left"><th>#</th><th>代码</th><th>名称</th><th>板块</th><th>ML 评分</th><th>最新价</th><th>今日</th><th>趋势</th><th>资金</th><th>轮动</th><th>估值</th><th>大盘</th></tr>'
     +rows+'</table>'
-    +'<div class="sub" style="margin-top:8px">⚠️ 历史 precision_up 约50-55%（随机50%），非稳赚，仅供参考、风险自担。</div>';
+    +'<div class="sub" style="margin-top:8px">⚠️ 历史回测 precision_up 约45-52%（随机基准50%），模型暂无稳定方向 alpha；本「ML 评分」为未校准相对排序、非涨跌概率，仅供参考、风险自担。</div>';
 }
 function refreshRecommend(){
   const b=document.getElementById('recRefresh'); if(b){b.disabled=true;b.textContent='计算中…';}
