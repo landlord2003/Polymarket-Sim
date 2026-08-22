@@ -43,6 +43,12 @@ from risk.risk_control import RiskController, RiskConfig
 ASHERE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "a_share")
 sys.path.insert(0, ASHERE)
 
+# 复用 A股 行情模块的加密 K 线（data-api.binance.vision 直连，绕过 ccxt fapi 超时）
+try:
+    from datasource import fetch_crypto_kline
+except Exception:  # pragma: no cover
+    fetch_crypto_kline = None
+
 
 def load_config() -> dict:
     return {
@@ -88,10 +94,20 @@ def synth_ohlcv(n: int = 200) -> list:
 
 
 def fetch_ohlcv(ex, cfg: dict, live: bool, limit: int = 200):
-    if not live or ex is None:
+    if not live:
         return synth_ohlcv(limit), True
+    # live：优先 data-api 公共行情（绕过 ccxt 的 fapi 依赖，境内稳定可达）
     try:
-        return ex.fetch_ohlcv(cfg["symbol"], cfg["timeframe"], limit=limit), False
+        if fetch_crypto_kline is None:
+            raise RuntimeError("fetch_crypto_kline 不可用")
+        df = fetch_crypto_kline(cfg["symbol"], cfg["timeframe"], limit)
+        if len(df) == 0:
+            raise RuntimeError("空 K 线")
+        rows = [[int(df.index[i].timestamp() * 1000),
+                 float(df["open"].iloc[i]), float(df["high"].iloc[i]),
+                 float(df["low"].iloc[i]), float(df["close"].iloc[i]),
+                 float(df["volume"].iloc[i])] for i in range(len(df))]
+        return rows, False
     except Exception as e:
         print(f"[warn] 取数失败，转离线合成：{type(e).__name__} {str(e)[:80]}")
         return synth_ohlcv(limit), True

@@ -463,37 +463,91 @@ def fetch_financials(symbol: str, fast: bool = False) -> dict:
 
 # ------------------------------------------------------- 加密货币公开行情(无需密钥)
 
-def fetch_crypto_quotes(symbols: Optional[list[str]] = None) -> dict:
-    """通过 ccxt 公共 ticker 拉取主流加密货币行情（无需 API 密钥）。
+def _to_float(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
-    默认覆盖 BTC/ETH/BNB/SOL/XRP/DOGE/ADA/TON。失败返回 ok=False（不抛），
-    由上层显示「加密行情不可用」。
+
+def fetch_crypto_quotes(symbols: Optional[list[str]] = None) -> dict:
+    """拉取主流加密货币行情（无需 API 密钥）。
+
+    改用 Binance 公共数据域（data-api.binance.vision）直连，绕过 ccxt 的
+    load_markets 对 futures 域名（fapi.binance.com）的强依赖——境内网络下
+    fapi 常超时导致整条取数失败、面板长期显示「加密行情不可用」。
+
+    优先 data-api.binance.vision，失败兜底 api.binance.com。两者现货 ticker
+    端点境内均可达。仍失败返回 ok=False（不抛），由上层显示不可用。
     """
     if symbols is None:
         symbols = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT",
                    "XRP/USDT", "DOGE/USDT", "ADA/USDT", "TON/USDT"]
-    try:
-        import ccxt
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "msg": f"ccxt 未安装: {e}", "quotes": []}
-    try:
-        ex = ccxt.binance()
-        ex.enableRateLimit = True
-        tickers = ex.fetch_tickers(symbols)
+    hosts = [
+        "https://data-api.binance.vision/api/v3",
+        "https://api.binance.com/api/v3",
+    ]
+    want = {s.replace("/", "").upper(): s for s in symbols}  # BTCUSDT -> BTC/USDT
+    last_err = "未知错误"
+    for host in hosts:
         out = []
-        for s in symbols:
-            t = tickers.get(s)
-            if not t:
+        failed = False
+        for key, label in want.items():
+            try:
+                raw = _http_get(f"{host}/ticker/24hr?symbol={key}", timeout=8)
+                t = json.loads(raw)
+                out.append({
+                    "symbol": label,
+                    "price": _to_float(t.get("lastPrice")),
+                    "pct": _to_float(t.get("priceChangePercent")),
+                    "quote_volume": _to_float(t.get("quoteVolume")),
+                })
+            except Exception as e:  # noqa: BLE001
+                failed = True
+                last_err = f"{type(e).__name__}: {str(e)[:60]}"
+                break
+        if out and not failed:
+            return {"ok": True, "quotes": out, "source": host}
+    return {"ok": False, "msg": f"行情获取失败（{last_err}）", "quotes": []}
+
+
+def fetch_crypto_kline(symbol: str = "BTC/USDT", timeframe: str = "1m",
+                       limit: int = 200) -> "pd.DataFrame":
+    """通过 Binance 公共数据域拉取加密 K 线（无需 API 密钥）。
+
+    与 fetch_crypto_quotes 同理：直连 data-api.binance.vision 绕过 ccxt 的
+    futures 域名依赖（fapi.binance.com 境内常超时）。返回 DataFrame
+    （open/high/low/close/volume，DatetimeIndex），失败返回空 DataFrame。
+    用于 bot_dryrun / ccxt_demo 的 --live 取数，替代 ccxt 的 fetch_ohlcv。
+    """
+    sym = symbol.replace("/", "").upper()
+    hosts = [
+        "https://data-api.binance.vision/api/v3",
+        "https://api.binance.com/api/v3",
+    ]
+    for host in hosts:
+        try:
+            q = urllib.parse.urlencode({"symbol": sym, "interval": timeframe,
+                                        "limit": limit})
+            raw = _http_get(f"{host}/klines?{q}", timeout=10)
+            data = json.loads(raw)
+            if not data:
                 continue
-            out.append({
-                "symbol": s,
-                "price": t.get("last"),
-                "pct": t.get("percentage"),
-                "quote_volume": t.get("quoteVolume"),
-            })
-        return {"ok": True, "quotes": out}
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "msg": str(e), "quotes": []}
+            df = pd.DataFrame(
+                data,
+                columns=["ts", "open", "high", "low", "close", "volume",
+                         "close_time", "qav", "trades", "tb_base",
+                         "tb_quote", "ignore"])
+            for c in ("open", "high", "low", "close", "volume"):
+                df[c] = df[c].astype(float)
+            df["ts"] = pd.to_datetime(df["ts"], unit="ms")
+            df.set_index("ts", inplace=True)
+            df.attrs["source"] = host
+            df.attrs["symbol"] = symbol
+            return df[["open", "high", "low", "close", "volume"]]
+        except Exception:  # noqa: BLE001
+            continue
+    return pd.DataFrame()
 
 
 # ---------------------------------------------------------------- 交易时段

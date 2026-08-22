@@ -13,8 +13,17 @@
 """
 
 import os
+import sys
 import pandas as pd
 import ccxt
+
+# 复用 A股 行情模块的加密 K 线（data-api.binance.vision 直连，绕过 ccxt fapi 超时）
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "a_share"))
+try:
+    from datasource import fetch_crypto_kline
+except Exception:  # pragma: no cover
+    fetch_crypto_kline = None
+
 
 # 技术指标手写，避免 pandas_ta / numba 的重依赖与 numpy 版本冲突
 
@@ -35,10 +44,12 @@ def make_exchange(sandbox: bool = True) -> ccxt.binance:
 
 def fetch_ohlcv(exchange: ccxt.binance, symbol: str = SYMBOL,
                 timeframe: str = TIMEFRAME, limit: int = LIMIT) -> pd.DataFrame:
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-    df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-    df.set_index("timestamp", inplace=True)
+    if fetch_crypto_kline is None:
+        return pd.DataFrame()
+    df = fetch_crypto_kline(symbol, timeframe, limit)
+    if df.empty:
+        print("[warn] 行情获取失败，返回空 DataFrame")
+        return pd.DataFrame()
     return df
 
 
