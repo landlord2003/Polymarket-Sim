@@ -225,3 +225,66 @@ def _to_num(v) -> Optional[float]:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+# ---- 跨平台套利：Polymarket 二元市场统一报价（Yes/No 双边盘口） ----
+_POLY_QUOTES_TTL = 60.0
+_poly_quotes_cache = {"ts": 0.0, "data": None}
+
+
+def fetch_poly_quotes(limit: int = 120, force: bool = False) -> list:
+    """返回二元 Polymarket 市场的统一 Quote 列表，供套利引擎使用。
+
+    复用 _fetch_pool() 的深翻页大池（10 页 × 100，按 24h 成交量排序）拉取全站活跃
+    市场原始数据（保留 bestBid/bestAsk/clobTokenIds），再本地过滤：
+      合规(_is_blocked) → 二元结果 → 主侧盘口有真实买卖价。
+    主侧(outcomes[0]) 视作 YES 等价；补侧 = 1 - 补价推导。
+    不调用 CLOB（本环境 CLOB /book 被地域限制 404），Gamma 顶层盘口更稳定。
+    Quote = {platform,id,token_id,question,yes_bid,yes_ask,no_bid,no_ask,ts}
+    """
+    now = time.time()
+    if not force and _poly_quotes_cache["data"] is not None \
+            and now - _poly_quotes_cache["ts"] < _POLY_QUOTES_TTL:
+        return _poly_quotes_cache["data"]
+    out = []
+    try:
+        rows = _fetch_pool()  # 原始 market 列表（含 bestBid/bestAsk/clobTokenIds）
+        for m in rows:
+            if not isinstance(m, dict):
+                continue
+            q = m.get("question") or ""
+            if _is_blocked(q, m.get("tags")):
+                continue
+            outcomes = _parse_outcomes(m)
+            # 接受任意二元市场（Yes/No、Up/Down、两队名等）；outcomes[0] 视为主侧
+            if not outcomes or len(outcomes) != 2:
+                continue
+            ob = _to_num(m.get("bestBid"))
+            oa = _to_num(m.get("bestAsk"))
+            if not ob or not oa or ob <= 0 or oa <= 0 or oa >= 1:
+                continue
+            toks = m.get("clobTokenIds")
+            yes_token = None
+            if toks:
+                try:
+                    yes_token = json.loads(toks)[0]
+                except Exception:
+                    yes_token = None
+            out.append({
+                "platform": "poly",
+                "id": m.get("id"),
+                "token_id": yes_token,
+                "question": q,
+                "yes_bid": round(ob, 4), "yes_ask": round(oa, 4),
+                "no_bid": round(1 - oa, 4), "no_ask": round(1 - ob, 4),
+                "ts": now,
+            })
+            if len(out) >= limit:
+                break
+    except Exception as e:  # noqa: BLE001
+        if _poly_quotes_cache["data"] is not None:
+            return _poly_quotes_cache["data"]
+        return [{"error": str(e)}]
+    _poly_quotes_cache["ts"] = now
+    _poly_quotes_cache["data"] = out
+    return out

@@ -158,7 +158,11 @@ def get_watchlist_signals(watch: dict, offline: bool = False,
     as_of = save_signal_state(results) if (forced and not offline) else state_as_of
     return results, as_of
 import sim_engine
+import arb_book
 from dashboard import (render_dashboard, render_stock_detail, render_portfolio)
+import kalshi
+import polymarket
+import arbitrage
 
 PORT = int(os.getenv("QT_WEB_PORT", "8787"))
 
@@ -600,6 +604,24 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
 /* 加密详情弹窗：竖向加大、横向收窄（高瘦比例，整体放大） */
 .mboxCrypto{max-width:820px;width:94%;max-height:96vh;}
 .mboxCrypto .chart{height:600px;}
+/* 模拟套利面板 */
+.arbTable{width:100%;border-collapse:collapse;margin-top:8px;font-size:13px;}
+.arbTable th,.arbTable td{padding:7px 9px;border-bottom:1px solid #22303f;text-align:left;vertical-align:middle;}
+.arbTable th{color:#8fa3b5;font-weight:600;font-size:12px;background:#161e29;}
+.arbTable tr:hover td{background:#172230;}
+.arbEdge{color:#5fd38a;font-weight:700;}
+.arbDemo{color:#e0a45a;font-size:11px;padding:1px 6px;border:1px solid #4a3a1a;border-radius:8px;margin-left:6px;}
+.arbBtn{padding:4px 10px;border-radius:8px;border:1px solid #2c6e49;background:#16331f;color:#9be8b0;cursor:pointer;font-size:12px;}
+.arbBtn:hover{background:#1d4a2c;}
+.arbBtn:disabled{opacity:.4;cursor:not-allowed;}
+.arbSec{margin-top:12px;padding-top:10px;border-top:1px solid #22303f;}
+.arbSummary{display:flex;gap:18px;flex-wrap:wrap;font-size:13px;margin:6px 0 8px;}
+.arbSummary b{color:#cfe0f0;font-size:16px;}
+.arbNote{color:#e0a45a;font-size:12px;margin-top:6px;}
+.arbBookRow{display:flex;gap:10px;align-items:center;padding:5px 8px;border-bottom:1px solid #1c2733;font-size:12px;}
+.arbBookRow .pid{color:#7f93a5;width:42px;}
+.arbBookRow .qn{color:#cfe0f0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.arbSizeInput{width:54px;padding:2px 4px;background:#0e141c;border:1px solid #2c3a4e;color:#e6e6e6;border-radius:6px;}
 </style></head>
 <body>
 <div class="bar">
@@ -615,6 +637,7 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
   <button class="ghost" onclick="openBacktest()">📈 回测</button>
   <button class="ghost" onclick="toggleCryptoPanel()">🪙 加密行情</button>
   <button class="ghost" onclick="togglePolyPanel()">📊 事件概率</button>
+  <button class="ghost" onclick="toggleArbPanel()">🧪 模拟套利</button>
   <label><input type="checkbox" id="offline"> 离线验证</label>
   <label><input type="checkbox" id="push"> 推送钉钉</label>
   <span class="sep"></span>
@@ -670,6 +693,25 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
   <div class="cpBody" id="polyPanelBody">
   <div class="sub">来源：Polymarket 公开行情（Gamma API，无需密钥）｜ 价格为市场隐含概率 ｜ <b>已过滤政治/地缘等敏感类别</b></div>
   <div id="polyList" class="polyList"></div>
+  </div>
+</div>
+<div id="arbPanel" class="cpblock" style="display:none">
+  <div class="cpHead">
+    <span class="ttl">🧪 模拟套利 · Kalshi↔Poly</span>
+    <button onclick="loadArb()">刷新扫描</button>
+    <label><input type="checkbox" id="arbAuto" checked> 自动刷新</label>
+    <button class="ghost" onclick="loadArbDemo()">载入演示对</button>
+    <span class="sub" id="arbTs"></span>
+    <button class="ghost collapseBtn" id="arbPanelBtn" onclick="toggleCollapse('arbPanel')">▴ 收起</button>
+  </div>
+  <div class="cpBody" id="arbPanelBody">
+    <div class="sub">跨平台同事件价差扫描（只读公开盘口，虚拟本金模拟成交，不碰真实资金）。本环境 Kalshi 公开流动性行情受限时，可点「载入演示对」试跑完整流程。</div>
+    <div id="arbSummary" class="arbSummary"></div>
+    <div id="arbList"></div>
+    <div class="arbSec">
+      <div class="ttl" style="color:#cfe0f0;font-size:14px">📒 持仓 / 盈亏（虚拟）</div>
+      <div id="arbBook"></div>
+    </div>
   </div>
 </div>
 <div id="ticker" class="ticker">实时报价加载中…</div>
@@ -1189,6 +1231,78 @@ function renderBacktest(d){
     +'<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:8px"><tr style="color:#9fb0c0;text-align:left"><th>进场</th><th>出场</th><th>价(进→出)</th><th>股数</th><th>净收益</th><th>离场原因</th></tr>'+trows+'</table>'
     +'<div class="sub" style="margin-top:8px">⚠️ 历史回测不代表未来收益；本引擎为 point-in-time 撮合，已含 A 股真实摩擦。</div>';
 }
+let arbPanelOpen=false, arbAutoTimer=null, arbState={pairs:[]};
+function toggleArbPanel(){
+  arbPanelOpen=!arbPanelOpen;
+  const p=document.getElementById('arbPanel');
+  p.style.display=arbPanelOpen?'block':'none';
+  if(arbPanelOpen){
+    loadArb(); loadArbBook();
+    if(arbAutoTimer)clearInterval(arbAutoTimer);
+    arbAutoTimer=setInterval(()=>{
+      if(arbPanelOpen && document.getElementById('arbAuto').checked){loadArb();loadArbBook();}
+    },30000);
+  }else if(arbAutoTimer){clearInterval(arbAutoTimer);arbAutoTimer=null;}
+}
+function loadArb(){
+  fetch('/api/arb_opps?_='+Date.now()).then(r=>r.json()).then(renderArb).catch(e=>{document.getElementById('arbList').innerHTML='<div class="sub" style="color:#ef7a66">扫描失败：'+e+'</div>';});
+}
+function loadArbDemo(){
+  fetch('/api/arb_demo').then(r=>r.json()).then(d=>{arbState.pairs=d.pairs||[];renderArbFromPairs(arbState.pairs,'演示对（示例价格，非实时）',d);}).catch(e=>{document.getElementById('arbList').innerHTML='<div class="sub" style="color:#ef7a66">载入演示失败：'+e+'</div>';});
+}
+function renderArb(d){
+  arbState.pairs=d.pairs||[];
+  renderArbFromPairs(arbState.pairs, d.note||'', d);
+}
+function renderArbFromPairs(pairs, note, d){
+  const sum=document.getElementById('arbSummary');
+  const list=document.getElementById('arbList');
+  sum.innerHTML='Kalshi 流动性行情：'+(d&&d.kalshi_count!=null?d.kalshi_count:'?')+' 条 ｜ Poly：'+(d&&d.poly_count!=null?d.poly_count:'?')+' 条 ｜ 实时机会：'+pairs.length+' 个';
+  if(note) sum.innerHTML+=' <span class="arbNote">'+note+'</span>';
+  if(!pairs.length){
+    list.innerHTML='<div class="sub" style="margin-top:8px">当前无实时跨平台同事件匹配（Kalshi 本环境公开行情不可读，或两边无同事件价差）。可点「载入演示对」试跑模拟器。</div>';
+    return;
+  }
+  let h='<table class="arbTable"><thead><tr><th>事件</th><th>置信</th><th>方向</th><th>每份额外</th><th>份额</th><th></th></tr></thead><tbody>';
+  pairs.forEach((o,i)=>{
+    const dem=o.demo?'<span class="arbDemo">演示</span>':'';
+    h+='<tr><td>'+escapeHtml(o.question)+dem+'</td><td>'+(o.confidence!=null?o.confidence:'-')+'</td><td>'+escapeHtml(o.action)+'</td><td class="arbEdge">+'+o.edge.toFixed(4)+'</td>'
+      +'<td><input class="arbSizeInput" id="arbSize'+i+'" value="'+(o.size_hint||100)+'"></td>'
+      +'<td><button class="arbBtn" onclick="execArb('+i+')">模拟下单</button></td></tr>';
+  });
+  h+='</tbody></table>';
+  list.innerHTML=h;
+}
+function execArb(i){
+  const o=arbState.pairs[i]; if(!o)return;
+  let size=parseInt(document.getElementById('arbSize'+i).value,10)||0;
+  fetch('/api/arb_execute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({opp:o,size:size})})
+    .then(r=>r.json()).then(j=>{
+      if(j.ok){loadArbBook(); const b=document.getElementById('arbList'); b.insertAdjacentHTML('afterbegin','<div class="sub" style="color:#5fd38a;margin:4px 0">✅ '+escapeHtml(j.msg)+'</div>');}
+      else alert(j.msg||'执行失败');
+    }).catch(e=>alert('执行失败：'+e));
+}
+function loadArbBook(){
+  fetch('/api/arb_book').then(r=>r.json()).then(renderArbBook).catch(e=>{document.getElementById('arbBook').innerHTML='<div class="sub" style="color:#ef7a66">读取持仓失败：'+e+'</div>';});
+}
+function renderArbBook(d){
+  const el=document.getElementById('arbBook');
+  let h='<div class="arbSummary"><div>虚拟本金 <b>$'+d.bankroll.toFixed(2)+'</b></div><div>可用现金 <b>$'+d.cash.toFixed(2)+'</b></div><div>已实现盈亏 <b style="color:'+(d.realized_pnl>=0?'#5fd38a':'#ef7a66')+'">$'+(d.realized_pnl>=0?'+':'')+d.realized_pnl.toFixed(2)+'</b></div><div>未平仓 <b>'+d.open_positions+'</b></div></div>';
+  if(d.positions&&d.positions.length){
+    h+='<div style="margin-top:6px">';
+    d.positions.forEach(p=>{
+      h+='<div class="arbBookRow"><span class="pid">'+p.pid+'</span><span class="qn">'+escapeHtml(p.question)+'</span><span>'+(p.kind==='long'?'买':'卖')+' '+escapeHtml(p.venue)+' @'+p.entry.toFixed(4)+' ×'+p.size+'</span><button class="arbBtn" onclick="settleArb(\''+p.pid+'\')">结算</button></div>';
+    });
+    h+='</div>';
+  } else {
+    h+='<div class="sub" style="margin-top:6px">暂无持仓。</div>';
+  }
+  el.innerHTML=h;
+}
+function settleArb(pid){
+  fetch('/api/arb_settle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pid:pid})})
+    .then(r=>r.json()).then(j=>{ if(j.ok)loadArbBook(); else alert(j.msg||'结算失败'); }).catch(e=>alert('结算失败：'+e));
+}
 window.onload=()=>{
   poll(); loadQuotes(); loadCrypto();
   setInterval(loadQuotes,10000); setInterval(loadCrypto,10000);
@@ -1631,6 +1745,35 @@ class Handler(BaseHTTPRequestHandler):
             res["ts"] = datetime.now().strftime("%H:%M:%S")
             self._send(200, json.dumps(res, ensure_ascii=False, default=str),
                        "application/json; charset=utf-8")
+        elif p.path == "/api/arb_opps":
+            try:
+                kq = kalshi.fetch_quotes()
+                pq = polymarket.fetch_poly_quotes()
+                kalshi_count = len([x for x in kq if "error" not in x])
+                poly_count = len([x for x in pq if "error" not in x])
+                pairs = arbitrage.scan(kq, pq)
+                note = ""
+                if kalshi_count == 0:
+                    note = ("Kalshi 本环境公开行情不可读（返回多为零流动性分片市场），"
+                            "跨平台扫描暂无可比数据；可点「载入演示对」试跑模拟器。")
+                self._send(200, json.dumps(
+                    {"pairs": pairs, "kalshi_count": kalshi_count,
+                     "poly_count": poly_count, "note": note,
+                     "ts": datetime.now().strftime("%H:%M:%S")},
+                    ensure_ascii=False, default=str),
+                    "application/json; charset=utf-8")
+            except Exception as e:  # noqa: BLE001
+                self._send(200, json.dumps({"pairs": [], "note": str(e)},
+                                           ensure_ascii=False),
+                           "application/json; charset=utf-8")
+        elif p.path == "/api/arb_book":
+            self._send(200, json.dumps(arb_book.get_book().view(),
+                                       ensure_ascii=False, default=str),
+                       "application/json; charset=utf-8")
+        elif p.path == "/api/arb_demo":
+            self._send(200, json.dumps({"pairs": arbitrage.demo_pairs()},
+                                       ensure_ascii=False, default=str),
+                       "application/json; charset=utf-8")
         elif p.path == "/api/crypto_watchlist":
             try:
                 syms = load_crypto_watchlist()
@@ -1897,6 +2040,32 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps({"ok": False, "msg": str(e)},
                                            ensure_ascii=False),
                            "application/json; charset=utf-8")
+        elif p.path == "/api/arb_execute":
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                data = json.loads(raw.decode("utf-8") or "{}")
+            except Exception:
+                data = {}
+            opp = data.get("opp") or {}
+            try:
+                size = int(data.get("size", 0))
+            except Exception:
+                size = 0
+            res = arb_book.get_book().execute_arb(opp, size)
+            self._send(200, json.dumps(res, ensure_ascii=False, default=str),
+                       "application/json; charset=utf-8")
+        elif p.path == "/api/arb_settle":
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                data = json.loads(raw.decode("utf-8") or "{}")
+            except Exception:
+                data = {}
+            pid = str(data.get("pid", ""))
+            res = arb_book.get_book().settle(pid)
+            self._send(200, json.dumps(res, ensure_ascii=False, default=str),
+                       "application/json; charset=utf-8")
         else:
             self._send(404, "not found", "text/plain")
 
