@@ -44,6 +44,7 @@ class VirtualBook:
         self.avg_cost = {}       # market_id -> 建仓均价
         self.inv_q = {}          # market_id -> 问题文案(展示用)
         self._seq = 0
+        self.max_skew = DEFAULT_MAX_SKEW   # 单市场最大净库存(份额)，面板可调、持久化
         self._load()
 
     # ---------- 持久化 ----------
@@ -61,6 +62,9 @@ class VirtualBook:
             self.avg_cost = d.get("avg_cost", {}) or {}
             self.inv_q = d.get("inv_q", {}) or {}
             self._seq = int(d.get("seq", 0))
+            self.max_skew = int(d.get("max_skew", DEFAULT_MAX_SKEW))
+            if self.max_skew < 10 or self.max_skew > 5000:
+                self.max_skew = DEFAULT_MAX_SKEW
         except Exception:
             pass
 
@@ -76,6 +80,7 @@ class VirtualBook:
                     "avg_cost": self.avg_cost,
                     "inv_q": self.inv_q,
                     "seq": self._seq,
+                    "max_skew": self.max_skew,
                 }, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
@@ -124,7 +129,7 @@ class VirtualBook:
                 "positions": ["L%d" % base, "S%d" % base],
             }
 
-    def market_make(self, opp, size_shares, max_skew=DEFAULT_MAX_SKEW):
+    def market_make(self, opp, size_shares, max_skew=None):
         """模拟做市（单边成交 + 自动反向对冲，库存偏斜受控）。
 
         方向自动决定：
@@ -138,6 +143,8 @@ class VirtualBook:
         size = int(size_shares)
         if size < 1:
             return {"ok": False, "msg": "份额必须 >= 1"}
+        if max_skew is None:
+            max_skew = self.max_skew
         bid = float(opp.get("buy_ask", 0.0))    # 买价(bid)
         ask = float(opp.get("sell_bid", 0.0))   # 卖价(ask)
         if bid <= 0 or ask <= bid:
@@ -199,7 +206,23 @@ class VirtualBook:
                     "cash": round(self.cash, 2), "pid": pid, "side": side,
                     "inventory": self.inventory[mkt]}
 
-    def rebalance(self, price_map=None, max_skew=DEFAULT_MAX_SKEW):
+    def set_max_skew(self, value):
+        """面板可调：设置单市场最大净库存上限（10~5000，持久化到 arb_book.json）。"""
+        try:
+            v = int(value)
+        except (TypeError, ValueError):
+            return {"ok": False, "msg": "偏斜上限必须是 10~5000 的整数"}
+        if v < 10:
+            return {"ok": False, "msg": "偏斜上限过小（建议 >= 10，避免库存失控）"}
+        if v > 5000:
+            return {"ok": False, "msg": "偏斜上限过大（建议 <= 5000）"}
+        with self.lock:
+            self.max_skew = v
+            self._save()
+        return {"ok": True, "msg": "偏斜上限已设为 %d（已保存）" % v,
+                "max_skew": v}
+
+    def rebalance(self, price_map=None, max_skew=None):
         """把仍偏斜的市场以实时价强制对冲平仓，库存归 0，锁定对应价差利润。
 
         price_map: {market_id: {"bid":..,"ask":..}} 来自实时行情；
@@ -272,7 +295,7 @@ class VirtualBook:
                 inv_view.append({
                     "mkt": mkt, "net": net,
                     "avg_cost": round(float(self.avg_cost.get(mkt, 0.0)), 4),
-                    "skew": round(net / DEFAULT_MAX_SKEW, 3),
+                    "skew": round(net / self.max_skew, 3),
                     "question": self.inv_q.get(mkt, ""),
                 })
             inv_view.sort(key=lambda x: abs(x["net"]), reverse=True)
@@ -281,7 +304,7 @@ class VirtualBook:
                 "bankroll": round(self.bankroll, 2),
                 "realized_pnl": round(self.realized_pnl, 2),
                 "open_positions": len(self.positions),
-                "max_skew": DEFAULT_MAX_SKEW,
+                "max_skew": self.max_skew,
                 "inventory": inv_view,
                 "positions": [
                     {k: p.get(k) for k in ("pid", "kind", "side", "venue",
@@ -299,6 +322,7 @@ class VirtualBook:
             self.avg_cost = {}
             self.inv_q = {}
             self._save()
+            return {"ok": True, "msg": "虚拟账本已重置（保留偏斜上限设置）"}
 
 
 _book = None

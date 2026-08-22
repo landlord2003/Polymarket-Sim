@@ -721,6 +721,22 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
   </div>
   <div class="cpBody" id="arbPanelBody">
     <div class="sub">Polymarket 单源模拟（链上、非美可正常访问）：单边做市吃价差 + 同事件互斥套利扫描。只读公开盘口，虚拟本金模拟成交，不碰真实资金。Kalshi 因美国身份/IP 限制不可得，已转单源深化。</div>
+    <div id="arbCfg" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:10px 0;padding:10px 12px;background:#0e1620;border:1px solid #2a3a4a;border-radius:8px">
+      <span style="color:#9fb0c0;font-size:13px">⚙️ 策略设置</span>
+      <label style="color:#cfe0f0;font-size:13px">偏斜上限
+        <input id="arbSkewInput" value="300" title="单市场最大净库存(份额)，10~5000" style="width:64px;background:#0e1620;color:#cfe0f0;border:1px solid #2a3a4a;border-radius:6px;padding:3px 6px">
+      </label>
+      <button class="ghost" onclick="setSkew()">设置</button>
+      <label style="color:#cfe0f0;font-size:13px"><input type="checkbox" id="arbSkipSkewed" checked> 轮动跳过高偏斜市场</label>
+      <label style="color:#cfe0f0;font-size:13px"><input type="checkbox" id="arbAutoReb"> 轮动后自动再平衡</label>
+      <label style="color:#cfe0f0;font-size:13px">最小流动性
+        <input id="arbMinLiq" value="0" title="仅对流动性≥此值的市场轮动" style="width:70px;background:#0e1620;color:#cfe0f0;border:1px solid #2a3a4a;border-radius:6px;padding:3px 6px">
+      </label>
+      <label style="color:#cfe0f0;font-size:13px">轮动份额
+        <input id="arbRotSize" value="0" title="0=用默认份额(size_hint)" style="width:54px;background:#0e1620;color:#cfe0f0;border:1px solid #2a3a4a;border-radius:6px;padding:3px 6px">
+      </label>
+      <button class="ghost" style="color:#ef7a66;border-color:#5a2a2a" onclick="resetArb()">🗑 重置账本</button>
+    </div>
     <div id="arbSummary" class="arbSummary"></div>
     <div id="arbList"></div>
     <div class="arbSec" style="margin-top:14px">
@@ -1272,6 +1288,8 @@ function loadArbDemo(){
 function renderArb(d){
   arbState.mm = d.marketmaking||[];
   arbState.ev = d.event_arb||[];
+  const invMap = d.inventory||{};
+  const ms = d.max_skew||300;
   const sum=document.getElementById('arbSummary');
   const list=document.getElementById('arbList');
   sum.innerHTML='Polymarket 单源 ｜ 实时市场 '+(d.poly_count!=null?d.poly_count:'?')+' 条 ｜ 做市机会 '+arbState.mm.length+' ｜ 事件套利(需确认) '+arbState.ev.length;
@@ -1280,7 +1298,13 @@ function renderArb(d){
   if(arbState.mm.length){
     h+='<table class="arbTable"><thead><tr><th>市场</th><th>买</th><th>卖</th><th>价差</th><th>每单位锁定</th><th>流动性</th><th>份额</th><th></th></tr></thead><tbody>';
     arbState.mm.forEach((o,i)=>{
-      h+='<tr><td>'+escapeHtml(o.question)+'</td><td>'+o.bid.toFixed(4)+'</td><td>'+o.ask.toFixed(4)+'</td><td class="arbEdge">'+o.spread.toFixed(4)+' ('+o.spread_pct+'%)</td><td class="arbEdge">+'+o.unit_profit.toFixed(4)+'</td><td class="arbLiq">'+(o.liquidity||0).toLocaleString()+'</td>'
+      const cur = (invMap[o.buy_id]!=null)?parseInt(invMap[o.buy_id]):0;
+      const skp = ms? Math.abs(cur)/ms : 0;
+      const scol = Math.abs(skp)>=0.8?'#ef7a66':(Math.abs(skp)>=0.5?'#e8c46a':'#5fd38a');
+      const capped = Math.abs(cur)>=ms;
+      const badge = capped ? ' <span style="color:#ef7a66">⚠已达上限</span>'
+                           : (cur!==0?(' <span style="color:'+scol+'">本仓'+(cur>0?'+':'')+cur+'</span>'):'');
+      h+='<tr'+(capped?' style="opacity:.5"':'')+'><td>'+escapeHtml(o.question)+badge+'</td><td>'+o.bid.toFixed(4)+'</td><td>'+o.ask.toFixed(4)+'</td><td class="arbEdge">'+o.spread.toFixed(4)+' ('+o.spread_pct+'%)</td><td class="arbEdge">+'+o.unit_profit.toFixed(4)+'</td><td class="arbLiq">'+(o.liquidity||0).toLocaleString()+'</td>'
        +'<td><input class="arbSizeInput" id="mmSize'+i+'" value="'+(o.size_hint||100)+'"></td>'
        +'<td><button class="arbBtn" onclick="execArbMM('+i+')">模拟做市</button></td></tr>';
     });
@@ -1338,11 +1362,26 @@ function execArbMM(i){
 }
 function autoMM(){
   let n=parseInt(document.getElementById('autoMMN').value,10)||5;
-  fetch('/api/arb_auto_mm?n='+n).then(r=>r.json()).then(j=>{
+  const skip=document.getElementById('arbSkipSkewed').checked?1:0;
+  const reb=document.getElementById('arbAutoReb').checked?1:0;
+  const minliq=parseInt(document.getElementById('arbMinLiq').value,10)||0;
+  const size=parseInt(document.getElementById('arbRotSize').value,10)||0;
+  const q='n='+n+'&skip='+skip+'&reb='+reb+'&minliq='+minliq+'&size='+size;
+  fetch('/api/arb_auto_mm?'+q).then(r=>r.json()).then(j=>{
     if(j.ok){ loadArb(); loadArbBook();
-      const b=document.getElementById('arbList'); b.insertAdjacentHTML('afterbegin','<div class="sub" style="color:#5fd38a;margin:4px 0">✅ 自动轮动：成交 '+j.executed+' 笔，锁定收益 $'+j.locked_total.toFixed(2)+'（'+escapeHtml(j.msg||'')+'）</div>');
+      const b=document.getElementById('arbList'); b.insertAdjacentHTML('afterbegin','<div class="sub" style="color:#5fd38a;margin:4px 0">✅ 自动轮动：成交 '+j.executed+' 笔 / 跳过 '+j.skipped+' 个高偏斜，锁定收益 $'+j.locked_total.toFixed(2)+'（'+escapeHtml(j.msg||'')+'）</div>');
     } else alert(j.msg||'自动轮动失败');
   }).catch(e=>alert('自动轮动失败：'+e));
+}
+function setSkew(){
+  const v=parseInt(document.getElementById('arbSkewInput').value,10)||0;
+  fetch('/api/arb_set_skew',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:v})})
+   .then(r=>r.json()).then(j=>{ if(j.ok){document.getElementById('arbMaxSkew').textContent=j.max_skew; alert(j.msg); loadArbBook();} else alert(j.msg||'设置失败'); })
+   .catch(e=>alert('设置失败：'+e));
+}
+function resetArb(){
+  if(!confirm('确定清空虚拟账本？\n本金/持仓/库存将清空，但偏斜上限设置会保留。'))return;
+  fetch('/api/arb_reset',{method:'POST'}).then(r=>r.json()).then(j=>{ if(j.ok){loadArbBook(); alert(j.msg);} else alert(j.msg||'重置失败'); }).catch(e=>alert('重置失败：'+e));
 }
 function rebalanceArb(){
   fetch('/api/arb_rebalance',{method:'POST'}).then(r=>r.json()).then(j=>{
@@ -1356,6 +1395,7 @@ function renderArbBook(d){
   const el=document.getElementById('arbBook');
   const invEl=document.getElementById('arbInv');
   if(document.getElementById('arbMaxSkew')) document.getElementById('arbMaxSkew').textContent=d.max_skew;
+  if(document.getElementById('arbSkewInput')) document.getElementById('arbSkewInput').value=d.max_skew;
   if(invEl){
     if(d.inventory&&d.inventory.length){
       let ih='<div class="arbInvList">';
@@ -1831,10 +1871,14 @@ class Handler(BaseHTTPRequestHandler):
                        "application/json; charset=utf-8")
         elif p.path == "/api/arb_opps":
             try:
+                book = arb_book.get_book()
                 pq = polymarket.fetch_poly_quotes(300)
                 poly_count = len([x for x in pq if "error" not in x])
-                res = arbitrage.scan_poly(pq)
+                res = arbitrage.scan_poly(
+                    pq, inventory=book.inventory, max_skew=book.max_skew)
                 res["poly_count"] = poly_count
+                res["max_skew"] = book.max_skew
+                res["inventory"] = book.inventory
                 res["ts"] = datetime.now().strftime("%H:%M:%S")
                 self._send(200, json.dumps(res, ensure_ascii=False, default=str),
                            "application/json; charset=utf-8")
@@ -1854,22 +1898,45 @@ class Handler(BaseHTTPRequestHandler):
                        "application/json; charset=utf-8")
         elif p.path == "/api/arb_auto_mm":
             try:
-                n = 5
-                try:
-                    n = max(1, min(20, int(urllib.parse.parse_qs(p.query)
-                                           .get("n", ["5"])[0])))
-                except Exception:
-                    pass
-                pq = polymarket.fetch_poly_quotes(300)
-                opps = arbitrage.scan_poly_marketmaking(pq, top_n=n)
+                qs = parse_qs(p.query)
+
+                def _gi(name, dflt, lo=None, hi=None):
+                    try:
+                        v = type(dflt)(qs.get(name, [str(dflt)])[0])
+                        if lo is not None:
+                            v = max(lo, v)
+                        if hi is not None:
+                            v = min(hi, v)
+                        return v
+                    except Exception:  # noqa: BLE001
+                        return dflt
+
+                n = _gi("n", 5, 1, 50)
+                skip = _gi("skip", 1, 0, 1)
+                reb = _gi("reb", 0, 0, 1)
+                minliq = _gi("minliq", 0, 0, 10 ** 9)
+                size = _gi("size", 0, 0, 100000)
                 book = arb_book.get_book()
+                pq = polymarket.fetch_poly_quotes(300)
+                opps = arbitrage.scan_poly_marketmaking(
+                    pq, top_n=n, min_liquidity=minliq,
+                    inventory=book.inventory, skip_skewed=bool(skip),
+                    max_skew=book.max_skew)
                 executed = 0
+                skipped = 0
                 locked_total = 0.0
                 msgs = []
                 for o in opps:
-                    sz = int(o.get("size_hint", 100) or 100)
+                    sz = size if size > 0 else int(o.get("size_hint", 100) or 100)
+                    mkt = o.get("buy_id")
+                    net = int(book.inventory.get(mkt, 0))
+                    # 智能选股：若一轮就会触顶偏斜上限，则跳过（避免越做越偏）
+                    if skip and (book.max_skew - abs(net)) < sz:
+                        skipped += 1
+                        continue
                     r = book.market_make(o, sz)
                     if not r.get("ok"):
+                        skipped += 1
                         continue
                     executed += 1
                     locked_total += float(r.get("pnl", 0.0) or 0.0)
@@ -1883,10 +1950,22 @@ class Handler(BaseHTTPRequestHandler):
                             msgs.append(r.get("msg", ""))
                     else:
                         msgs.append(r.get("msg", ""))
+                # 可选：轮动结束后对剩余偏斜做一次强制再平衡
+                reb_msg = ""
+                if reb:
+                    price_map = {}
+                    for q in pq:
+                        if "error" in q:
+                            continue
+                        price_map[q["id"]] = {"bid": q.get("yes_bid"),
+                                              "ask": q.get("yes_ask")}
+                    rr = book.rebalance(price_map)
+                    reb_msg = rr.get("msg", "")
                 self._send(200, json.dumps({
-                    "ok": True, "executed": executed,
+                    "ok": True, "executed": executed, "skipped": skipped,
                     "locked_total": round(locked_total, 2),
-                    "msg": "；".join(msgs[:3]),
+                    "msg": ("；".join(msgs[:3])
+                            + ((" ｜ " + reb_msg) if reb_msg else "")),
                     "ts": datetime.now().strftime("%H:%M:%S"),
                 }, ensure_ascii=False, default=str),
                     "application/json; charset=utf-8")
@@ -2217,6 +2296,24 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps({"ok": False, "msg": str(e)},
                                            ensure_ascii=False),
                            "application/json; charset=utf-8")
+        elif p.path == "/api/arb_set_skew":
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                data = json.loads(raw.decode("utf-8") or "{}")
+            except Exception:  # noqa: BLE001
+                data = {}
+            try:
+                value = int(data.get("value", 0))
+            except Exception:  # noqa: BLE001
+                value = 0
+            res = arb_book.get_book().set_max_skew(value)
+            self._send(200, json.dumps(res, ensure_ascii=False, default=str),
+                       "application/json; charset=utf-8")
+        elif p.path == "/api/arb_reset":
+            res = arb_book.get_book().reset()
+            self._send(200, json.dumps(res, ensure_ascii=False, default=str),
+                       "application/json; charset=utf-8")
         else:
             self._send(404, "not found", "text/plain")
 
