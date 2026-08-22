@@ -541,6 +541,20 @@ input#qSearch { background:#0f1620; color:#e6e6e6; border:1px solid #2a3340;
   padding:12px 13px; display:flex; flex-direction:column; gap:8px;
   transition:border-color .15s,background .15s; }
 .polyRow:hover { border-color:#2c3a4e; background:#1a2433; }
+.cryptoGrid { margin-top:8px; display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:12px;
+  max-height:64vh; overflow:auto; padding:2px 4px 6px; }
+.coinCard { background:#161f2b; border:1px solid #243042; border-radius:10px;
+  padding:12px 13px; display:flex; flex-direction:column; gap:7px;
+  transition:border-color .15s,background .15s; }
+.coinCard:hover { border-color:#2c3a4e; background:#1a2433; }
+.coinCard .sym { font-size:15px; font-weight:700; color:#cfe0f0; }
+.coinCard .px { font-size:18px; font-weight:700; font-variant-numeric:tabular-nums; }
+.coinCard .meta { font-size:11px; color:#7e8da0; }
+.sigPill { padding:2px 8px; border-radius:10px; font-size:11px; font-weight:700; }
+.sigPill.buy { background:#16341f; color:#5fd98a; }
+.sigPill.sell { background:#3a1c18; color:#ef7a66; }
+.sigPill.hold { background:#332c12; color:#e0c45a; }
 .polyRow .q { font-size:13px; color:#dbe6f0; line-height:1.45; }
 .polyRow .meta { font-size:11px; color:#7e8da0; margin-top:3px; }
 .probBar { height:8px; background:#0f1620; border-radius:5px; margin-top:2px; overflow:hidden;
@@ -574,9 +588,9 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
 .kpi .v.up { color:#ff5b5b; } .kpi .v.down { color:#2ecc71; } .kpi .v.flat { color:#888; }
 .tag-real { color:#5fd98a; background:#15301f; padding:2px 8px; border-radius:10px; font-size:12px; }
 .tag-syn { color:#e0a45a; background:#332712; padding:2px 8px; border-radius:10px; font-size:12px; }
-.polyList::-webkit-scrollbar,.mbox::-webkit-scrollbar,.panel::-webkit-scrollbar{width:8px;height:8px;}
-.polyList::-webkit-scrollbar-thumb,.mbox::-webkit-scrollbar-thumb,.panel::-webkit-scrollbar-thumb{background:#2c3a4e;border-radius:4px;}
-.polyList::-webkit-scrollbar-track,.mbox::-webkit-scrollbar-track,.panel::-webkit-scrollbar-track{background:transparent;}
+.polyList::-webkit-scrollbar,.mbox::-webkit-scrollbar,.panel::-webkit-scrollbar,.cryptoGrid::-webkit-scrollbar{width:8px;height:8px;}
+.polyList::-webkit-scrollbar-thumb,.mbox::-webkit-scrollbar-thumb,.panel::-webkit-scrollbar-thumb,.cryptoGrid::-webkit-scrollbar-thumb{background:#2c3a4e;border-radius:4px;}
+.polyList::-webkit-scrollbar-track,.mbox::-webkit-scrollbar-track,.panel::-webkit-scrollbar-track,.cryptoGrid::-webkit-scrollbar-track{background:transparent;}
 </style></head>
 <body>
 <div class="bar">
@@ -613,12 +627,8 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
 <div id="cryptoTicker" class="ticker crypto">加密行情加载中…</div>
 <div id="cryptoPanel" class="cpblock" style="display:none">
   <div class="cpHead">
-    <span class="ttl">🪙 加密货币 · <b id="cpSym">—</b></span>
-    <span>币种 <select id="cryptoCoin" onchange="cryptoState.symbol=this.value;document.getElementById('cpSym').textContent=this.value;loadCryptoDetail()"></select></span>
-    <span>周期 <select id="cryptoTf" onchange="cryptoState.timeframe=this.value;loadCryptoDetail()">
-      <option value="1m">1分钟</option><option value="15m">15分钟</option><option value="1h" selected>1小时</option><option value="4h">4小时</option><option value="1d">1日</option>
-    </select></span>
-    <button onclick="loadCryptoDetail()">刷新</button>
+    <span class="ttl">🪙 加密货币 · 自选快照</span>
+    <button onclick="loadCryptoGrid()">刷新</button>
     <label><input type="checkbox" id="cryptoAuto" checked> 自动刷新</label>
     <button class="ghost" onclick="toggleWatchEditor()">✎ 编辑自选</button>
     <span class="sub" id="cpTs"></span>
@@ -632,9 +642,7 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
       <span id="watchMsg" class="sub"></span>
     </div>
   </div>
-  <div id="cryptoKpi" class="kpi"></div>
-  <div id="cryptoChart" class="chart"></div>
-  <div id="cryptoForecast"></div>
+  <div id="cryptoGrid" class="cryptoGrid"></div>
 </div>
 <div id="polyPanel" class="cpblock" style="display:none">
   <div class="cpHead">
@@ -787,10 +795,10 @@ function toggleCryptoPanel(){
   p.style.display=cryptoPanelOpen?'block':'none';
   if(cryptoPanelOpen){
     loadCryptoWatchlist();
-    loadCryptoDetail();
+    loadCryptoGrid();
     if(cryptoAutoTimer)clearInterval(cryptoAutoTimer);
     cryptoAutoTimer=setInterval(()=>{
-      if(cryptoPanelOpen && document.getElementById('cryptoAuto').checked)loadCryptoDetail();
+      if(cryptoPanelOpen && document.getElementById('cryptoAuto').checked)loadCryptoGrid();
     },30000);
   }else if(cryptoAutoTimer){clearInterval(cryptoAutoTimer);cryptoAutoTimer=null;}
 }
@@ -799,10 +807,8 @@ function loadCryptoWatchlist(){
     if(!j.ok||!j.symbols)return;
     const syms=j.symbols;
     if(syms.indexOf(cryptoState.symbol)<0)cryptoState.symbol=syms[0];
-    const sel=document.getElementById('cryptoCoin');
-    sel.innerHTML=syms.map(s=>'<option value="'+s+'"'+(s===cryptoState.symbol?' selected':'')+'>'+s+'</option>').join('');
-    document.getElementById('cpSym').textContent=cryptoState.symbol;
     renderWatchChips(syms);
+    loadCryptoGrid();
   }).catch(()=>{});
 }
 function renderWatchChips(syms){
@@ -819,21 +825,91 @@ function addWatch(){
   fetch('/api/crypto_watchlist',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({action:'add',symbol:sym})}).then(r=>r.json()).then(j=>{
     document.getElementById('watchMsg').textContent=j.msg||'';
-    if(j.ok){inp.value='';renderWatchChips(j.symbols);loadCryptoWatchlist();loadCrypto();}
+    if(j.ok){inp.value='';renderWatchChips(j.symbols);loadCryptoWatchlist();loadCryptoGrid();loadCrypto();}
   }).catch(e=>{document.getElementById('watchMsg').textContent='失败：'+e;});
 }
 function removeWatch(sym){
   fetch('/api/crypto_watchlist',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({action:'remove',symbol:sym})}).then(r=>r.json()).then(j=>{
-    if(j.ok){renderWatchChips(j.symbols);loadCryptoWatchlist();loadCrypto();}
+    if(j.ok){renderWatchChips(j.symbols);loadCryptoWatchlist();loadCryptoGrid();loadCrypto();}
   }).catch(()=>{});
 }
-function selectCrypto(sym){
-  if(!cryptoPanelOpen)toggleCryptoPanel();
-  cryptoState.symbol=sym;
-  const sel=document.getElementById('cryptoCoin');
-  if(sel){sel.value=sym;document.getElementById('cpSym').textContent=sym;}
-  loadCryptoDetail();
+function selectCrypto(sym){ openCryptoDetail(sym); }
+function loadCryptoGrid(){
+  const el=document.getElementById('cryptoGrid');
+  if(el)el.innerHTML='<div class="sub" style="padding:16px;color:#9fb0c0">加载中…（首次计算指标约需数秒）</div>';
+  const url='/api/crypto_grid?_='+Date.now();
+  fetch(url).then(r=>r.json()).then(renderCryptoGrid).catch(e=>{
+    if(el)el.innerHTML='<div class="sub" style="color:#ef7a66">加载失败：'+e+'</div>';
+  });
+}
+function renderCryptoGrid(d){
+  const tsEl=document.getElementById('cpTs');
+  if(tsEl)tsEl.textContent=d.ts?('更新 '+d.ts+(d.cached?'（缓存）':'')):'';
+  const el=document.getElementById('cryptoGrid');
+  if(!el)return;
+  if(!d.ok||!d.coins||!d.coins.length){
+    el.innerHTML='<div class="sub" style="color:#ef7a66">'+(d.msg||'暂无数据')+'</div>';return;
+  }
+  const emaMap={'golden':'金叉🟢','dead':'死叉🔴','bullish':'多头🟢','bearish':'空头🔴','neutral':'中性'};
+  el.innerHTML=d.coins.map(c=>{
+    const cls=(c.pct||0)>0?'up':((c.pct||0)<0?'down':'flat');const sg=(c.pct||0)>0?'+':'';
+    const sigCls=c.signal==='buy'?'buy':(c.signal==='sell'?'sell':'hold');
+    const sigTxt=c.signal==='buy'?'买入':(c.signal==='sell'?'卖出':'持有');
+    const emaTxt=emaMap[c.ema_state]||'-';
+    const sym=c.symbol.replace(/'/g,"\\'");
+    return '<div class="coinCard">'
+      +'<div class="sym">'+escapeHtml(c.symbol)
+      +' <span class="sigPill '+sigCls+'">'+sigTxt+'</span></div>'
+      +'<div class="px '+cls+'">'+(c.price!=null?c.price.toFixed(2):'-')+'</div>'
+      +'<div class="meta">24h '+(c.pct!=null?sg+c.pct.toFixed(2)+'%':'-')
+      +' ｜ RSI '+(c.rsi14!=null?c.rsi14.toFixed(0):'-')
+      +' ｜ '+emaTxt+'</div>'
+      +'<button class="ghost" style="align-self:flex-start" onclick="openCryptoDetail(\''+sym+'\')">📈 详情</button>'
+      +'</div>';
+  }).join('');
+}
+function openCryptoDetail(sym){
+  const tf='1h';
+  const url='/api/crypto_detail?symbol='+encodeURIComponent(sym)+'&timeframe='+tf+'&limit=200';
+  fetch(url).then(r=>r.json()).then(d=>{
+    if(!d.ok){ openMain('<button class="close" onclick="closeMain()">关闭</button><h2>'+escapeHtml(sym)+'</h2><div class="sub" style="color:#ef7a66">'+(d.msg||'获取失败')+'</div>'); return; }
+    const t=d.ticker||{}, ind=d.indicators||{}, fc=d.forecast||{};
+    const cls=(t.pct||0)>0?'up':((t.pct||0)<0?'down':'flat');const sg=(t.pct||0)>0?'+':'';
+    let kpi='<div class="kpi">';
+    kpi+='<div class="cell"><div class="k">现价</div><div class="v '+cls+'">'+(t.price!=null?t.price.toFixed(2):'-')+'</div></div>';
+    kpi+='<div class="cell"><div class="k">24h涨跌</div><div class="v '+cls+'">'+(t.pct!=null?sg+t.pct.toFixed(2)+'%':'-')+'</div></div>';
+    kpi+='<div class="cell"><div class="k">24h高</div><div class="v">'+(t.high!=null?t.high.toFixed(2):'-')+'</div></div>';
+    kpi+='<div class="cell"><div class="k">24h低</div><div class="v">'+(t.low!=null?t.low.toFixed(2):'-')+'</div></div>';
+    kpi+='<div class="cell"><div class="k">24h额(万$)</div><div class="v">'+(t.quote_volume!=null?(t.quote_volume/1e4).toFixed(1):'-')+'</div></div>';
+    kpi+='<div class="cell"><div class="k">RSI(14)</div><div class="v">'+((ind.rsi14!=null)?ind.rsi14.toFixed(1):'-')+'</div></div>';
+    kpi+='</div>';
+    const html='<button class="close" onclick="closeMain()">关闭</button>'
+      +'<h2>🪙 '+escapeHtml(sym)+' · 短期研判（'+tf+'）</h2>'
+      +'<div class="sub">信号由量化引擎生成，仅供研究参考，不构成投资建议</div>'
+      +kpi+'<div id="cryptoModalChart" class="chart"></div>'
+      +'<div class="sub" style="margin-top:6px">图上蓝色阴影带=下一周期1σ统计区间；加密资产波动剧烈，风险自担。</div>';
+    openMain(html);
+    try{
+      const chart=echarts.init(document.getElementById('cryptoModalChart'));
+      const dl=d.kline.map(x=>x.date);
+      const ohlc=d.kline.map(x=>[x.open,x.close,x.low,x.high]);
+      const vol=d.kline.map(x=>x.volume);
+      const nT=(fc.next_time||'');const hasBand=nT&&fc.range_low!=null&&fc.range_high!=null;
+      if(hasBand){dl.push(nT);ohlc.push(['-','-','-','-']);vol.push('-');}
+      const bandArea=hasBand?{markArea:{silent:true,itemStyle:{color:'rgba(120,160,255,0.12)'},data:[[{xAxis:d.kline[d.kline.length-1].date,yAxis:fc.range_low},{xAxis:nT,yAxis:fc.range_high}]]}}:{};
+      const midLine=hasBand?{markLine:{silent:true,symbol:'none',lineStyle:{type:'dash',color:'#7aa0ff'},data:[{xAxis:d.kline[d.kline.length-1].date,yAxis:fc.range_mid},{xAxis:nT,yAxis:fc.range_mid}]}}:{};
+      chart.setOption({backgroundColor:'#0d1219',animation:false,
+        grid:[{left:60,right:18,top:16,bottom:62,height:'60%'},{left:60,right:18,top:'76%',height:'16%'}],
+        tooltip:{trigger:'axis'},
+        xAxis:[{type:'category',data:dl,axisLabel:{color:'#8b98a5',fontSize:10}},{type:'category',gridIndex:1,data:dl,axisLabel:{show:false}}],
+        yAxis:[{scale:true,axisLabel:{color:'#8b98a5'}},{scale:true,gridIndex:1,axisLabel:{show:false}}],
+        dataZoom:[{type:'inside',xAxisIndex:[0,1]},{type:'slider',height:14,bottom:6,xAxisIndex:[0,1]}],
+        series:[Object.assign({type:'candlestick',data:ohlc,itemStyle:{color:'#ff5b5b',color0:'#2ecc71',borderColor:'#ff5b5b',borderColor0:'#2ecc71'}},bandArea,midLine),
+                {type:'bar',xAxisIndex:1,yAxisIndex:1,data:vol,itemStyle:{color:'#3a4a5a'}}]});
+      window.addEventListener('resize',()=>chart.resize());
+    }catch(e){}
+  }).catch(e=>{ openMain('<button class="close" onclick="closeMain()">关闭</button><h2>加载失败</h2><div class="sub" style="color:#ef7a66">'+e+'</div>'); });
 }
 function loadCryptoDetail(){
   const url='/api/crypto_detail?symbol='+encodeURIComponent(cryptoState.symbol)+'&timeframe='+cryptoState.timeframe+'&limit=200';
@@ -1328,6 +1404,57 @@ window.onload = ()=>{
 </body></html>"""
 
 
+# ----------------------------------------------------- 加密行情卡片网格（逐币指标快照，60s 缓存）
+_CRYPTO_GRID_CACHE = (0, None)
+
+
+def _crypto_grid(ttl: int = 60) -> dict:
+    """返回自选加密币的指标快照列表，供前端并列卡片渲染。
+
+    逐币拉 1h K 线计算 RSI(14)/EMA 状态/买卖信号（复用 datasource 已有函数），
+    价格与 24h 涨跌幅用 ticker24 公开接口。整组结果缓存 60s，降低 Binance 限流压力。
+    """
+    global _CRYPTO_GRID_CACHE
+    now = time.time()
+    if _CRYPTO_GRID_CACHE[1] is not None and (now - _CRYPTO_GRID_CACHE[0]) < ttl:
+        return _CRYPTO_GRID_CACHE[1]
+    syms = load_crypto_watchlist()
+    coins = []
+    for sym in syms:
+        try:
+            df = fetch_crypto_kline(sym, "1h", 100)
+            if df is None or getattr(df, "empty", True):
+                continue
+            ind = compute_crypto_indicators(df)
+            tk = fetch_crypto_ticker24(sym)
+            if tk and tk.get("ok"):
+                price = tk.get("price")
+                pct = tk.get("pct")
+            else:
+                price = float(df["close"].iloc[-1]) if len(df) else None
+                pct = None
+            rsi = ind.get("rsi14")
+            ema_state = ind.get("ema_state", "neutral")
+            signal = ("buy" if (ema_state == "golden" and (rsi or 0) < 70)
+                      else "sell" if (ema_state == "dead" and (rsi or 0) > 30)
+                      else "hold")
+            coins.append({
+                "symbol": sym,
+                "price": price,
+                "pct": pct,
+                "rsi14": rsi,
+                "ema_state": ema_state,
+                "volatility_pct": ind.get("volatility_pct"),
+                "signal": signal,
+            })
+        except Exception:  # noqa: BLE001
+            continue
+    res = {"ok": True, "coins": coins,
+           "ts": datetime.now().strftime("%H:%M:%S")}
+    _CRYPTO_GRID_CACHE = (now, res)
+    return res
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"  # 支持 keep-alive 与大文件(如 echarts.min.js)正确传输
 
@@ -1482,6 +1609,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps({"ok": False, "msg": str(e)},
                                            ensure_ascii=False),
                            "application/json; charset=utf-8")
+        elif p.path == "/api/crypto_grid":
+            try:
+                res = _crypto_grid()
+            except Exception as e:  # noqa: BLE001
+                res = {"ok": False, "msg": str(e)[:120]}
+            self._send(200, json.dumps(res, ensure_ascii=False, default=str),
+                       "application/json; charset=utf-8")
         elif p.path == "/api/crypto_detail":
             q = parse_qs(p.query)
             sym = q.get("symbol", ["BTC/USDT"])[0]

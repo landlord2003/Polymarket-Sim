@@ -69,13 +69,13 @@ def _summary(results) -> str:
 
 
 def _watchlist_table(results) -> str:
-    rows = []
+    cards = []
     for r in results:
         notes = "；".join(r.notes) or "—"
         price = f"{r.last_price:.2f}" if r.last_price else "-"
         risk = "" if r.risk_pass else f'<div class="risk">⛔ 风控拦截：{escape(r.risk_reason)}</div>'
         # 离线行同样完整渲染（只加样式与标注），否则看板一片空白像"没有结果"
-        tr_cls = ' class="offline"' if r.offline else ""
+        card_style = ' style="opacity:.7"' if r.offline else ""
         # 涨跌幅：A股惯例 涨红跌绿
         pct = getattr(r, "pct_change", None)
         if pct is None:
@@ -92,28 +92,30 @@ def _watchlist_table(results) -> str:
                     else f'<span class="src-real">{escape(src.split("(")[0])}</span>')
         nm = escape(r.name)
         sym = escape(r.symbol)
-        rows.append(
-            f"<tr{tr_cls} data-sym=\"{sym}\">"
-            f'<td class="code">{sym}</td>'
-            f"<td>{nm}</td>"
-            f'<td class="sig">{r.signal_emoji} {escape(r.signal)}'
-            + (f'<br><span class="ialert">{escape(r.intraday_alert)}</span>'
-               if getattr(r, "intraday_alert", "") else "")
-            + f'</td>'
-            f'<td class="score">{_bar(r.composite)}<small>{_fmt(r.composite)}</small></td>'
-            f'<td class="px">{price}<br>{pct_html}</td>'
-            f'<td class="src">{src_html}<br><small>{escape(ddate)}</small></td>'
-            f'<td class="dims">趋势{_fmt(r.market_score)} 资金{_fmt(r.money_score)} 轮动{_fmt(r.sector_score)}<br>'
-            f"估值{_fmt(r.valuation_score)} 消息{_fmt(r.news_score)} 大盘{_fmt(r.regime_score)}</td>"
-            f'<td class="notes">{escape(notes)}{risk}</td>'
-            f'<td class="acts">'
+        sig_cls = {"买入": "buy", "卖出": "sell", "持有": "hold",
+                   "观望": "hold"}.get(r.signal, "hold")
+        intraday = (f'<br><span class="ialert">{escape(r.intraday_alert)}</span>'
+                    if getattr(r, "intraday_alert", "") else "")
+        cards.append(
+            f'<div class="card" data-sym="{sym}"{card_style}>'
+            f'<div class="hd"><span><span class="nm">{nm}</span>'
+            f'<span class="code">{sym}</span></span>'
+            f'<span class="pill {sig_cls}">{r.signal_emoji} {escape(r.signal)}</span></div>'
+            f'<div class="px">{price} <span style="font-size:13px">{pct_html}</span></div>'
+            f'<div class="dims">趋势{_fmt(r.market_score)} 资金{_fmt(r.money_score)} '
+            f'轮动{_fmt(r.sector_score)} ｜ 估值{_fmt(r.valuation_score)} '
+            f'消息{_fmt(r.news_score)} 大盘{_fmt(r.regime_score)}</div>'
+            f'<div class="score">{_bar(r.composite)}<small>{_fmt(r.composite)}</small></div>'
+            f'<div class="meta" style="font-size:11px;color:#7e8da0">{src_html} ｜ {escape(ddate)}{intraday}</div>'
+            f'<div class="notes">{escape(notes)}{risk}</div>'
+            f'<div class="acts">'
             f'<button class="dtl" onclick="showDetail(\'{sym}\',\'{nm}\')">详情</button>'
             f'<button class="buy" onclick="showTrade(\'{sym}\',\'{nm}\')">📝模拟买卖</button>'
             f'<button class="del" onclick="removeFromWatchlist(\'{sym}\')">删除</button>'
-            f"</td>"
-            f"</tr>"
+            f'</div>'
+            f'</div>'
         )
-    return "\n".join(rows)
+    return '<div class="grid">' + "\n".join(cards) + "</div>"
 
 
 def _screener_blocks(screener_result: dict) -> str:
@@ -249,6 +251,19 @@ footer { color:#6b7888; font-size:12px; border-top:1px solid #2a3340;
   border:1px solid #2a3340; border-radius:6px; padding:6px 8px; font-size:13px; }
 .trade-form .res { flex-basis:100%; color:#9fb0c0; font-size:12px; }
 .tag-real { color:#5ad19a; } .tag-syn { color:#e0a85a; } .tag-na { color:#888; }
+.grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:12px; }
+.card { background:#161c24; border:1px solid #232c38; border-radius:10px;
+  padding:12px 14px; display:flex; flex-direction:column; gap:8px; }
+.card:hover { border-color:#2c3a4e; }
+.card .hd { display:flex; justify-content:space-between; align-items:baseline; gap:8px; }
+.card .nm { font-size:15px; font-weight:700; color:#e6e6e6; }
+.card .code { font-family:"SFMono-Regular",Consolas,monospace; color:#7fb4ff;
+  font-size:12px; margin-left:6px; }
+.card .px { font-size:18px; font-weight:700; font-variant-numeric:tabular-nums; line-height:1.2; }
+.card .dims { color:#9fb0c0; font-size:12px; line-height:1.6; }
+.card .notes { color:#c4d0db; font-size:12px; }
+.card .risk { color:#ef7a66; font-size:12px; margin-top:4px; }
+.card .acts { margin-top:2px; }
 """
 
 
@@ -270,11 +285,7 @@ def render_dashboard(results, screener_result: dict = None,
     wl_section = (
         "<section><h2>👁 自选股信号总览</h2>"
         f"{asof_note}"
-        "<table><thead><tr><th>代码</th><th>名称</th><th>信号</th>"
-        "<th>综合分</th><th>最新价<br><small>涨跌</small></th>"
-        "<th>数据源<br><small>数据日</small></th>"
-        "<th>六因子</th><th>明细/规则</th><th>操作</th></tr></thead>"
-        f"<tbody>{wl}</tbody></table></section>"
+        f"{wl}</section>"
         if show_watchlist else ""
     )
     return (
@@ -321,13 +332,13 @@ def _live_price_js() -> str:
     fetch('/api/quotes').then(function(r){return r.json();}).then(function(j){
       if(!j.ok || !j.quotes) return;
       var m = {}; j.quotes.forEach(function(q){ m[q.symbol] = q; });
-      document.querySelectorAll('tr[data-sym]').forEach(function(tr){
-        var q = m[tr.getAttribute('data-sym')]; if(!q) return;
-        var td = tr.querySelector('td.px'); if(!td) return;
+      document.querySelectorAll('div.card[data-sym]').forEach(function(card){
+        var q = m[card.getAttribute('data-sym')]; if(!q) return;
+        var td = card.querySelector('.px'); if(!td) return;
         var cls = q.pct>0 ? 'up' : (q.pct<0 ? 'down' : 'flat');
         var sg = q.pct>0 ? '+' : '';
         td.innerHTML = (q.price!=null ? q.price.toFixed(2) : '-') +
-          '<br><span class="'+cls+'">'+sg+(q.pct!=null?q.pct.toFixed(2):'0.00')+'%</span>';
+          ' <span style="font-size:13px" class="'+cls+'">'+sg+(q.pct!=null?q.pct.toFixed(2):'0.00')+'%</span>';
       });
     }).catch(function(){});
   }
