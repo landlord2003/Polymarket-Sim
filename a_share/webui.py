@@ -47,6 +47,7 @@ from datasource import (fetch_realtime, market_phase, fetch_snapshot,
                        fetch_crypto_kline, fetch_crypto_ticker24,
                        compute_crypto_indicators, crypto_forecast,
                        load_crypto_watchlist, save_crypto_watchlist)
+from polymarket import fetch_polymarket_odds
 
 
 # ----------------------------------------------------- 信号持久化读取（每日一次）
@@ -524,6 +525,12 @@ input#qSearch { background:#0f1620; color:#e6e6e6; border:1px solid #2a3340;
 .chart { width:100%; height:340px; }
 .ticker .q { white-space:nowrap; }
 .ticker .nm { color:#cfe0f0; margin-right:6px; }
+.polyList { margin-top:6px; max-height:440px; overflow:auto; }
+.polyRow { padding:9px 4px; border-bottom:1px solid #18222e; }
+.polyRow .q { font-size:13px; color:#dbe6f0; line-height:1.45; }
+.polyRow .meta { font-size:11px; color:#7e8da0; margin-top:3px; }
+.probBar { height:6px; background:#16202c; border-radius:4px; margin-top:5px; overflow:hidden; }
+.probBar > i { display:block; height:100%; border-radius:4px; }
 .ticker .up { color:#ff5b5b; font-weight:700; }
 .ticker .down { color:#2ecc71; font-weight:700; }
 .ticker .flat { color:#888; }
@@ -566,6 +573,7 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
   <button class="ghost" onclick="openRecommend()">🤖 自动荐股</button>
   <button class="ghost" onclick="openBacktest()">📈 回测</button>
   <button class="ghost" onclick="toggleCryptoPanel()">🪙 加密行情</button>
+  <button class="ghost" onclick="togglePolyPanel()">📊 事件概率</button>
   <label><input type="checkbox" id="offline"> 离线验证</label>
   <label><input type="checkbox" id="push"> 推送钉钉</label>
   <span class="sep"></span>
@@ -609,6 +617,19 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
   <div id="cryptoKpi" class="kpi"></div>
   <div id="cryptoChart" class="chart"></div>
   <div id="cryptoForecast"></div>
+</div>
+<div id="polyPanel" class="cpblock" style="display:none">
+  <div class="cpHead">
+    <span class="ttl">📊 事件概率 · <b id="polyTag">crypto</b></span>
+    <span>类别 <select id="polyTagSel" onchange="polyState.tag=this.value;document.getElementById('polyTag').textContent=this.value;loadPoly()">
+      <option value="crypto">加密</option><option value="economy">经济</option><option value="finance">金融</option><option value="business">商业</option><option value="tech">科技</option><option value="science">科学</option><option value="sports">体育</option><option value="entertainment">娱乐</option>
+    </select></span>
+    <button onclick="loadPoly()">刷新</button>
+    <label><input type="checkbox" id="polyAuto" checked> 自动刷新</label>
+    <span class="sub" id="polyTs"></span>
+  </div>
+  <div class="sub">来源：Polymarket 公开行情（Gamma API，无需密钥）｜ 价格为市场隐含概率 ｜ <b>已过滤政治/地缘等敏感类别</b></div>
+  <div id="polyList" class="polyList"></div>
 </div>
 <div id="ticker" class="ticker">实时报价加载中…</div>
 <iframe id="board" src="/api/board"></iframe>
@@ -803,6 +824,51 @@ function loadCryptoDetail(){
     if(el)el.innerHTML='<div class="sub" style="color:#ef7a66">加载失败：'+e+'</div>';
   });
 }
+let polyState={tag:'crypto'};
+let polyAutoTimer=null, polyPanelOpen=false;
+function togglePolyPanel(){
+  polyPanelOpen=!polyPanelOpen;
+  const p=document.getElementById('polyPanel');
+  p.style.display=polyPanelOpen?'block':'none';
+  if(polyPanelOpen){
+    loadPoly();
+    if(polyAutoTimer)clearInterval(polyAutoTimer);
+    polyAutoTimer=setInterval(()=>{
+      if(polyPanelOpen && document.getElementById('polyAuto').checked)loadPoly();
+    },30000);
+  }else if(polyAutoTimer){clearInterval(polyAutoTimer);polyAutoTimer=null;}
+}
+function loadPoly(){
+  const url='/api/polymarket_odds?tag='+encodeURIComponent(polyState.tag)+'&limit=30';
+  fetch(url).then(r=>r.json()).then(renderPoly).catch(e=>{
+    const el=document.getElementById('polyList');
+    if(el)el.innerHTML='<div class="sub" style="color:#ef7a66">加载失败：'+e+'</div>';
+  });
+}
+function renderPoly(d){
+  document.getElementById('polyTs').textContent=d.ts?('更新 '+d.ts+(d.cached?'（缓存）':'')):'';
+  const el=document.getElementById('polyList');
+  if(!d.ok||!d.markets||!d.markets.length){
+    el.innerHTML='<div class="sub" style="color:#ef7a66">'+(d.msg||'暂无数据')+'</div>';return;
+  }
+  el.innerHTML=d.markets.map(m=>{
+    const outs=(m.outcomes||[]).map(o=>{
+      const pct=(o.price!=null?o.price*100:0);
+      const col=pct>=50?'#5fd98a':'#7e8da0';
+      return '<div style="display:flex;align-items:center;gap:8px;margin-top:4px">'
+        +'<span style="width:96px;font-size:12px;color:#9fb0c0">'+escapeHtml(o.label)+'</span>'
+        +'<span class="probBar" style="flex:1"><i style="width:'+pct.toFixed(1)+'%;background:'+col+'"></i></span>'
+        +'<b style="width:50px;text-align:right;color:'+col+'">'+pct.toFixed(1)+'%</b></div>';
+    }).join('');
+    return '<div class="polyRow"><div class="q">'+escapeHtml(m.question)+'</div>'
+      +'<div class="meta">24h量 $'+fmtNum(m.volume24hr)+' ｜ 流动性 $'+fmtNum(m.liquidity)
+      +(m.endDate?' ｜ 截止 '+String(m.endDate).slice(0,10):'')+'</div>'+outs+'</div>';
+  }).join('');
+}
+function fmtNum(v){ if(v==null)return '-'; v=Number(v);
+  if(v>=1e9)return (v/1e9).toFixed(2)+'B'; if(v>=1e6)return (v/1e6).toFixed(2)+'M';
+  if(v>=1e3)return (v/1e3).toFixed(1)+'K'; return v.toFixed(0); }
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function renderCryptoDetail(d){
   const kpiEl=document.getElementById('cryptoKpi');
   const fcEl=document.getElementById('cryptoForecast');
@@ -1366,6 +1432,20 @@ class Handler(BaseHTTPRequestHandler):
                 res = fetch_crypto_quotes()
             except Exception as e:  # noqa: BLE001
                 res = {"ok": False, "msg": str(e), "quotes": []}
+            res["ts"] = datetime.now().strftime("%H:%M:%S")
+            self._send(200, json.dumps(res, ensure_ascii=False, default=str),
+                       "application/json; charset=utf-8")
+        elif p.path == "/api/polymarket_odds":
+            q = parse_qs(p.query)
+            tag = q.get("tag", ["crypto"])[0]
+            try:
+                limit = int(q.get("limit", ["30"])[0])
+            except ValueError:
+                limit = 30
+            try:
+                res = fetch_polymarket_odds(tag=tag, limit=limit)
+            except Exception as e:  # noqa: BLE001
+                res = {"ok": False, "msg": str(e), "markets": []}
             res["ts"] = datetime.now().strftime("%H:%M:%S")
             self._send(200, json.dumps(res, ensure_ascii=False, default=str),
                        "application/json; charset=utf-8")
