@@ -45,7 +45,8 @@ from datasource import (fetch_realtime, market_phase, fetch_snapshot,
                        fetch_financials, fetch_news_titles,
                        fetch_crypto_quotes, fetch_kline, DataSourceError,
                        fetch_crypto_kline, fetch_crypto_ticker24,
-                       compute_crypto_indicators, crypto_forecast)
+                       compute_crypto_indicators, crypto_forecast,
+                       load_crypto_watchlist, save_crypto_watchlist)
 
 
 # ----------------------------------------------------- 信号持久化读取（每日一次）
@@ -510,6 +511,17 @@ input#qSearch { background:#0f1620; color:#e6e6e6; border:1px solid #2a3340;
   padding:7px 18px; background:#0e141c; border-bottom:1px solid #1c2530;
   font-size:13px; font-variant-numeric:tabular-nums; color:#8b98a5; }
 .ticker.crypto { background:#0c1118; }
+.cpblock { margin:10px 16px 0; padding:12px 14px; background:#0d1219;
+  border:1px solid #1f2a36; border-radius:10px; }
+.cpHead { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:8px;
+  font-size:13px; color:#9fb0c0; }
+.cpHead .ttl { font-size:15px; color:#cfe0f0; }
+.watchEditor { margin:8px 0; padding:8px 10px; background:#0f1620;
+  border:1px solid #232c38; border-radius:8px; }
+.chips { display:flex; gap:6px; flex-wrap:wrap; margin-top:4px; }
+.chip { background:#1a2230; border:1px solid #2a3340; border-radius:12px;
+  padding:2px 9px; font-size:12px; color:#cfe0f0; }
+.chart { width:100%; height:340px; }
 .ticker .q { white-space:nowrap; }
 .ticker .nm { color:#cfe0f0; margin-right:6px; }
 .ticker .up { color:#ff5b5b; font-weight:700; }
@@ -553,7 +565,7 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
   <button id="bP" onclick="openPortfolio()">模拟仓</button>
   <button class="ghost" onclick="openRecommend()">🤖 自动荐股</button>
   <button class="ghost" onclick="openBacktest()">📈 回测</button>
-  <button class="ghost" onclick="openCrypto()">🪙 加密行情</button>
+  <button class="ghost" onclick="toggleCryptoPanel()">🪙 加密行情</button>
   <label><input type="checkbox" id="offline"> 离线验证</label>
   <label><input type="checkbox" id="push"> 推送钉钉</label>
   <span class="sep"></span>
@@ -573,6 +585,31 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
   <span id="status"></span>
 </div>
 <div id="cryptoTicker" class="ticker crypto">加密行情加载中…</div>
+<div id="cryptoPanel" class="cpblock" style="display:none">
+  <div class="cpHead">
+    <span class="ttl">🪙 加密货币 · <b id="cpSym">—</b></span>
+    <span>币种 <select id="cryptoCoin" onchange="cryptoState.symbol=this.value;document.getElementById('cpSym').textContent=this.value;loadCryptoDetail()"></select></span>
+    <span>周期 <select id="cryptoTf" onchange="cryptoState.timeframe=this.value;loadCryptoDetail()">
+      <option value="1m">1分钟</option><option value="15m">15分钟</option><option value="1h" selected>1小时</option><option value="4h">4小时</option><option value="1d">1日</option>
+    </select></span>
+    <button onclick="loadCryptoDetail()">刷新</button>
+    <label><input type="checkbox" id="cryptoAuto" checked> 自动刷新</label>
+    <button class="ghost" onclick="toggleWatchEditor()">✎ 编辑自选</button>
+    <span class="sub" id="cpTs"></span>
+  </div>
+  <div id="watchEditor" style="display:none" class="watchEditor">
+    <div class="sub">点击 × 移除，或输入交易对（如 SOL/USDT）后回车 / 点添加：</div>
+    <div id="watchChips" class="chips"></div>
+    <div style="margin-top:6px">
+      <input id="watchInput" placeholder="XXX/USDT" style="width:120px" onkeydown="if(event.key==='Enter')addWatch()">
+      <button onclick="addWatch()">添加</button>
+      <span id="watchMsg" class="sub"></span>
+    </div>
+  </div>
+  <div id="cryptoKpi" class="kpi"></div>
+  <div id="cryptoChart" class="chart"></div>
+  <div id="cryptoForecast"></div>
+</div>
 <div id="ticker" class="ticker">实时报价加载中…</div>
 <iframe id="board" src="/api/board"></iframe>
 <div id="mainModalMask" class="mask" onclick="if(event.target===this)closeMain()">
@@ -628,7 +665,7 @@ function loadCrypto(){
       const cls=q.pct>0?'up':(q.pct<0?'down':'flat');const sg=q.pct>0?'+':'';
       const px=q.price!=null?q.price.toFixed(2):'-';
       const pc=q.pct!=null?q.pct.toFixed(2):'0.00';
-      return '<span class="q" style="cursor:pointer" onclick="openCrypto(\''+q.symbol+'\')"><span class="nm">'+q.symbol+'</span>'+px+' <span class="'+cls+'">'+sg+pc+'%</span></span>';
+      return '<span class="q" style="cursor:pointer" onclick="selectCrypto(\''+q.symbol+'\')"><span class="nm">'+q.symbol+'</span>'+px+' <span class="'+cls+'">'+sg+pc+'%</span></span>';
     }).join('')+'<span class="ts">'+(j.ts||'')+'</span>';
   }).catch(()=>{document.getElementById('cryptoTicker').innerHTML='<span class="flat">加密行情断开</span>';});
 }
@@ -703,23 +740,60 @@ function showMainDetail(q,d){
   }catch(e){}
 }
 function openMain(h){document.getElementById('mainModalBox').innerHTML=h;document.getElementById('mainModalMask').classList.add('show');}
-const CRYPTO_COINS=['BTC/USDT','ETH/USDT','BNB/USDT','SOL/USDT','XRP/USDT','DOGE/USDT','ADA/USDT','TON/USDT'];
-const CRYPTO_TFS=[['1m','1分钟'],['15m','15分钟'],['1h','1小时'],['4h','4小时'],['1d','1日']];
 let cryptoState={symbol:'BTC/USDT',timeframe:'1h'};
-function openCrypto(symbol){
-  if(symbol)cryptoState.symbol=symbol;
-  const coinOpts=CRYPTO_COINS.map(c=>'<option value="'+c+'"'+(c===cryptoState.symbol?' selected':'')+'>'+c+'</option>').join('');
-  const tfOpts=CRYPTO_TFS.map(t=>'<option value="'+t[0]+'"'+(t[0]===cryptoState.timeframe?' selected':'')+'>'+t[1]+'</option>').join('');
-  const html='<button class="close" onclick="closeMain()">关闭</button>'
-    +'<h2>🪙 加密货币 · '+cryptoState.symbol+'</h2>'
-    +'<div class="sub">Binance 公开行情 ｜ 预测为统计/技术指标研判，<b>非投资建议</b></div>'
-    +'<div style="margin:8px 0 4px">币种 <select id="cryptoCoin" onchange="cryptoState.symbol=this.value;loadCryptoDetail()">'+coinOpts+'</select> '
-    +'周期 <select id="cryptoTf" onchange="cryptoState.timeframe=this.value;loadCryptoDetail()">'+tfOpts+'</select> '
-    +'<button onclick="loadCryptoDetail()">刷新</button></div>'
-    +'<div id="cryptoKpi" class="kpi"></div>'
-    +'<div id="cryptoChart" class="chart"></div>'
-    +'<div id="cryptoForecast"></div>';
-  openMain(html);
+let cryptoAutoTimer=null, cryptoPanelOpen=false;
+function toggleCryptoPanel(){
+  cryptoPanelOpen=!cryptoPanelOpen;
+  const p=document.getElementById('cryptoPanel');
+  p.style.display=cryptoPanelOpen?'block':'none';
+  if(cryptoPanelOpen){
+    loadCryptoWatchlist();
+    loadCryptoDetail();
+    if(cryptoAutoTimer)clearInterval(cryptoAutoTimer);
+    cryptoAutoTimer=setInterval(()=>{
+      if(cryptoPanelOpen && document.getElementById('cryptoAuto').checked)loadCryptoDetail();
+    },30000);
+  }else if(cryptoAutoTimer){clearInterval(cryptoAutoTimer);cryptoAutoTimer=null;}
+}
+function loadCryptoWatchlist(){
+  fetch('/api/crypto_watchlist').then(r=>r.json()).then(j=>{
+    if(!j.ok||!j.symbols)return;
+    const syms=j.symbols;
+    if(syms.indexOf(cryptoState.symbol)<0)cryptoState.symbol=syms[0];
+    const sel=document.getElementById('cryptoCoin');
+    sel.innerHTML=syms.map(s=>'<option value="'+s+'"'+(s===cryptoState.symbol?' selected':'')+'>'+s+'</option>').join('');
+    document.getElementById('cpSym').textContent=cryptoState.symbol;
+    renderWatchChips(syms);
+  }).catch(()=>{});
+}
+function renderWatchChips(syms){
+  document.getElementById('watchChips').innerHTML=syms.map(s=>'<span class="chip">'+s+' <span style="cursor:pointer;color:#ef7a66" onclick="removeWatch(\''+s+'\')">×</span></span>').join('');
+}
+function toggleWatchEditor(){
+  const e=document.getElementById('watchEditor');
+  e.style.display = e.style.display==='none'?'block':'none';
+}
+function addWatch(){
+  const inp=document.getElementById('watchInput');
+  const sym=inp.value.trim().toUpperCase();
+  if(!sym)return;
+  fetch('/api/crypto_watchlist',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'add',symbol:sym})}).then(r=>r.json()).then(j=>{
+    document.getElementById('watchMsg').textContent=j.msg||'';
+    if(j.ok){inp.value='';renderWatchChips(j.symbols);loadCryptoWatchlist();loadCrypto();}
+  }).catch(e=>{document.getElementById('watchMsg').textContent='失败：'+e;});
+}
+function removeWatch(sym){
+  fetch('/api/crypto_watchlist',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'remove',symbol:sym})}).then(r=>r.json()).then(j=>{
+    if(j.ok){renderWatchChips(j.symbols);loadCryptoWatchlist();loadCrypto();}
+  }).catch(()=>{});
+}
+function selectCrypto(sym){
+  if(!cryptoPanelOpen)toggleCryptoPanel();
+  cryptoState.symbol=sym;
+  const sel=document.getElementById('cryptoCoin');
+  if(sel){sel.value=sym;document.getElementById('cpSym').textContent=sym;}
   loadCryptoDetail();
 }
 function loadCryptoDetail(){
@@ -733,6 +807,7 @@ function renderCryptoDetail(d){
   const kpiEl=document.getElementById('cryptoKpi');
   const fcEl=document.getElementById('cryptoForecast');
   const chartEl=document.getElementById('cryptoChart');
+  document.getElementById('cpTs').textContent=d.ts?('更新 '+d.ts):'';
   if(!d.ok){
     if(kpiEl)kpiEl.innerHTML='';
     if(fcEl)fcEl.innerHTML='<div class="sub" style="color:#ef7a66">'+(d.msg||'获取失败')+'</div>';
@@ -751,19 +826,26 @@ function renderCryptoDetail(d){
   kpi+='<div class="cell"><div class="k">波动率1σ%</div><div class="v">'+(ind.volatility_pct!=null?ind.volatility_pct.toFixed(2):'-')+'</div></div>';
   kpi+='<div class="cell"><div class="k">趋势斜率%</div><div class="v">'+((ind.trend_slope_pct!=null)?(ind.trend_slope_pct>=0?'+':'')+ind.trend_slope_pct.toFixed(2):'-')+'</div></div>';
   if(kpiEl)kpiEl.innerHTML=kpi;
-  // 蜡烛图 + 成交量副图
+  // 蜡烛图 + 成交量副图 + 预测区间阴影带
   try{
     const chart=echarts.init(chartEl);
     const dl=d.kline.map(x=>x.date);
     const ohlc=d.kline.map(x=>[x.open,x.close,x.low,x.high]);
     const vol=d.kline.map(x=>x.volume);
+    const nT=(fc.next_time||'');
+    const hasBand = nT && fc.range_low!=null && fc.range_high!=null;
+    if(hasBand){dl.push(nT);ohlc.push(['-','-','-','-']);vol.push('-');}
+    const bandArea=hasBand?{markArea:{silent:true,itemStyle:{color:'rgba(120,160,255,0.12)'},
+      data:[[{xAxis:d.kline[d.kline.length-1].date,yAxis:fc.range_low},{xAxis:nT,yAxis:fc.range_high}]]}}:{};
+    const midLine=hasBand?{markLine:{silent:true,symbol:'none',lineStyle:{type:'dashed',color:'#7aa0ff'},
+      data:[{xAxis:d.kline[d.kline.length-1].date,yAxis:fc.range_mid},{xAxis:nT,yAxis:fc.range_mid}]}}:{};
     chart.setOption({backgroundColor:'#0d1219',animation:false,
       grid:[{left:60,right:18,top:16,bottom:62,height:'60%'},{left:60,right:18,top:'76%',height:'16%'}],
       tooltip:{trigger:'axis'},
       xAxis:[{type:'category',data:dl,axisLabel:{color:'#8b98a5',fontSize:10}},{type:'category',gridIndex:1,data:dl,axisLabel:{show:false}}],
       yAxis:[{scale:true,axisLabel:{color:'#8b98a5'}},{scale:true,gridIndex:1,axisLabel:{show:false}}],
       dataZoom:[{type:'inside',xAxisIndex:[0,1]},{type:'slider',height:14,bottom:6,xAxisIndex:[0,1]}],
-      series:[{type:'candlestick',data:ohlc,itemStyle:{color:'#ff5b5b',color0:'#2ecc71',borderColor:'#ff5b5b',borderColor0:'#2ecc71'}},
+      series:[Object.assign({type:'candlestick',data:ohlc,itemStyle:{color:'#ff5b5b',color0:'#2ecc71',borderColor:'#ff5b5b',borderColor0:'#2ecc71'}},bandArea,midLine),
               {type:'bar',xAxisIndex:1,yAxisIndex:1,data:vol,itemStyle:{color:'#3a4a5a'}}]});
     window.addEventListener('resize',()=>chart.resize());
   }catch(e){}
@@ -783,7 +865,7 @@ function renderCryptoDetail(d){
     +'<div class="cell"><div class="k">当前价</div><div class="v">'+(fc.range_mid!=null?fc.range_mid.toFixed(2):'-')+'</div></div>'
     +'<div class="cell"><div class="k">下一周期1σ上沿</div><div class="v up">'+(fc.range_high!=null?fc.range_high.toFixed(2):'-')+'</div></div>'
     +'</div>'
-    +'<div class="sub" style="margin-top:6px">统计区间基于近24根K线对数收益1σ（'+(fc.sigma_pct!=null?fc.sigma_pct.toFixed(2):'-')+'%），含方向研判但<b>不构成投资建议</b>；加密资产波动剧烈，风险自担。</div>';
+    +'<div class="sub" style="margin-top:6px">图上蓝色阴影带=下一周期1σ统计区间（'+(fc.next_time||'')+'）；区间基于近24根K线对数收益1σ（'+(fc.sigma_pct!=null?fc.sigma_pct.toFixed(2):'-')+'%），含方向研判但<b>不构成投资建议</b>；加密资产波动剧烈，风险自担。</div>';
 }
 function openRecommend(){
   openMain('<button class="close" onclick="closeMain()">关闭</button>'
@@ -1287,6 +1369,16 @@ class Handler(BaseHTTPRequestHandler):
             res["ts"] = datetime.now().strftime("%H:%M:%S")
             self._send(200, json.dumps(res, ensure_ascii=False, default=str),
                        "application/json; charset=utf-8")
+        elif p.path == "/api/crypto_watchlist":
+            try:
+                syms = load_crypto_watchlist()
+                self._send(200, json.dumps({"ok": True, "symbols": syms},
+                                           ensure_ascii=False),
+                           "application/json; charset=utf-8")
+            except Exception as e:  # noqa: BLE001
+                self._send(200, json.dumps({"ok": False, "msg": str(e)},
+                                           ensure_ascii=False),
+                           "application/json; charset=utf-8")
         elif p.path == "/api/crypto_detail":
             q = parse_qs(p.query)
             sym = q.get("symbol", ["BTC/USDT"])[0]
@@ -1484,6 +1576,40 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps({"ok": True, "msg": "已加入自选股 " + symbol},
                                        ensure_ascii=False),
                        "application/json; charset=utf-8")
+        elif p.path == "/api/crypto_watchlist":
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                data = json.loads(raw.decode("utf-8") or "{}")
+            except Exception:
+                data = {}
+            action = str(data.get("action", "add"))
+            sym = str(data.get("symbol", "")).strip().upper()
+            cur = load_crypto_watchlist()
+            if action == "remove":
+                new = [s for s in cur if s != sym]
+                if len(new) == len(cur):
+                    self._send(200, json.dumps(
+                        {"ok": False, "msg": "未找到 " + sym}, ensure_ascii=False),
+                        "application/json; charset=utf-8"); return
+                cur = save_crypto_watchlist(new)
+                self._send(200, json.dumps(
+                    {"ok": True, "msg": "已删除 " + sym, "symbols": cur},
+                    ensure_ascii=False), "application/json; charset=utf-8"); return
+            # add
+            if not re.match(r"^[A-Z0-9]{2,20}/USDT$", sym):
+                self._send(200, json.dumps(
+                    {"ok": False,
+                     "msg": "格式应为 XXX/USDT（如 SOL/USDT）"},
+                    ensure_ascii=False), "application/json; charset=utf-8"); return
+            if sym in cur:
+                self._send(200, json.dumps(
+                    {"ok": True, "msg": "已在自选", "symbols": cur},
+                    ensure_ascii=False), "application/json; charset=utf-8"); return
+            cur = save_crypto_watchlist(cur + [sym])
+            self._send(200, json.dumps(
+                {"ok": True, "msg": "已加入 " + sym, "symbols": cur},
+                ensure_ascii=False), "application/json; charset=utf-8"); return
         elif p.path == "/api/recommend/refresh":
             # 后台触发横截面相对排名荐股（相对沪深300多空版），结果写入 xsec_recommend_cache.json
             try:

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import ssl
 import time
@@ -472,19 +473,64 @@ def _to_float(v):
         return None
 
 
+def load_crypto_watchlist() -> list:
+    """读取自选加密币列表（持久化到 a_share/crypto_watchlist.json）。
+
+    返回形如 ['BTC/USDT', ...]。文件不存在/损坏时回退默认 8 只主流币。
+    仅含 /USDT 现货交易对（与 Binance 公开 ticker 端点匹配）。
+    """
+    default = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT",
+               "XRP/USDT", "DOGE/USDT", "ADA/USDT", "TON/USDT"]
+    path = os.path.join(os.path.dirname(__file__), "crypto_watchlist.json")
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as _f:
+                data = json.load(_f)
+            syms = data.get("symbols", default) if isinstance(data, dict) else data
+            if isinstance(syms, list) and syms:
+                return [str(s) for s in syms]
+    except Exception:  # noqa: BLE001
+        pass
+    return default
+
+
+def save_crypto_watchlist(symbols: list) -> list:
+    """校验并持久化自选币列表，返回清洗后的列表。
+
+    仅接受形如 XXX/USDT（2-20 位大写字母数字 / USDT）的交易对，去重保序，
+    且至少保留 1 只。写入 a_share/crypto_watchlist.json。
+    """
+    default = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT",
+               "XRP/USDT", "DOGE/USDT", "ADA/USDT", "TON/USDT"]
+    clean = []
+    for s in symbols or []:
+        s = str(s).strip().upper()
+        if re.match(r"^[A-Z0-9]{2,20}/USDT$", s) and s not in clean:
+            clean.append(s)
+    if not clean:
+        clean = list(default)
+    path = os.path.join(os.path.dirname(__file__), "crypto_watchlist.json")
+    try:
+        with open(path, "w", encoding="utf-8") as _f:
+            json.dump({"symbols": clean}, _f, ensure_ascii=False, indent=2)
+    except Exception:  # noqa: BLE001
+        pass
+    return clean
+
+
 def fetch_crypto_quotes(symbols: Optional[list[str]] = None) -> dict:
-    """拉取主流加密货币行情（无需 API 密钥）。
+    """拉取加密货币行情（无需 API 密钥）。
 
     改用 Binance 公共数据域（data-api.binance.vision）直连，绕过 ccxt 的
     load_markets 对 futures 域名（fapi.binance.com）的强依赖——境内网络下
     fapi 常超时导致整条取数失败、面板长期显示「加密行情不可用」。
 
-    优先 data-api.binance.vision，失败兜底 api.binance.com。两者现货 ticker
-    端点境内均可达。仍失败返回 ok=False（不抛），由上层显示不可用。
+    自选币（symbols）为空时读取持久化的自选列表 load_crypto_watchlist()。
+    单币种失败（如非 Binance 交易对 / 限流）仅跳过该币，不拖累整条取数；
+    全部失败才返回 ok=False。
     """
     if symbols is None:
-        symbols = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT",
-                   "XRP/USDT", "DOGE/USDT", "ADA/USDT", "TON/USDT"]
+        symbols = load_crypto_watchlist()
     hosts = [
         "https://data-api.binance.vision/api/v3",
         "https://api.binance.com/api/v3",
@@ -493,7 +539,6 @@ def fetch_crypto_quotes(symbols: Optional[list[str]] = None) -> dict:
     last_err = "未知错误"
     for host in hosts:
         out = []
-        failed = False
         for key, label in want.items():
             try:
                 raw = _http_get(f"{host}/ticker/24hr?symbol={key}", timeout=8)
@@ -505,10 +550,9 @@ def fetch_crypto_quotes(symbols: Optional[list[str]] = None) -> dict:
                     "quote_volume": _to_float(t.get("quoteVolume")),
                 })
             except Exception as e:  # noqa: BLE001
-                failed = True
-                last_err = f"{type(e).__name__}: {str(e)[:60]}"
-                break
-        if out and not failed:
+                last_err = f"{label}: {type(e).__name__}: {str(e)[:40]}"
+                continue
+        if out:
             return {"ok": True, "quotes": out, "source": host}
     return {"ok": False, "msg": f"行情获取失败（{last_err}）", "quotes": []}
 
@@ -666,6 +710,16 @@ def crypto_forecast(df: "pd.DataFrame", ind: dict,
     sigma = (ind.get("volatility_pct") or 0) / 100.0  # 每根对数收益 stdev
     lo = last * math.exp(-sigma)
     hi = last * math.exp(sigma)
+    # 下一根 K 线的起始时间（用于前端把预测区间画成 K 线上的阴影带）
+    _tf_min = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60,
+               "2h": 120, "4h": 240, "6h": 360, "12h": 720, "1d": 1440,
+               "1w": 10080, "1M": 43200}
+    try:
+        _last_ts = df.index[-1]
+        _next_ts = _last_ts + pd.Timedelta(minutes=_tf_min.get(timeframe, 60))
+        next_time = _next_ts.strftime("%Y-%m-%d %H:%M")
+    except Exception:  # noqa: BLE001
+        next_time = ""
     state = ind.get("ema_state", "neutral")
     rsi = ind.get("rsi14") or 50
 
@@ -697,6 +751,7 @@ def crypto_forecast(df: "pd.DataFrame", ind: dict,
         "last_price": last,
         "range_low": lo, "range_mid": last, "range_high": hi,
         "sigma_pct": sigma * 100,
+        "next_time": next_time,
         "bias": bias, "reason": reason,
         "signal": signal, "signal_reason": sig_reason,
     }
