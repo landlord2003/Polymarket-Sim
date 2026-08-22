@@ -591,6 +591,15 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
 .polyList::-webkit-scrollbar,.mbox::-webkit-scrollbar,.panel::-webkit-scrollbar,.cryptoGrid::-webkit-scrollbar{width:8px;height:8px;}
 .polyList::-webkit-scrollbar-thumb,.mbox::-webkit-scrollbar-thumb,.panel::-webkit-scrollbar-thumb,.cryptoGrid::-webkit-scrollbar-thumb{background:#2c3a4e;border-radius:4px;}
 .polyList::-webkit-scrollbar-track,.mbox::-webkit-scrollbar-track,.panel::-webkit-scrollbar-track,.cryptoGrid::-webkit-scrollbar-track{background:transparent;}
+/* 分区收起/展开 */
+.collapseBtn{margin-left:auto;}
+.secHead{display:flex;align-items:center;gap:10px;margin:12px 14px 0;padding:10px 14px;background:#131a24;border:1px solid #243042;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.4);cursor:pointer;user-select:none;}
+.secHead:hover{border-color:#2c3a4e;}
+.secHead .ttl{font-size:15px;color:#cfe0f0;font-weight:700;}
+.secHead .caret{margin-left:auto;color:#9fb0c0;font-size:13px;}
+/* 加密详情弹窗：竖向加大、横向收窄 */
+.mboxCrypto{max-width:600px;width:94%;max-height:94vh;}
+.mboxCrypto .chart{height:460px;}
 </style></head>
 <body>
 <div class="bar">
@@ -632,7 +641,9 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
     <label><input type="checkbox" id="cryptoAuto" checked> 自动刷新</label>
     <button class="ghost" onclick="toggleWatchEditor()">✎ 编辑自选</button>
     <span class="sub" id="cpTs"></span>
+    <button class="ghost collapseBtn" id="cryptoPanelBtn" onclick="toggleCollapse('cryptoPanel')">▴ 收起</button>
   </div>
+  <div class="cpBody" id="cryptoPanelBody">
   <div id="watchEditor" style="display:none" class="watchEditor">
     <div class="sub">点击 × 移除，或输入交易对（如 SOL/USDT）后回车 / 点添加：</div>
     <div id="watchChips" class="chips"></div>
@@ -643,6 +654,7 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
     </div>
   </div>
   <div id="cryptoGrid" class="cryptoGrid"></div>
+  </div>
 </div>
 <div id="polyPanel" class="cpblock" style="display:none">
   <div class="cpHead">
@@ -653,12 +665,21 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
     <button onclick="loadPoly()">刷新</button>
     <label><input type="checkbox" id="polyAuto" checked> 自动刷新</label>
     <span class="sub" id="polyTs"></span>
+    <button class="ghost collapseBtn" id="polyPanelBtn" onclick="toggleCollapse('polyPanel')">▴ 收起</button>
   </div>
+  <div class="cpBody" id="polyPanelBody">
   <div class="sub">来源：Polymarket 公开行情（Gamma API，无需密钥）｜ 价格为市场隐含概率 ｜ <b>已过滤政治/地缘等敏感类别</b></div>
   <div id="polyList" class="polyList"></div>
+  </div>
 </div>
 <div id="ticker" class="ticker">实时报价加载中…</div>
+<div class="secHead" id="boardHead" onclick="toggleCollapse('boardSec')">
+  <span class="ttl">📋 日常盯盘</span>
+  <span class="caret" id="boardSecCaret">▴ 收起</span>
+</div>
+<div class="cpBody" id="boardSecBody">
 <iframe id="board" src="/api/board"></iframe>
+</div>
 <div id="mainModalMask" class="mask" onclick="if(event.target===this)closeMain()">
   <div id="mainModalBox" class="mbox"></div>
 </div>
@@ -742,6 +763,17 @@ function poll(){
   setTimeout(poll,2000);
 }
 function toggleSectors(){const p=document.getElementById('sectorPanel');p.style.display=p.style.display==='block'?'none':'block';}
+function toggleCollapse(id){
+  const body=document.getElementById(id+'Body');
+  if(!body)return;
+  const collapsed=body.style.display==='none';
+  body.style.display=collapsed?'block':'none';
+  const txt=collapsed?'▴ 收起':'▾ 展开';
+  const btn=document.getElementById(id+'Btn');
+  const caret=document.getElementById(id+'Caret');
+  if(btn)btn.textContent=txt;
+  if(caret)caret.textContent=txt;
+}
 function openPortfolio(){document.getElementById('board').src='/api/portfolio';}
 function searchStock(){
   const v=document.getElementById('qSearch').value.trim();
@@ -786,7 +818,7 @@ function showMainDetail(q,d){
     window.addEventListener('resize',()=>chart.resize());
   }catch(e){}
 }
-function openMain(h){document.getElementById('mainModalBox').innerHTML=h;document.getElementById('mainModalMask').classList.add('show');}
+function openMain(h,cls){const b=document.getElementById('mainModalBox');b.className=cls||'mbox';b.innerHTML=h;document.getElementById('mainModalMask').classList.add('show');}
 let cryptoState={symbol:'BTC/USDT',timeframe:'1h'};
 let cryptoAutoTimer=null, cryptoPanelOpen=false;
 function toggleCryptoPanel(){
@@ -873,7 +905,7 @@ function openCryptoDetail(sym){
   const tf='1h';
   const url='/api/crypto_detail?symbol='+encodeURIComponent(sym)+'&timeframe='+tf+'&limit=200';
   fetch(url).then(r=>r.json()).then(d=>{
-    if(!d.ok){ openMain('<button class="close" onclick="closeMain()">关闭</button><h2>'+escapeHtml(sym)+'</h2><div class="sub" style="color:#ef7a66">'+(d.msg||'获取失败')+'</div>'); return; }
+    if(!d.ok){ openMain('<button class="close" onclick="closeMain()">关闭</button><h2>'+escapeHtml(sym)+'</h2><div class="sub" style="color:#ef7a66">'+(d.msg||'获取失败')+'</div>','mbox mboxCrypto'); return; }
     const t=d.ticker||{}, ind=d.indicators||{}, fc=d.forecast||{};
     const cls=(t.pct||0)>0?'up':((t.pct||0)<0?'down':'flat');const sg=(t.pct||0)>0?'+':'';
     let kpi='<div class="kpi">';
@@ -889,7 +921,7 @@ function openCryptoDetail(sym){
       +'<div class="sub">信号由量化引擎生成，仅供研究参考，不构成投资建议</div>'
       +kpi+'<div id="cryptoModalChart" class="chart"></div>'
       +'<div class="sub" style="margin-top:6px">图上蓝色阴影带=下一周期1σ统计区间；加密资产波动剧烈，风险自担。</div>';
-    openMain(html);
+    openMain(html,'mbox mboxCrypto');
     try{
       const chart=echarts.init(document.getElementById('cryptoModalChart'));
       const dl=d.kline.map(x=>x.date);
@@ -909,7 +941,7 @@ function openCryptoDetail(sym){
                 {type:'bar',xAxisIndex:1,yAxisIndex:1,data:vol,itemStyle:{color:'#3a4a5a'}}]});
       window.addEventListener('resize',()=>chart.resize());
     }catch(e){}
-  }).catch(e=>{ openMain('<button class="close" onclick="closeMain()">关闭</button><h2>加载失败</h2><div class="sub" style="color:#ef7a66">'+e+'</div>'); });
+  }).catch(e=>{ openMain('<button class="close" onclick="closeMain()">关闭</button><h2>加载失败</h2><div class="sub" style="color:#ef7a66">'+e+'</div>','mbox mboxCrypto'); });
 }
 function loadCryptoDetail(){
   const url='/api/crypto_detail?symbol='+encodeURIComponent(cryptoState.symbol)+'&timeframe='+cryptoState.timeframe+'&limit=200';
