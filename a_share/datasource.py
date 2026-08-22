@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import ssl
 import time
@@ -24,6 +25,7 @@ import urllib.request
 from datetime import datetime, time as dtime
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -548,6 +550,156 @@ def fetch_crypto_kline(symbol: str = "BTC/USDT", timeframe: str = "1m",
         except Exception:  # noqa: BLE001
             continue
     return pd.DataFrame()
+
+
+# --------------------------------------------------- 加密货币 24h 行情明细
+
+def fetch_crypto_ticker24(symbol: str = "BTC/USDT") -> dict:
+    """单币种 24h 行情（现价/涨跌幅/24h高/24h低/成交额），Binance 公开域直连。
+
+    用于详情弹窗的 KPI 卡（fetch_crypto_quotes 仅含现价/涨跌幅/成交额，无高低温）。
+    全源失败返回 ok=False，由上层显示「获取失败」。
+    """
+    sym = symbol.replace("/", "").upper()
+    hosts = [
+        "https://data-api.binance.vision/api/v3",
+        "https://api.binance.com/api/v3",
+    ]
+    for host in hosts:
+        try:
+            raw = _http_get(f"{host}/ticker/24hr?symbol={sym}", timeout=8)
+            t = json.loads(raw)
+            return {
+                "ok": True, "symbol": symbol, "source": host,
+                "price": _to_float(t.get("lastPrice")),
+                "pct": _to_float(t.get("priceChangePercent")),
+                "high": _to_float(t.get("highPrice")),
+                "low": _to_float(t.get("lowPrice")),
+                "quote_volume": _to_float(t.get("quoteVolume")),
+            }
+        except Exception:  # noqa: BLE001
+            continue
+    return {"ok": False, "symbol": symbol, "msg": "24h 行情获取失败（联网/限流）"}
+
+
+# --------------------------------------------------- 加密货币技术指标与研判
+
+def _ema(s: "pd.Series", n: int) -> "pd.Series":
+    return s.ewm(span=n, adjust=False).mean()
+
+
+def _rsi(close: "pd.Series", n: int = 14) -> "pd.Series":
+    """Wilder 平滑 RSI。"""
+    d = close.diff()
+    up = d.clip(lower=0)
+    dn = -d.clip(upper=0)
+    roll_up = up.ewm(alpha=1 / n, adjust=False).mean()
+    roll_dn = dn.ewm(alpha=1 / n, adjust=False).mean()
+    rs = roll_up / (roll_dn + 1e-12)
+    return 100 - 100 / (1 + rs)
+
+
+def _atr(df: "pd.DataFrame", n: int = 14) -> "pd.Series":
+    """真实波幅 ATR（Wilder 平滑）。"""
+    high, low, close = df["high"], df["low"], df["close"]
+    pc = close.shift(1)
+    tr = pd.concat([(high - low), (high - pc).abs(),
+                    (low - pc).abs()], axis=1).max(axis=1)
+    return tr.ewm(alpha=1 / n, adjust=False).mean()
+
+
+def _slope_pct(s: "pd.Series") -> float:
+    """近段收盘价的线性回归斜率，表达为对均值的百分比（%/根）。"""
+    y = s.values.astype(float)
+    if len(y) < 2:
+        return 0.0
+    x = np.arange(len(y), dtype=float)
+    b = np.polyfit(x, y, 1)[0]
+    return float(b / y.mean() * 100) if y.mean() else 0.0
+
+
+def compute_crypto_indicators(df: "pd.DataFrame") -> dict:
+    """从 K 线计算一套短期技术指标，供研判面板展示。
+
+    含：RSI(14)、EMA(7)/EMA(25) 及金叉/死叉/多头/空头状态、ATR(14)、
+    近 24 根对数收益波动率(%)、近 20 根趋势斜率(%。)。
+    返回纯 dict，便于 JSON 序列化。
+    """
+    close = df["close"]
+    ema_f = _ema(close, 7)
+    ema_s = _ema(close, 25)
+    ef, es = float(ema_f.iloc[-1]), float(ema_s.iloc[-1])
+    pef, pes = float(ema_f.iloc[-2]), float(ema_s.iloc[-2])
+    if ef > es and pef <= pes:
+        ema_state = "golden"      # 金叉
+    elif ef < es and pef >= pes:
+        ema_state = "dead"        # 死叉
+    elif ef > es:
+        ema_state = "bullish"     # 多头排列
+    elif ef < es:
+        ema_state = "bearish"     # 空头排列
+    else:
+        ema_state = "neutral"
+    rets = np.log(close / close.shift(1)).dropna()
+    vol = float(rets.tail(24).std()) * 100  # 每根 K 线波动率(%)
+    return {
+        "rsi14": float(_rsi(close, 14).iloc[-1]),
+        "ema_fast": ef, "ema_slow": es, "ema_state": ema_state,
+        "atr": float(_atr(df, 14).iloc[-1]),
+        "volatility_pct": vol,
+        "trend_slope_pct": _slope_pct(close.tail(20)),
+    }
+
+
+def crypto_forecast(df: "pd.DataFrame", ind: dict,
+                    timeframe: str = "1h") -> dict:
+    """基于指标与波动率的短期研判（透明、可解释、非点预测）。
+
+    1) 方向研判：以 EMA 金叉/死叉/排列为主，RSI 极值区做谨慎修正。
+    2) 统计区间：以近 24 根对数收益 1σ 为带宽，对现价做对称外推，
+       给出下一周期（当前周期）的 下沿/当前价/上沿。
+    3) 买卖信号：复用 bot_dryrun 的 EMA+RSI 规则（金叉且 RSI<70→buy；
+       死叉且 RSI>30→sell；否则 hold）。
+    """
+    close = df["close"]
+    last = float(close.iloc[-1])
+    sigma = (ind.get("volatility_pct") or 0) / 100.0  # 每根对数收益 stdev
+    lo = last * math.exp(-sigma)
+    hi = last * math.exp(sigma)
+    state = ind.get("ema_state", "neutral")
+    rsi = ind.get("rsi14") or 50
+
+    def _cross_word(s):
+        return "金叉" if s == "golden" else ("死叉" if s == "dead" else "")
+
+    if state in ("golden", "bullish"):
+        if rsi >= 70:
+            bias, reason = "偏多(谨慎)", f"EMA多头({_cross_word(state) or '排列'})但 RSI {rsi:.0f} 接近超买"
+        else:
+            bias, reason = "偏多", f"EMA{_cross_word(state) or '多头排列'} + RSI {rsi:.0f}(未超买)"
+    elif state in ("dead", "bearish"):
+        if rsi <= 30:
+            bias, reason = "偏空(谨慎)", f"EMA空头({_cross_word(state) or '排列'})但 RSI {rsi:.0f} 接近超卖"
+        else:
+            bias, reason = "偏空", f"EMA{_cross_word(state) or '空头排列'} + RSI {rsi:.0f}(未超卖)"
+    else:
+        bias, reason = "中性", f"EMA无交叉 + RSI {rsi:.0f}"
+
+    if state in ("golden", "bullish") and rsi < 70:
+        signal, sig_reason = "buy", f"EMA金叉/多头 且 RSI {rsi:.0f}<70 未超买"
+    elif state in ("dead", "bearish") and rsi > 30:
+        signal, sig_reason = "sell", f"EMA死叉/空头 且 RSI {rsi:.0f}>30 未超卖"
+    else:
+        signal, sig_reason = "hold", f"EMA无明确方向(状态={state}) 或 RSI 处于极值区"
+
+    return {
+        "timeframe": timeframe,
+        "last_price": last,
+        "range_low": lo, "range_mid": last, "range_high": hi,
+        "sigma_pct": sigma * 100,
+        "bias": bias, "reason": reason,
+        "signal": signal, "signal_reason": sig_reason,
+    }
 
 
 # ---------------------------------------------------------------- 交易时段
