@@ -12,6 +12,7 @@
 """
 
 import json
+import re
 import socket
 import time
 import urllib.error
@@ -47,8 +48,49 @@ _BLOCK_KW = [
     "政治", "大选", "战争", "台湾", "普京", "特朗普", "习", "中国",
 ]
 
-_CACHE_TTL = 120  # 秒；行情变化慢，缓存降低请求频率、避免被限流
-_cache = {}  # tag -> (ts, data)
+# 行情池缓存：Gamma 的 tag 服务端过滤实测无效（crypto/tech/science 返回同一批
+# 全站热门市场，且 markets 的 tags 字段为 None），故改为「拉取大盘池 + 本地按
+# 关键词分类」的方式，保证切换类别能拿到真正不同的内容。
+_POOL_TTL = 120  # 秒；行情变化慢，缓存降低请求频率、避免被限流
+_pool_cache = None  # (ts, rows)
+
+# 各类别关键词（小写，匹配 question + outcomes 文本；\b 词边界避免误命中，
+# 如 "ai" 不会命中 "again"、"eth" 不会命中 "ethereum"）。
+CATEGORY_KEYWORDS = {
+    "crypto": ["bitcoin","btc","ethereum","eth","solana","sol","crypto","cryptocurrency",
+               "defi","altcoin","dogecoin","doge","litecoin","ltc","ripple","xrp",
+               "stablecoin","usdc","tether","usdt","blockchain","web3","nft","coinbase",
+               "binance","cardano","ada","avalanche","polkadot","chainlink","uniswap","aave"],
+    "economy": ["federal reserve","fed","interest rate","rate cut","rate hike","inflation",
+                "gdp","recession","economy","economic","unemployment","cpi","pce","treasury",
+                "dollar","yuan","renminbi","tariff","trade war","gross domestic","macro",
+                "fomc","quantitative","bond yield","debt ceiling"],
+    "finance": ["federal reserve","interest rate","stock","stocks","equity","equities","etf",
+                "bond","bonds","forex","currency","finance","financial","s&p","sp500","nasdaq",
+                "dow","ipo","bull","bear","market cap","bankruptcy","credit","mortgage"],
+    "business": ["company","ceo","earnings","revenue","merger","acquisition","apple","google",
+                 "amazon","microsoft","meta","tesla","nvidia","alphabet","layoff","startup",
+                 "business","profit","sales","subscriber"],
+    "tech": ["ai","artificial intelligence","openai","chatgpt","gpt","google","apple",
+             "microsoft","meta","tesla","nvidia","semiconductor","chip","chips","software",
+             "tech","cyber","data center","cloud","robotics","quantum","smartphone","android","ios"],
+    "science": ["science","research","scientist","space","nasa","spacex","spacex","mars","moon",
+                "climate","physics","medicine","medical","vaccine","health","disease","cancer",
+                "telescope","astronomy","biology","genetic","climate change","black hole",
+                "particle","quantum","virus","covid","brain","earthquake","volcano","ocean",
+                "species","extinct","rocket","satellite","shuttle","probe","telescope"],
+    "sports": ["nba","nfl","football","soccer","fifa","world cup","champions league",
+               "premier league","tennis","cricket","formula 1","f1","boxing","ufc","wwe","dota",
+               "league of legends","esports","super bowl","olympics","golf","hockey","mlb"],
+    "entertainment": ["movie","film","oscar","grammy","music","album","netflix","tv show",
+                      "box office","celebrity","emmy","billboard","disney","marvel","star wars",
+                      "taylor swift","concert","streaming","video game","game of thrones","hbo",
+                      "song","tour","award","premiere","sequel","franchise","anime","k-pop","pop",
+                      "rapper","spotify","youtube","box-office","cinema"],
+}
+_CAT_RE = {k: re.compile(r"(?:\b" + "|".join(re.escape(w) for w in v) + r"\b)", re.I)
+           for k, v in CATEGORY_KEYWORDS.items()}
+_POOL_PAGES = 6  # 每页100(Gamma上限)，共约600条大盘池；多页确保科技/科学等小类也能露出
 
 
 def _is_blocked(question: str, tags) -> bool:
@@ -96,41 +138,66 @@ def _parse_outcomes(market: dict):
     return out
 
 
+def _fetch_pool() -> list:
+    """翻页拉取全站活跃市场大盘池（按 24h 成交量排序，多页拼接去重），
+    本地再做类别过滤。返回原始 market 列表；命中缓存则复用，失败且有旧缓存
+    则降级用旧数据。"""
+    global _pool_cache
+    now = time.time()
+    if _pool_cache and (now - _pool_cache[0]) < _POOL_TTL:
+        return _pool_cache[1]
+    rows = []
+    seen = set()
+    for off in range(0, _POOL_PAGES * 100, 100):
+        params = urllib.parse.urlencode({
+            "limit": 100,
+            "active": "true",
+            "order": "volume24hr",
+            "ascending": "false",
+            "offset": off,
+        })
+        url = "%s?%s" % (_GAMMA, params)
+        try:
+            page = json.loads(_http_get(url))
+        except Exception:  # noqa: BLE001
+            break
+        if not page:
+            break
+        for m in page:
+            k = m.get("question")
+            if k and k not in seen:
+                seen.add(k)
+                rows.append(m)
+        if len(page) < 100:
+            break
+    if not rows and _pool_cache:
+        return _pool_cache[1]
+    _pool_cache = (now, rows)
+    return rows
+
+
 def fetch_polymarket_odds(tag: str = "crypto", limit: int = 30,
                           ignore_cache: bool = False) -> dict:
-    """拉取某类别下的活跃市场隐含概率。
+    """拉取某类别下的活跃市场隐含概率（本地按关键词分类，规避 Gamma tag 过滤失效）。
 
     返回 {ok, tag, ts, markets:[{question, slug, endDate, volume24hr,
     liquidity, outcomes:[{label, price}]}], msg}。
     服务端强制过滤政治/敏感类别与题目。
     """
     tag = tag if tag in ALLOWED_TAGS else "crypto"
-    now = time.time()
-    if not ignore_cache and tag in _cache and (now - _cache[tag][0]) < _CACHE_TTL:
-        cached = dict(_cache[tag][1])
-        cached["cached"] = True
-        return cached
-
-    params = urllib.parse.urlencode({
-        "limit": max(1, min(limit, 50)),
-        "active": "true",
-        "order": "volume24hr",
-        "ascending": "false",
-        "tag": tag,
-    })
-    url = "%s?%s" % (_GAMMA, params)
-    try:
-        raw = _http_get(url)
-        rows = json.loads(raw)
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "tag": tag, "msg": "获取失败：%s" % str(e), "markets": []}
-
+    rows = _fetch_pool()
+    if not rows:
+        return {"ok": False, "tag": tag, "msg": "获取失败：无法拉取行情池", "markets": []}
+    cat_re = _CAT_RE.get(tag)
     markets = []
     for m in rows:
         try:
             question = m.get("question") or ""
             tags = m.get("tags") or []
             if _is_blocked(question, tags):
+                continue
+            blob = (question + " " + str(m.get("outcomes") or "")).lower()
+            if cat_re and not cat_re.search(blob):
                 continue
             outcomes = _parse_outcomes(m)
             if not outcomes:
@@ -149,9 +216,7 @@ def fetch_polymarket_odds(tag: str = "crypto", limit: int = 30,
     if not markets:
         return {"ok": False, "tag": tag,
                 "msg": "该类别暂无可用市场（或已被合规过滤）", "markets": []}
-    res = {"ok": True, "tag": tag, "markets": markets}
-    _cache[tag] = (now, res)
-    return res
+    return {"ok": True, "tag": tag, "markets": markets[:limit]}
 
 
 def _to_num(v) -> Optional[float]:
