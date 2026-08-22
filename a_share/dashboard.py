@@ -163,7 +163,7 @@ CSS = """
 * { box-sizing: border-box; }
 body { margin:0; background:#0f1419; color:#e6e6e6; font-family:-apple-system,
   "Segoe UI", "Microsoft YaHei", sans-serif; font-size:14px; line-height:1.5; }
-.wrap { max-width:1400px; margin:0 auto; padding:16px 16px 40px; }
+.wrap { max-width:1800px; margin:0 auto; padding:16px 16px 40px; }
 header { border-bottom:1px solid #2a3340; padding-bottom:12px; margin-bottom:14px; }
 h1 { margin:0 0 5px; font-size:18px; }
 .meta { color:#8b98a5; font-size:13px; }
@@ -251,7 +251,7 @@ footer { color:#6b7888; font-size:12px; border-top:1px solid #2a3340;
   border:1px solid #2a3340; border-radius:6px; padding:6px 8px; font-size:13px; }
 .trade-form .res { flex-basis:100%; color:#9fb0c0; font-size:12px; }
 .tag-real { color:#5ad19a; } .tag-syn { color:#e0a85a; } .tag-na { color:#888; }
-.grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(255px,1fr)); gap:12px; }
+.grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:12px; }
 .card { background:#161c24; border:1px solid #232c38; border-radius:10px;
   padding:12px 14px; display:flex; flex-direction:column; gap:8px; }
 .card:hover { border-color:#2c3a4e; }

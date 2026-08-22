@@ -597,9 +597,9 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
 .secHead:hover{border-color:#2c3a4e;}
 .secHead .ttl{font-size:15px;color:#cfe0f0;font-weight:700;}
 .secHead .caret{margin-left:auto;color:#9fb0c0;font-size:13px;}
-/* 加密详情弹窗：竖向加大、横向收窄 */
-.mboxCrypto{max-width:600px;width:94%;max-height:94vh;}
-.mboxCrypto .chart{height:460px;}
+/* 加密详情弹窗：竖向加大、横向收窄（高瘦比例，整体放大） */
+.mboxCrypto{max-width:820px;width:94%;max-height:96vh;}
+.mboxCrypto .chart{height:600px;}
 </style></head>
 <body>
 <div class="bar">
