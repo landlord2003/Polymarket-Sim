@@ -515,8 +515,13 @@ input#qSearch { background:#0f1620; color:#e6e6e6; border:1px solid #2a3340;
 .ticker { display:flex; gap:18px; flex-wrap:wrap; align-items:center;
   padding:7px 18px; background:#0e141c; border-bottom:1px solid #1c2530;
   font-size:13px; font-variant-numeric:tabular-nums; color:#8b98a5; }
-.ticker.crypto { background:#0c1118; }
-.cpblock { margin:12px 16px 0; padding:14px 16px; background:#131a24;
+.ticker.crypto { background:#0c1118; flex-wrap:nowrap; overflow-x:auto; gap:14px;
+  padding:6px 16px; font-size:12px; scrollbar-width:thin; }
+.ticker.crypto .q { font-size:12px; }
+.ticker.crypto .nm { font-size:12px; }
+.ticker.crypto::-webkit-scrollbar{height:6px;}
+.ticker.crypto::-webkit-scrollbar-thumb{background:#2c3a4e;border-radius:3px;}
+.cpblock { margin:10px 14px 0; padding:11px 14px; background:#131a24;
   border:1px solid #243042; border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,.4); }
 .cpHead { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:8px;
   font-size:13px; color:#9fb0c0; }
