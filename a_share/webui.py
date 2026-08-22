@@ -531,7 +531,7 @@ input#qSearch { background:#0f1620; color:#e6e6e6; border:1px solid #2a3340;
 .chips { display:flex; gap:6px; flex-wrap:wrap; margin-top:4px; }
 .chip { background:#1a2230; border:1px solid #2a3340; border-radius:12px;
   padding:2px 9px; font-size:12px; color:#cfe0f0; }
-.chart { width:100%; height:340px; }
+.chart { width:100%; height:440px; }
 .ticker .q { white-space:nowrap; }
 .ticker .nm { color:#cfe0f0; margin-right:6px; }
 .polyList { margin-top:8px; display:grid;
@@ -573,18 +573,18 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
 .mask { display:none; position:fixed; inset:0; z-index:50;
   background:rgba(0,0,0,.6); align-items:flex-start; justify-content:center; }
 .mask.show { display:flex; }
-.mbox { background:#131a24; color:#e6e6e6; margin-top:60px; max-width:820px; width:92%;
-  max-height:82vh; overflow:auto; border:1px solid #2c3a4e; border-radius:14px;
-  padding:20px 22px; box-shadow:0 12px 40px rgba(0,0,0,.6); }
-.mbox h2 { margin:0 0 6px; font-size:18px; }
+.mbox { background:#131a24; color:#e6e6e6; font-size:14px; margin-top:48px; max-width:1080px; width:96%;
+  max-height:90vh; overflow:auto; border:1px solid #2c3a4e; border-radius:14px;
+  padding:22px 26px; box-shadow:0 12px 40px rgba(0,0,0,.6); }
+.mbox h2 { margin:0 0 10px; font-size:22px; }
 .mbox .sub { color:#9fb0c0; font-size:13px; margin-bottom:10px; }
 .mbox .close { float:right; background:#2a3340; color:#cfe0f0; border:none;
   border-radius:6px; padding:4px 10px; cursor:pointer; font-size:12px; }
 .chart { width:100%; height:300px; margin:8px 0 4px; }
 .kpi { display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:8px; margin:10px 0; }
 .kpi .cell { background:#141b24; border:1px solid #1f2937; border-radius:8px; padding:8px 10px; }
-.kpi .k { color:#7f8ea0; font-size:11px; }
-.kpi .v { font-size:16px; font-weight:700; margin-top:2px; }
+.kpi .k { color:#7f8ea0; font-size:12px; }
+.kpi .v { font-size:18px; font-weight:700; margin-top:2px; }
 .kpi .v.up { color:#ff5b5b; } .kpi .v.down { color:#2ecc71; } .kpi .v.flat { color:#888; }
 .tag-real { color:#5fd98a; background:#15301f; padding:2px 8px; border-radius:10px; font-size:12px; }
 .tag-syn { color:#e0a45a; background:#332712; padding:2px 8px; border-radius:10px; font-size:12px; }
@@ -902,7 +902,7 @@ function openCryptoDetail(sym){
       chart.setOption({backgroundColor:'#0d1219',animation:false,
         grid:[{left:60,right:18,top:16,bottom:62,height:'60%'},{left:60,right:18,top:'76%',height:'16%'}],
         tooltip:{trigger:'axis'},
-        xAxis:[{type:'category',data:dl,axisLabel:{color:'#8b98a5',fontSize:10}},{type:'category',gridIndex:1,data:dl,axisLabel:{show:false}}],
+        xAxis:[{type:'category',data:dl,axisLabel:{color:'#8b98a5',fontSize:12}},{type:'category',gridIndex:1,data:dl,axisLabel:{show:false}}],
         yAxis:[{scale:true,axisLabel:{color:'#8b98a5'}},{scale:true,gridIndex:1,axisLabel:{show:false}}],
         dataZoom:[{type:'inside',xAxisIndex:[0,1]},{type:'slider',height:14,bottom:6,xAxisIndex:[0,1]}],
         series:[Object.assign({type:'candlestick',data:ohlc,itemStyle:{color:'#ff5b5b',color0:'#2ecc71',borderColor:'#ff5b5b',borderColor0:'#2ecc71'}},bandArea,midLine),
@@ -1003,7 +1003,7 @@ function renderCryptoDetail(d){
     chart.setOption({backgroundColor:'#0d1219',animation:false,
       grid:[{left:60,right:18,top:16,bottom:62,height:'60%'},{left:60,right:18,top:'76%',height:'16%'}],
       tooltip:{trigger:'axis'},
-      xAxis:[{type:'category',data:dl,axisLabel:{color:'#8b98a5',fontSize:10}},{type:'category',gridIndex:1,data:dl,axisLabel:{show:false}}],
+      xAxis:[{type:'category',data:dl,axisLabel:{color:'#8b98a5',fontSize:12}},{type:'category',gridIndex:1,data:dl,axisLabel:{show:false}}],
       yAxis:[{scale:true,axisLabel:{color:'#8b98a5'}},{scale:true,gridIndex:1,axisLabel:{show:false}}],
       dataZoom:[{type:'inside',xAxisIndex:[0,1]},{type:'slider',height:14,bottom:6,xAxisIndex:[0,1]}],
       series:[Object.assign({type:'candlestick',data:ohlc,itemStyle:{color:'#ff5b5b',color0:'#2ecc71',borderColor:'#ff5b5b',borderColor0:'#2ecc71'}},bandArea,midLine),
