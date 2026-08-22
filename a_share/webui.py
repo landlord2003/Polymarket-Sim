@@ -621,6 +621,11 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
 .arbBookRow{display:flex;gap:10px;align-items:center;padding:5px 8px;border-bottom:1px solid #1c2733;font-size:12px;}
 .arbBookRow .pid{color:#7f93a5;width:42px;}
 .arbBookRow .qn{color:#cfe0f0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.arbEv{margin:8px 0;padding:8px 10px;border:1px solid #2a3a4d;border-left:3px solid #c9a227;border-radius:6px;background:#0e1620;}
+.arbEvH{font-size:13px;color:#e8eef5;margin-bottom:5px;}
+.arbWarn{color:#e0b341;font-size:11px;font-weight:600;background:#2a230d;padding:1px 6px;border-radius:4px;}
+.arbEvSubs{display:flex;flex-direction:column;gap:3px;}
+.arbSub{font-size:11px;color:#9fb3c8;}
 .arbSizeInput{width:54px;padding:2px 4px;background:#0e141c;border:1px solid #2c3a4e;color:#e6e6e6;border-radius:6px;}
 </style></head>
 <body>
@@ -697,7 +702,7 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
 </div>
 <div id="arbPanel" class="cpblock" style="display:none">
   <div class="cpHead">
-    <span class="ttl">🧪 模拟套利 · Kalshi↔Poly</span>
+    <span class="ttl">🧪 模拟套利 · Polymarket 单源</span>
     <button onclick="loadArb()">刷新扫描</button>
     <label><input type="checkbox" id="arbAuto" checked> 自动刷新</label>
     <button class="ghost" onclick="loadArbDemo()">载入演示对</button>
@@ -705,7 +710,7 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
     <button class="ghost collapseBtn" id="arbPanelBtn" onclick="toggleCollapse('arbPanel')">▴ 收起</button>
   </div>
   <div class="cpBody" id="arbPanelBody">
-    <div class="sub">跨平台同事件价差扫描（只读公开盘口，虚拟本金模拟成交，不碰真实资金）。本环境 Kalshi 公开流动性行情受限时，可点「载入演示对」试跑完整流程。</div>
+    <div class="sub">Polymarket 单源模拟（链上、非美可正常访问）：单边做市吃价差 + 同事件互斥套利扫描。只读公开盘口，虚拟本金模拟成交，不碰真实资金。Kalshi 因美国身份/IP 限制不可得，已转单源深化。</div>
     <div id="arbSummary" class="arbSummary"></div>
     <div id="arbList"></div>
     <div class="arbSec">
@@ -1251,8 +1256,34 @@ function loadArbDemo(){
   fetch('/api/arb_demo').then(r=>r.json()).then(d=>{arbState.pairs=d.pairs||[];renderArbFromPairs(arbState.pairs,'演示对（示例价格，非实时）',d);}).catch(e=>{document.getElementById('arbList').innerHTML='<div class="sub" style="color:#ef7a66">载入演示失败：'+e+'</div>';});
 }
 function renderArb(d){
-  arbState.pairs=d.pairs||[];
-  renderArbFromPairs(arbState.pairs, d.note||'', d);
+  arbState.mm = d.marketmaking||[];
+  arbState.ev = d.event_arb||[];
+  const sum=document.getElementById('arbSummary');
+  const list=document.getElementById('arbList');
+  sum.innerHTML='Polymarket 单源 ｜ 实时市场 '+(d.poly_count!=null?d.poly_count:'?')+' 条 ｜ 做市机会 '+arbState.mm.length+' ｜ 事件套利(需确认) '+arbState.ev.length;
+  let h='';
+  h+='<div class="arbSec"><div class="ttl" style="color:#cfe0f0;font-size:14px;margin-bottom:6px">🔁 单边做市价差（买 bid / 卖 ask，库存中性锁定价差）</div>';
+  if(arbState.mm.length){
+    h+='<table class="arbTable"><thead><tr><th>市场</th><th>买</th><th>卖</th><th>价差</th><th>每单位锁定</th><th>份额</th><th></th></tr></thead><tbody>';
+    arbState.mm.forEach((o,i)=>{
+      h+='<tr><td>'+escapeHtml(o.question)+'</td><td>'+o.bid.toFixed(4)+'</td><td>'+o.ask.toFixed(4)+'</td><td class="arbEdge">'+o.spread.toFixed(4)+' ('+o.spread_pct+'%)</td><td class="arbEdge">+'+o.unit_profit.toFixed(4)+'</td>'
+       +'<td><input class="arbSizeInput" id="mmSize'+i+'" value="'+(o.size_hint||100)+'"></td>'
+       +'<td><button class="arbBtn" onclick="execArbMM('+i+')">模拟做市</button></td></tr>';
+    });
+    h+='</tbody></table>';
+  } else h+='<div class="sub" style="margin-top:6px">暂无价差足够的高流动性市场。</div>';
+  h+='</div>';
+  h+='<div class="arbSec" style="margin-top:14px"><div class="ttl" style="color:#cfe0f0;font-size:14px;margin-bottom:6px">🎯 同事件互斥套利（实验性 · 需人工确认完备性）</div>';
+  if(arbState.ev.length){
+    arbState.ev.forEach((e)=>{
+      h+='<div class="arbEv"><div class="arbEvH">'+escapeHtml(e.question)+' <span class="arbWarn">⚠️ 需人工确认是否互斥完备</span></div>';
+      h+='<div class="arbEvSubs">';
+      (e.submarkets||[]).forEach(s=>{ h+='<span class="arbSub">'+escapeHtml(s.q)+' &nbsp;bid '+s.bid.toFixed(4)+' / ask '+s.ask.toFixed(4)+'</span>'; });
+      h+='</div><div class="sub" style="margin-top:4px">买齐所有结果(ask)成本 '+e.sum_ask.toFixed(4)+' → 理论利润 +'+e.profit_if_complete.toFixed(4)+'</div></div>';
+    });
+  } else h+='<div class="sub" style="margin-top:6px">暂无确认中的互斥套利（Polymarket 已消除大部分无风险免费钱；此块仅供人工复核线索）。</div>';
+  h+='</div>';
+  list.innerHTML=h;
 }
 function renderArbFromPairs(pairs, note, d){
   const sum=document.getElementById('arbSummary');
@@ -1282,6 +1313,15 @@ function execArb(i){
       else alert(j.msg||'执行失败');
     }).catch(e=>alert('执行失败：'+e));
 }
+function execArbMM(i){
+  const o=arbState.mm[i]; if(!o)return;
+  let size=parseInt(document.getElementById('mmSize'+i).value,10)||0;
+  fetch('/api/arb_mm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({opp:o,size:size})})
+    .then(r=>r.json()).then(j=>{
+      if(j.ok){loadArbBook(); const b=document.getElementById('arbList'); b.insertAdjacentHTML('afterbegin','<div class="sub" style="color:#5fd38a;margin:4px 0">✅ '+escapeHtml(j.msg)+'</div>');}
+      else alert(j.msg||'执行失败');
+    }).catch(e=>alert('执行失败：'+e));
+}
 function loadArbBook(){
   fetch('/api/arb_book').then(r=>r.json()).then(renderArbBook).catch(e=>{document.getElementById('arbBook').innerHTML='<div class="sub" style="color:#ef7a66">读取持仓失败：'+e+'</div>';});
 }
@@ -1291,7 +1331,11 @@ function renderArbBook(d){
   if(d.positions&&d.positions.length){
     h+='<div style="margin-top:6px">';
     d.positions.forEach(p=>{
-      h+='<div class="arbBookRow"><span class="pid">'+p.pid+'</span><span class="qn">'+escapeHtml(p.question)+'</span><span>'+(p.kind==='long'?'买':'卖')+' '+escapeHtml(p.venue)+' @'+p.entry.toFixed(4)+' ×'+p.size+'</span><button class="arbBtn" onclick="settleArb(\''+p.pid+'\')">结算</button></div>';
+      if(p.kind==='mm'){
+        h+='<div class="arbBookRow"><span class="pid">'+p.pid+'</span><span class="qn">'+escapeHtml(p.question)+'</span><span>做市 '+escapeHtml(p.venue)+' 买@'+p.entry_bid.toFixed(4)+'/卖@'+p.entry_ask.toFixed(4)+' ×'+p.size+' 锁定 $'+p.locked.toFixed(2)+'</span><button class="arbBtn" onclick="settleArb(\''+p.pid+'\')">核销</button></div>';
+      } else {
+        h+='<div class="arbBookRow"><span class="pid">'+p.pid+'</span><span class="qn">'+escapeHtml(p.question)+'</span><span>'+(p.kind==='long'?'买':'卖')+' '+escapeHtml(p.venue)+' @'+(p.entry!=null?p.entry.toFixed(4):'?')+' ×'+p.size+'</span><button class="arbBtn" onclick="settleArb(\''+p.pid+'\')">结算</button></div>';
+      }
     });
     h+='</div>';
   } else {
@@ -1747,25 +1791,19 @@ class Handler(BaseHTTPRequestHandler):
                        "application/json; charset=utf-8")
         elif p.path == "/api/arb_opps":
             try:
-                kq = kalshi.fetch_quotes()
-                pq = polymarket.fetch_poly_quotes()
-                kalshi_count = len([x for x in kq if "error" not in x])
+                pq = polymarket.fetch_poly_quotes(300)
                 poly_count = len([x for x in pq if "error" not in x])
-                pairs = arbitrage.scan(kq, pq)
-                note = ""
-                if kalshi_count == 0:
-                    note = ("Kalshi 本环境公开行情不可读（返回多为零流动性分片市场），"
-                            "跨平台扫描暂无可比数据；可点「载入演示对」试跑模拟器。")
-                self._send(200, json.dumps(
-                    {"pairs": pairs, "kalshi_count": kalshi_count,
-                     "poly_count": poly_count, "note": note,
-                     "ts": datetime.now().strftime("%H:%M:%S")},
-                    ensure_ascii=False, default=str),
-                    "application/json; charset=utf-8")
-            except Exception as e:  # noqa: BLE001
-                self._send(200, json.dumps({"pairs": [], "note": str(e)},
-                                           ensure_ascii=False),
+                res = arbitrage.scan_poly(pq)
+                res["poly_count"] = poly_count
+                res["ts"] = datetime.now().strftime("%H:%M:%S")
+                self._send(200, json.dumps(res, ensure_ascii=False, default=str),
                            "application/json; charset=utf-8")
+            except Exception as e:  # noqa: BLE001
+                self._send(200, json.dumps(
+                    {"marketmaking": [], "event_arb": [],
+                     "poly_count": 0, "note": str(e)},
+                    ensure_ascii=False),
+                    "application/json; charset=utf-8")
         elif p.path == "/api/arb_book":
             self._send(200, json.dumps(arb_book.get_book().view(),
                                        ensure_ascii=False, default=str),
@@ -2053,6 +2091,21 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 size = 0
             res = arb_book.get_book().execute_arb(opp, size)
+            self._send(200, json.dumps(res, ensure_ascii=False, default=str),
+                       "application/json; charset=utf-8")
+        elif p.path == "/api/arb_mm":
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                data = json.loads(raw.decode("utf-8") or "{}")
+            except Exception:
+                data = {}
+            opp = data.get("opp") or {}
+            try:
+                size = int(data.get("size", 0))
+            except Exception:
+                size = 0
+            res = arb_book.get_book().market_make(opp, size)
             self._send(200, json.dumps(res, ensure_ascii=False, default=str),
                        "application/json; charset=utf-8")
         elif p.path == "/api/arb_settle":

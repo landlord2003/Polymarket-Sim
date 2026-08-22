@@ -113,8 +113,51 @@ class VirtualBook:
                 "positions": ["L%d" % base, "S%d" % base],
             }
 
+    def market_make(self, opp, size_shares):
+        """模拟单边做市：在同一市场买 bid / 卖 ask，库存中性下每轮锁定 spread。
+
+        理想假设：双边均成交（实际做市存在单边成交的库存风险，此处为模拟简化）。
+        锁定毛利 = (ask - bid) * size，立即计入 realized_pnl。
+        opp 来自 arbitrage.scan_poly_marketmaking 的单个机会（buy_ask=买价bid，
+        sell_bid=卖价ask，同标的同 venue）。
+        """
+        size = int(size_shares)
+        if size < 1:
+            return {"ok": False, "msg": "份额必须 >= 1"}
+        bid = float(opp.get("buy_ask", 0.0))    # 对 mm opp：buy_ask 即买价(bid)
+        ask = float(opp.get("sell_bid", 0.0))   # 对 mm opp：sell_bid 即卖价(ask)
+        if bid <= 0 or ask <= bid:
+            return {"ok": False, "msg": "价差非正，无法做市"}
+        cost = bid * size
+        if cost > self.cash:
+            return {"ok": False, "msg": "虚拟本金不足（买端需 $%.2f，余 $%.2f）"
+                    % (cost, self.cash)}
+        with self.lock:
+            self._seq += 1
+            pid = "MM%d" % self._seq
+            ts = time.time()
+            locked = round((ask - bid) * size, 4)
+            self.cash -= cost            # 买入支出
+            self.cash += ask * size      # 卖出收入（净变化 = locked）
+            self.realized_pnl += locked
+            self.positions.append({
+                "pid": pid, "kind": "mm",
+                "venue": opp.get("buy_venue", "poly"),
+                "market_id": opp.get("buy_id"),
+                "question": opp.get("question", ""),
+                "entry_bid": round(bid, 4), "entry_ask": round(ask, 4),
+                "size": size, "locked": locked, "ts": ts,
+            })
+            self._save()
+            return {
+                "ok": True,
+                "msg": "已模拟做市：买 @ %.4f / 卖 @ %.4f ×%d，锁定价差收益 $%.2f（理想双边成交）"
+                       % (bid, ask, size, locked),
+                "pnl": locked, "cash": round(self.cash, 2), "pid": pid,
+            }
+
     def settle(self, pid):
-        """结算单个持仓（演示用：走完生命周期，对冲腿互抵为 0）。"""
+        """结算单个持仓（演示用：走完生命周期，对冲腿互抵为 0；mm 类已锁定利润直接核销）。"""
         with self.lock:
             before = len(self.positions)
             self.positions = [p for p in self.positions if p["pid"] != pid]
@@ -131,8 +174,9 @@ class VirtualBook:
                 "realized_pnl": round(self.realized_pnl, 2),
                 "open_positions": len(self.positions),
                 "positions": [
-                    {k: p[k] for k in ("pid", "kind", "venue", "question",
-                                      "outcome", "entry", "size", "arb")}
+                    {k: p.get(k) for k in ("pid", "kind", "venue", "question",
+                                          "outcome", "entry", "entry_bid",
+                                          "entry_ask", "size", "locked", "arb")}
                     for p in self.positions
                 ],
             }
