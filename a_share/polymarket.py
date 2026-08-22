@@ -90,7 +90,7 @@ CATEGORY_KEYWORDS = {
 }
 _CAT_RE = {k: re.compile(r"(?:\b" + "|".join(re.escape(w) for w in v) + r"\b)", re.I)
            for k, v in CATEGORY_KEYWORDS.items()}
-_POOL_PAGES = 6  # 每页100(Gamma上限)，共约600条大盘池；多页确保科技/科学等小类也能露出
+_POOL_PAGES = 10  # 每页100(Gamma上限)，共约1000条大盘池；多页确保科技/科学等小类也能露出
 
 
 def _is_blocked(question: str, tags) -> bool:
@@ -170,6 +170,7 @@ def _fetch_pool() -> list:
                 rows.append(m)
         if len(page) < 100:
             break
+        time.sleep(0.2)  # 降低突发请求频率，避免被 Gamma 限流
     if not rows and _pool_cache:
         return _pool_cache[1]
     _pool_cache = (now, rows)

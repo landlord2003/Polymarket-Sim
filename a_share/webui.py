@@ -485,12 +485,15 @@ def control_html() -> str:
 body { margin:0; background:#0b0f14; color:#e6e6e6;
   font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif; }
 .bar { position:sticky; top:0; z-index:20; display:flex; align-items:center;
-  gap:8px; flex-wrap:wrap; padding:10px 16px; background:#121821;
-  border-bottom:1px solid #232c38; }
+  gap:8px; flex-wrap:wrap; padding:10px 16px;
+  background:linear-gradient(180deg,#15202e,#10161f);
+  border-bottom:1px solid #243042; box-shadow:0 2px 14px rgba(0,0,0,.4); }
 .bar h1 { font-size:15px; margin:0 10px 0 0; white-space:nowrap; }
-button { background:#1f6feb; color:#fff; border:none; border-radius:8px;
-  padding:7px 13px; font-size:13px; cursor:pointer; font-weight:600; }
-button:hover { background:#2a7dff; }
+button { background:linear-gradient(180deg,#3b82f6,#2563eb); color:#fff; border:none;
+  border-radius:8px; padding:7px 13px; font-size:13px; cursor:pointer; font-weight:600;
+  transition:filter .15s,transform .05s; }
+button:hover { filter:brightness(1.12); }
+button:active { transform:translateY(1px); }
 button:disabled { background:#2a3340; color:#6b7888; cursor:not-allowed; }
 button.ghost { background:#1a2230; color:#9fb0c0; border:1px solid #2a3340; }
 button.back { background:#1a2230; color:#cfe0f0; border:1px solid #2a3340;
@@ -513,8 +516,8 @@ input#qSearch { background:#0f1620; color:#e6e6e6; border:1px solid #2a3340;
   padding:7px 18px; background:#0e141c; border-bottom:1px solid #1c2530;
   font-size:13px; font-variant-numeric:tabular-nums; color:#8b98a5; }
 .ticker.crypto { background:#0c1118; }
-.cpblock { margin:10px 16px 0; padding:12px 14px; background:#0d1219;
-  border:1px solid #1f2a36; border-radius:10px; }
+.cpblock { margin:12px 16px 0; padding:14px 16px; background:#131a24;
+  border:1px solid #243042; border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,.4); }
 .cpHead { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:8px;
   font-size:13px; color:#9fb0c0; }
 .cpHead .ttl { font-size:15px; color:#cfe0f0; }
@@ -526,11 +529,17 @@ input#qSearch { background:#0f1620; color:#e6e6e6; border:1px solid #2a3340;
 .chart { width:100%; height:340px; }
 .ticker .q { white-space:nowrap; }
 .ticker .nm { color:#cfe0f0; margin-right:6px; }
-.polyList { margin-top:6px; max-height:440px; overflow:auto; }
-.polyRow { padding:9px 4px; border-bottom:1px solid #18222e; }
+.polyList { margin-top:8px; display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(290px,1fr)); gap:12px;
+  max-height:62vh; overflow:auto; padding:2px 4px 6px; }
+.polyRow { background:#161f2b; border:1px solid #243042; border-radius:10px;
+  padding:12px 13px; display:flex; flex-direction:column; gap:8px;
+  transition:border-color .15s,background .15s; }
+.polyRow:hover { border-color:#2c3a4e; background:#1a2433; }
 .polyRow .q { font-size:13px; color:#dbe6f0; line-height:1.45; }
 .polyRow .meta { font-size:11px; color:#7e8da0; margin-top:3px; }
-.probBar { height:6px; background:#16202c; border-radius:4px; margin-top:5px; overflow:hidden; }
+.probBar { height:8px; background:#0f1620; border-radius:5px; margin-top:2px; overflow:hidden;
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.05); }
 .probBar > i { display:block; height:100%; border-radius:4px; }
 .ticker .up { color:#ff5b5b; font-weight:700; }
 .ticker .down { color:#2ecc71; font-weight:700; }
@@ -538,16 +547,16 @@ input#qSearch { background:#0f1620; color:#e6e6e6; border:1px solid #2a3340;
 .ticker .ts { margin-left:auto; font-size:11px; color:#5a6875; }
 iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419; }
 .panel { display:none; position:absolute; top:54px; left:16px; z-index:30;
-  background:#121821; border:1px solid #2a3340; border-radius:10px; padding:10px 12px;
-  max-width:520px; box-shadow:0 8px 30px rgba(0,0,0,.5); }
+  background:#131a24; border:1px solid #2c3a4e; border-radius:12px; padding:10px 12px;
+  max-width:520px; box-shadow:0 10px 36px rgba(0,0,0,.55); }
 .panel .sec { display:inline-flex; margin:3px 8px 3px 0; padding:3px 8px;
   background:#0f1620; border:1px solid #232c38; border-radius:14px; font-size:12px; }
 .mask { display:none; position:fixed; inset:0; z-index:50;
   background:rgba(0,0,0,.6); align-items:flex-start; justify-content:center; }
 .mask.show { display:flex; }
-.mbox { background:#0f1419; color:#e6e6e6; margin-top:60px; max-width:760px; width:92%;
-  max-height:82vh; overflow:auto; border:1px solid #2a3340; border-radius:12px;
-  padding:18px 20px; box-shadow:0 12px 40px rgba(0,0,0,.6); }
+.mbox { background:#131a24; color:#e6e6e6; margin-top:60px; max-width:820px; width:92%;
+  max-height:82vh; overflow:auto; border:1px solid #2c3a4e; border-radius:14px;
+  padding:20px 22px; box-shadow:0 12px 40px rgba(0,0,0,.6); }
 .mbox h2 { margin:0 0 6px; font-size:18px; }
 .mbox .sub { color:#9fb0c0; font-size:13px; margin-bottom:10px; }
 .mbox .close { float:right; background:#2a3340; color:#cfe0f0; border:none;
@@ -560,6 +569,9 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
 .kpi .v.up { color:#ff5b5b; } .kpi .v.down { color:#2ecc71; } .kpi .v.flat { color:#888; }
 .tag-real { color:#5fd98a; background:#15301f; padding:2px 8px; border-radius:10px; font-size:12px; }
 .tag-syn { color:#e0a45a; background:#332712; padding:2px 8px; border-radius:10px; font-size:12px; }
+.polyList::-webkit-scrollbar,.mbox::-webkit-scrollbar,.panel::-webkit-scrollbar{width:8px;height:8px;}
+.polyList::-webkit-scrollbar-thumb,.mbox::-webkit-scrollbar-thumb,.panel::-webkit-scrollbar-thumb{background:#2c3a4e;border-radius:4px;}
+.polyList::-webkit-scrollbar-track,.mbox::-webkit-scrollbar-track,.panel::-webkit-scrollbar-track{background:transparent;}
 </style></head>
 <body>
 <div class="bar">
@@ -840,9 +852,10 @@ function togglePolyPanel(){
   }else if(polyAutoTimer){clearInterval(polyAutoTimer);polyAutoTimer=null;}
 }
 function loadPoly(){
-  const url='/api/polymarket_odds?tag='+encodeURIComponent(polyState.tag)+'&limit=50&_='+Date.now();
+  const el=document.getElementById('polyList');
+  if(el)el.innerHTML='<div class="sub" style="padding:16px;color:#9fb0c0">加载中…（首次拉取行情池约需 10–15 秒，之后 2 分钟内走缓存）</div>';
+  const url='/api/polymarket_odds?tag='+encodeURIComponent(polyState.tag)+'&limit=80&_='+Date.now();
   fetch(url).then(r=>r.json()).then(renderPoly).catch(e=>{
-    const el=document.getElementById('polyList');
     if(el)el.innerHTML='<div class="sub" style="color:#ef7a66">加载失败：'+e+'</div>';
   });
 }
