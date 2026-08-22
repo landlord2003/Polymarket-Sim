@@ -767,6 +767,16 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
           <input id="btSize" value="100" style="width:54px;background:#0e1620;color:#cfe0f0;border:1px solid #2a3a4a;border-radius:6px;padding:3px 6px">
         </label>
         <button class="ghost" onclick="runBacktest()">📈 运行回测</button>
+        <button class="ghost" onclick="runSweep()">🔍 参数扫描</button>
+      </div>
+      <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;margin:6px 0;padding:8px 10px;background:#0e1620;border:1px solid #2a3a4a;border-radius:8px">
+        <label style="color:#cfe0f0;font-size:13px">半价差 <span id="btHalfVal">0.50%</span>
+          <input id="btHalf" type="range" min="0.001" max="0.05" step="0.001" value="0.005" oninput="document.getElementById('btHalfVal').textContent=(this.value*100).toFixed(2)+'%'" style="vertical-align:middle">
+        </label>
+        <label style="color:#cfe0f0;font-size:13px">费率 <span id="btFeeVal">1.00%</span>
+          <input id="btFee" type="range" min="0" max="0.1" step="0.001" value="0.01" oninput="document.getElementById('btFeeVal').textContent=(this.value*100).toFixed(2)+'%'" style="vertical-align:middle">
+        </label>
+        <span class="sub" style="color:#9fb0c0">拖动滑块后点「运行回测」按当前值跑；「参数扫描」对 半价差×费率 网格自动扫一遍</span>
       </div>
       <div id="btResult"></div>
     </div>
@@ -1427,18 +1437,106 @@ function runBacktest(){
   const days=parseInt(document.getElementById('btDays').value,10)||30;
   const every=parseInt(document.getElementById('btEvery').value,10)||1440;
   const size=parseInt(document.getElementById('btSize').value,10)||100;
+  const half=parseFloat(document.getElementById('btHalf').value)||0.005;
+  const fee=parseFloat(document.getElementById('btFee').value)||0.01;
   const el=document.getElementById('btResult');
   el.innerHTML='<div class="sub" style="color:#9fb0c0">回测中（拉取历史价格，请稍候）…</div>';
-  fetch('/api/arb_backtest?market='+encodeURIComponent(mid)+'&days='+days+'&every='+every+'&size='+size)
+  fetch('/api/arb_backtest?market='+encodeURIComponent(mid)+'&days='+days+'&every='+every+'&size='+size+'&half='+half+'&fee='+fee)
     .then(r=>r.json()).then(renderBacktest).catch(e=>{el.innerHTML='<div class="sub" style="color:#ef7a66">回测失败：'+e+'</div>';});
+}
+function runSweep(){
+  const mid=document.getElementById('btMarket').value;
+  if(!mid){ alert('请先刷新扫描以载入市场列表'); return; }
+  const days=parseInt(document.getElementById('btDays').value,10)||30;
+  const every=parseInt(document.getElementById('btEvery').value,10)||1440;
+  const size=parseInt(document.getElementById('btSize').value,10)||100;
+  const el=document.getElementById('btResult');
+  el.innerHTML='<div class="sub" style="color:#9fb0c0">参数扫描中（拉取一次历史价后网格计算，请稍候）…</div>';
+  fetch('/api/arb_backtest_sweep?market='+encodeURIComponent(mid)+'&days='+days+'&every='+every+'&size='+size)
+    .then(r=>r.json()).then(renderSweep).catch(e=>{el.innerHTML='<div class="sub" style="color:#ef7a66">扫描失败：'+e+'</div>';});
 }
 function renderBacktest(j){
   const el=document.getElementById('btResult');
   if(!j.ok){ el.innerHTML='<div class="sub" style="color:#ef7a66">'+escapeHtml(j.msg||'回测失败')+'</div>'; return; }
+  window._btCurve=j.curve||[];
   let h='<div class="arbSummary"><div>样本点 <b>'+j.points+'</b></div><div>交易笔数 <b>'+j.trades+'</b></div><div>胜率 <b>'+((j.win_rate||0)*100).toFixed(1)+'%</b></div><div>净盈亏 <b style="color:'+(j.net_pnl>=0?'#5fd38a':'#ef7a66')+'">$'+(j.net_pnl>=0?'+':'')+j.net_pnl.toFixed(2)+'</b></div><div>最终权益 <b>$'+j.final_equity.toFixed(2)+'</b></div><div>最大回撤 <b style="color:#ef7a66">$'+j.max_drawdown.toFixed(2)+'</b></div><div>半价差 <b>'+(j.half_spread*100).toFixed(2)+'%</b></div><div>费率 <b>'+(j.fee_rate*100).toFixed(2)+'%</b></div></div>';
   h+='<div class="sub" style="margin:6px 0;color:#9fb0c0">'+escapeHtml(j.note||'')+'</div>';
   h+=drawCurve(j.curve);
+  h+='<div style="margin:6px 0;display:flex;gap:8px"><button class="ghost" onclick="exportCurvePNG(\'btCurveSvg\',\'backtest_equity.png\')">🖼 导出PNG</button><button class="ghost" onclick="exportCurveCSV(window._btCurve,\'backtest_equity.csv\')">📄 导出CSV</button></div>';
   el.innerHTML=h;
+}
+function renderSweep(j){
+  const el=document.getElementById('btResult');
+  if(!j.ok){ el.innerHTML='<div class="sub" style="color:#ef7a66">'+escapeHtml(j.msg||'扫描失败')+'</div>'; return; }
+  window._sweep=j;
+  const hs=j.half_spreads, fr=j.fee_rates, m=j.matrix;
+  let h='<div class="sub" style="color:#9fb0c0;margin:6px 0">参数扫描矩阵：行=费率，列=半价差，单元格=净盈亏($)。<span style="color:#5fd38a">绿=盈利</span> / <span style="color:#ef7a66">红=亏损</span>。</div>';
+  h+='<table style="border-collapse:collapse;font-size:12px;color:#cfe0f0"><thead><tr><th style="padding:4px 8px;border:1px solid #2a3a4a">费率\\半价差</th>';
+  hs.forEach(function(x){ h+='<th style="padding:4px 8px;border:1px solid #2a3a4a">'+(x*100).toFixed(2)+'%</th>'; });
+  h+='</tr></thead><tbody>';
+  for(let i=0;i<fr.length;i++){
+    h+='<tr><td style="padding:4px 8px;border:1px solid #2a3a4a">'+ (fr[i]*100).toFixed(2) +'%</td>';
+    for(let k=0;k<hs.length;k++){
+      const v=m[i][k];
+      const col=v==null?'#888':(v>=0?'#5fd38a':'#ef7a66');
+      h+='<td style="padding:4px 8px;border:1px solid #2a3a4a;color:'+col+';text-align:right">'+(v==null?'—':(v>=0?'+':'')+v.toFixed(2))+'</td>';
+    }
+    h+='</tr>';
+  }
+  h+='</tbody></table>';
+  h+='<div style="margin:6px 0;display:flex;gap:8px"><button class="ghost" onclick="exportSweepCSV()">📄 导出扫描CSV</button></div>';
+  el.innerHTML=h;
+}
+function exportSweepCSV(){
+  const j=window._sweep; if(!j){alert('请先运行参数扫描');return;}
+  let csv='费率\\半价差';
+  j.half_spreads.forEach(function(x){ csv+=','+(x*100).toFixed(2)+'%'; });
+  csv+='\n';
+  for(let i=0;i<j.fee_rates.length;i++){
+    csv+=(j.fee_rates[i]*100).toFixed(2)+'%';
+    for(let k=0;k<j.half_spreads.length;k++){
+      const v=j.matrix[i][k];
+      csv+=','+(v==null?'':v.toFixed(2));
+    }
+    csv+='\n';
+  }
+  _downloadBlob(csv,'backtest_sweep.csv','text/csv;charset=utf-8');
+}
+function _downloadBlob(content, filename, mime){
+  const blob=new Blob([content],{type:mime});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url; a.download=filename; document.body.appendChild(a); a.click();
+  document.body.removeChild(a); URL.revokeObjectURL(url);
+}
+function exportCurveCSV(curve, filename){
+  if(!curve||!curve.length){alert('暂无曲线数据');return;}
+  let csv='index,timestamp,equity,pnl\n';
+  curve.forEach(function(c,i){ csv+=(i+1)+','+(c.t||'')+','+c.equity+','+c.pnl+'\n'; });
+  _downloadBlob(csv, filename, 'text/csv;charset=utf-8');
+}
+function exportCurvePNG(svgId, filename){
+  const svg=document.getElementById(svgId);
+  if(!svg){alert('暂无曲线图');return;}
+  const xml=new XMLSerializer().serializeToString(svg);
+  const svg64='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(xml);
+  const img=new Image();
+  img.onload=function(){
+    const W=parseInt(svg.getAttribute('width'))||680;
+    const H=parseInt(svg.getAttribute('height'))||200;
+    const c=document.createElement('canvas');
+    c.width=W; c.height=H;
+    const ctx=c.getContext('2d');
+    ctx.fillStyle='#0e1620'; ctx.fillRect(0,0,W,H);
+    ctx.drawImage(img,0,0,W,H);
+    c.toBlob(function(blob){
+      const url=URL.createObjectURL(blob);
+      const a=document.createElement('a'); a.href=url; a.download=filename;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+    },'image/png');
+  };
+  img.onerror=function(){alert('PNG 导出失败');};
+  img.src=svg64;
 }
 function drawCurve(curve){
   if(!curve||!curve.length) return '';
@@ -1449,7 +1547,7 @@ function drawCurve(curve){
   const y=v=>H-pad-(H-2*pad)*(v-lo)/((hi-lo)||1);
   let pts=curve.map((c,i)=>x(i).toFixed(1)+','+y(c.equity).toFixed(1)).join(' ');
   const yb=y(10000);
-  return '<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;max-width:680px;background:#0e1620;border:1px solid #2a3a4a;border-radius:8px;margin-top:6px">'
+  return '<svg id="btCurveSvg" xmlns="http://www.w3.org/2000/svg" width="'+W+'" height="'+H+'" viewBox="0 0 '+W+' '+H+'" style="width:100%;max-width:680px;background:#0e1620;border:1px solid #2a3a4a;border-radius:8px;margin-top:6px">'
     +'<line x1="'+pad+'" y1="'+yb+'" x2="'+(W-pad)+'" y2="'+yb+'" stroke="#3a4a5a" stroke-dasharray="4 4"/>'
     +'<polyline points="'+pts+'" fill="none" stroke="#5fd38a" stroke-width="2"/>'
     +'<text x="'+pad+'" y="'+(yb-4)+'" fill="#9fb0c0" font-size="10">基准 $10000</text>'
@@ -1464,7 +1562,7 @@ function drawEquityCurve(positions){
   const y=v=>H-pad-(H-2*pad)*(v-lo)/((hi-lo)||1);
   let pts=positions.map((p,i)=>x(i).toFixed(1)+','+y(p.cash_after!=null?p.cash_after:0).toFixed(1)).join(' ');
   const yb=y(10000);
-  return '<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;max-width:680px;background:#0e1620;border:1px solid #2a3a4a;border-radius:8px;margin:6px 0">'
+  return '<svg id="acctCurveSvg" xmlns="http://www.w3.org/2000/svg" width="'+W+'" height="'+H+'" viewBox="0 0 '+W+' '+H+'" style="width:100%;max-width:680px;background:#0e1620;border:1px solid #2a3a4a;border-radius:8px;margin:6px 0">'
     +'<line x1="'+pad+'" y1="'+yb+'" x2="'+(W-pad)+'" y2="'+yb+'" stroke="#3a4a5a" stroke-dasharray="4 4"/>'
     +'<polyline points="'+pts+'" fill="none" stroke="#5fa8d3" stroke-width="2"/>'
     +'<text x="'+pad+'" y="'+(yb-4)+'" fill="#9fb0c0" font-size="10">起始 $10000</text>'
@@ -1498,6 +1596,10 @@ function renderArbBook(d){
   const up=d.unrealized_pnl||0, eq=d.equity||0, fr=(d.fee_rate!=null?d.fee_rate*100:1);
   let h='<div class="arbSummary"><div>虚拟本金 <b>$'+d.bankroll.toFixed(2)+'</b></div><div>可用现金 <b>$'+d.cash.toFixed(2)+'</b></div><div>已实现盈亏 <b style="color:'+(d.realized_pnl>=0?'#5fd38a':'#ef7a66')+'">$'+(d.realized_pnl>=0?'+':'')+d.realized_pnl.toFixed(2)+'</b></div><div>未实现盈亏 <b style="color:'+(up>=0?'#5fd38a':'#ef7a66')+'">$'+(up>=0?'+':'')+up.toFixed(2)+'</b></div><div>权益市值 <b>$'+eq.toFixed(2)+'</b></div><div>费率 <b>'+fr.toFixed(2)+'%</b></div><div>未平仓腿 <b>'+d.open_positions+'</b></div></div>';
   h+=drawEquityCurve(d.positions);
+  window._acctCurve = (d.positions||[]).map(function(p,i){ return {i:i+1, t:p.ts||'', equity:(p.cash_after!=null?p.cash_after:0), pnl:0}; });
+  if((d.positions||[]).length>=2){
+    h+='<div style="margin:6px 0;display:flex;gap:8px"><button class="ghost" onclick="exportCurvePNG(\'acctCurveSvg\',\'account_equity.png\')">🖼 导出PNG</button><button class="ghost" onclick="exportCurveCSV(window._acctCurve,\'account_equity.csv\')">📄 导出CSV</button></div>';
+  }
   if(d.positions&&d.positions.length){
     h+='<div style="margin-top:6px">';
     d.positions.slice().reverse().forEach(p=>{
@@ -2091,10 +2193,63 @@ class Handler(BaseHTTPRequestHandler):
                     size = int((qs.get("size") or ["100"])[0])
                 except Exception:
                     days, every, size = 30, 1440, 100
+                kw = {}
+                try:
+                    hv = (qs.get("half") or [None])[0]
+                    if hv is not None and float(hv) > 0:
+                        kw["half_spread"] = float(hv)
+                except Exception:
+                    pass
+                try:
+                    fv = (qs.get("fee") or [None])[0]
+                    if fv is not None and 0 <= float(fv) <= 0.1:
+                        kw["fee_rate"] = float(fv)
+                except Exception:
+                    pass
                 import arb_backtest as _abt
                 res = _abt.run_backtest(mid, days=days, every_min=every,
-                                        size=size,
-                                        fee_rate=arb_book.get_book().fee_rate)
+                                        size=size, **kw)
+                self._send(200, json.dumps(res, ensure_ascii=False,
+                                           default=str),
+                           "application/json; charset=utf-8")
+            except Exception as e:  # noqa: BLE001
+                self._send(200, json.dumps({"ok": False, "msg": str(e)},
+                                           ensure_ascii=False),
+                           "application/json; charset=utf-8")
+        elif p.path == "/api/arb_backtest_sweep":
+            try:
+                qs = parse_qs(p.query)
+                mid = (qs.get("market") or [None])[0]
+                if not mid:
+                    self._send(200, json.dumps(
+                        {"ok": False, "msg": "缺 market 参数"},
+                        ensure_ascii=False),
+                        "application/json; charset=utf-8")
+                    return
+
+                def _nums(key, default):
+                    raw = (qs.get(key) or [""])[0]
+                    if not raw:
+                        return list(default)
+                    try:
+                        return [float(x) for x in raw.split(",")
+                                if x.strip() != ""]
+                    except Exception:
+                        return list(default)
+
+                try:
+                    days = int((qs.get("days") or ["30"])[0])
+                    every = int((qs.get("every") or ["1440"])[0])
+                    size = int((qs.get("size") or ["100"])[0])
+                except Exception:
+                    days, every, size = 30, 1440, 100
+                import arb_backtest as _abt
+                res = _abt.sweep_backtest(
+                    mid, days=days, every_min=every, size=size,
+                    half_spreads=_nums("halfs",
+                                       (0.002, 0.005, 0.01, 0.02, 0.03)),
+                    fee_rates=_nums("fees",
+                                    (0.0, 0.005, 0.01, 0.02, 0.03)))
                 self._send(200, json.dumps(res, ensure_ascii=False,
                                            default=str),
                            "application/json; charset=utf-8")

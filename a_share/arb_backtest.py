@@ -25,7 +25,7 @@ def _resample(series, every_min):
 
 
 def run_backtest(market_id, days=30, every_min=1440, size=100,
-                 half_spread=None, fee_rate=0.01):
+                 half_spread=None, fee_rate=0.01, series=None):
     """对指定市场跑历史回测。
 
     参数：
@@ -34,9 +34,11 @@ def run_backtest(market_id, days=30, every_min=1440, size=100,
       size        每笔份额
       half_spread 半价差（默认取当前实时价差一半；构造历史双边用）
       fee_rate    单边手续费率
+      series      预取的历史 mid 序列；为 None 时内部拉取（sweep 复用单次拉取结果用）
     返回 dict：统计指标 + equity 曲线（供前端画折线）。
     """
-    series = _pm.fetch_price_history(market_id)
+    if series is None:
+        series = _pm.fetch_price_history(market_id)
     if not series:
         return {"ok": False, "msg": "无历史价格数据"}
     if isinstance(series[0], dict) and "error" in series[0]:
@@ -119,8 +121,47 @@ def run_backtest(market_id, days=30, every_min=1440, size=100,
     }
 
 
+def sweep_backtest(market_id, days=30, every_min=1440, size=100,
+                   half_spreads=(0.002, 0.005, 0.01, 0.02, 0.03),
+                   fee_rates=(0.0, 0.005, 0.01, 0.02, 0.03)):
+    """对 (half_spread × fee_rate) 网格跑回测，返回净盈亏矩阵。
+
+    只拉一次历史 mid（series），逐格调用 run_backtest(series=series)，
+    避免重复联网。matrix[i][j] = 净盈亏 @ (fee_rates[i], half_spreads[j])。
+    """
+    series = _pm.fetch_price_history(market_id)
+    if not series:
+        return {"ok": False, "msg": "无历史价格数据"}
+    if isinstance(series[0], dict) and "error" in series[0]:
+        return {"ok": False,
+                "msg": "获取历史价格失败：%s" % series[0].get("error", "未知")}
+    matrix = []
+    for fr in fee_rates:
+        row = []
+        for hs in half_spreads:
+            r = run_backtest(market_id, days=days, every_min=every_min,
+                             size=size, half_spread=hs, fee_rate=fr,
+                             series=series)
+            row.append(round(r.get("net_pnl", 0.0), 2)
+                       if r.get("ok") else None)
+        matrix.append(row)
+    return {
+        "ok": True,
+        "market_id": market_id,
+        "days": days,
+        "every_min": every_min,
+        "size": size,
+        "half_spreads": [round(x, 5) for x in half_spreads],
+        "fee_rates": [round(x, 5) for x in fee_rates],
+        "matrix": matrix,  # matrix[i][j] = net_pnl @ (fee_rates[i], half_spreads[j])
+        "note": "行=费率，列=半价差；单元格=净盈亏($)。只拉一次历史价后网格计算。",
+    }
+
+
 if __name__ == "__main__":
     import json as _j
-    print(_j.dumps(run_backtest("1383905", days=30, every_min=1440,
+    import sys as _sys
+    _mid = _sys.argv[1] if len(_sys.argv) > 1 else "71321045675222837381289723557373135510915114294489920799786438437746741372444"
+    print(_j.dumps(run_backtest(_mid, days=30, every_min=1440,
                                 size=100, fee_rate=0.01),
                    ensure_ascii=False, indent=2, default=str))
