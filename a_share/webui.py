@@ -23,6 +23,7 @@ import traceback
 import webbrowser
 import threading
 import time
+import socket
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -1719,8 +1720,39 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+class DualStackServer(ThreadingHTTPServer):
+    """IPv4+IPv6 双栈监听：使 127.0.0.1 / localhost / [::1] 均可访问。
+
+    浏览器对 localhost 常优先解析 IPv6(::1)。旧实现只绑 127.0.0.1(IPv4)，
+    重启电脑后浏览器按 IPv6 解析 localhost 即 ERR_CONNECTION_REFUSED。
+    双栈绑定 :: 并关闭 IPV6_V6ONLY，可在单一 socket 上同时接受 IPv4/IPv6。
+    """
+
+    address_family = socket.AF_INET6
+
+    def server_bind(self):
+        try:
+            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        except OSError:
+            pass
+        super().server_bind()
+
+
+def _make_server(port, handler):
+    try:
+        return DualStackServer(("::", port), handler)
+    except Exception:
+        return ThreadingHTTPServer(("0.0.0.0", port), handler)
+
+
 def main():
-    srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    # 强制 UTF-8：stdout 被重定向到文件时 Python 默认用 GBK，emoji 横幅会崩。
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+    srv = _make_server(PORT, Handler)
     url = f"http://127.0.0.1:{PORT}"
     print(f"🦀 量化信号面板已启动： {url}")
     print("   浏览器将自动打开；若未打开请手动访问上面的地址。点按钮即可运行扫描（无需命令行）。Ctrl+C 退出。")

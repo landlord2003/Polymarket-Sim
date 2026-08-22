@@ -10,6 +10,7 @@ env/
 
 # 日志与缓存
 *.log
+webui.err
 data/cache/
 a_share/data/cache/
 a_share/data/alt/
