@@ -550,6 +550,7 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
   <button id="b3" onclick="scan('both')">全部运行</button>
   <button id="bP" onclick="openPortfolio()">模拟仓</button>
   <button class="ghost" onclick="openRecommend()">🤖 自动荐股</button>
+  <button class="ghost" onclick="openBacktest()">📈 回测</button>
   <label><input type="checkbox" id="offline"> 离线验证</label>
   <label><input type="checkbox" id="push"> 推送钉钉</label>
   <span class="sep"></span>
@@ -773,6 +774,61 @@ function refreshRecommend(){
   }).finally(()=>{ if(b){b.disabled=false;b.textContent='刷新荐股（后台扫39只）';} });
 }
 function closeMain(){document.getElementById('mainModalMask').classList.remove('show');}
+function openBacktest(){
+  const h='<button class="close" onclick="closeMain()">关闭</button>'
+    +'<h2>📈 历史回测（信号→真实撮合）</h2>'
+    +'<div class="sub">复用 signal_engine 五因子信号，T+1 + 手续费 + 滑点 + 止损撮合；不推送钉钉，仅供复盘。</div>'
+    +'<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0">'
+    +'<input id="btSym" placeholder="代码 如 300034" style="background:#0f1620;color:#e6e6e6;border:1px solid #2a3340;border-radius:6px;padding:6px 9px;font-size:13px;width:120px" value="300034">'
+    +'<label>止损%<input id="btStop" type="number" step="0.5" value="8" style="width:62px;background:#0f1620;color:#e6e6e6;border:1px solid #2a3340;border-radius:6px;padding:5px;margin-left:4px"></label>'
+    +'<label>持仓天<input id="btHold" type="number" step="5" value="30" style="width:62px;background:#0f1620;color:#e6e6e6;border:1px solid #2a3340;border-radius:6px;padding:5px;margin-left:4px"></label>'
+    +'<label><input id="btSweep" type="checkbox"> 参数扫描(止损×持仓网格)</label>'
+    +'<button id="btRun" onclick="runBacktest()">运行回测</button>'
+    +'</div>'
+    +'<div id="btRes" style="margin-top:10px"></div>';
+  openMain(h);
+}
+function runBacktest(){
+  const b=document.getElementById('btRun'); b.disabled=true; b.textContent='回测中…';
+  const sym=document.getElementById('btSym').value.trim();
+  const stop=parseFloat(document.getElementById('btStop').value||'0')/100;
+  const mh=parseInt(document.getElementById('btHold').value||'0',10);
+  const sweep=document.getElementById('btSweep').checked;
+  const q='symbol='+encodeURIComponent(sym)+'&stop='+stop+'&max_hold='+mh+'&sweep='+(sweep?1:0);
+  fetch('/api/backtest?'+q).then(r=>r.json()).then(d=>renderBacktest(d)).catch(e=>{
+    document.getElementById('btRes').innerHTML='<div class="sub" style="color:#ef7a66">失败：'+e+'</div>';
+  }).finally(()=>{b.disabled=false;b.textContent='运行回测';});
+}
+function renderBacktest(d){
+  const box=document.getElementById('btRes');
+  if(d.error){box.innerHTML='<div class="sub" style="color:#ef7a66">'+d.error+'</div>';return;}
+  if(d.sweep){
+    let rows=(d.grid||[]).map(g=>{
+      if(g.error) return '<tr><td>'+(g.stop*100).toFixed(1)+'%</td><td>'+g.max_hold+'</td><td colspan="5">⚠️ '+g.error+'</td></tr>';
+      const rc=g.total_return>0?'up':'down';const sg=g.total_return>0?'+':'';
+      return '<tr><td>'+(g.stop*100).toFixed(1)+'%</td><td>'+g.max_hold+'</td><td>'+g.n_trades+'</td><td class="'+rc+'">'+sg+(g.total_return*100).toFixed(1)+'%</td><td>'+g.sharpe.toFixed(2)+'</td><td class="down">'+(g.max_dd*100).toFixed(1)+'%</td><td>'+(g.win_rate*100).toFixed(1)+'%</td></tr>';
+    }).join('');
+    box.innerHTML='<div class="sub">'+d.symbol+' ｜ 网格 '+(d.stops?d.stops.length:0)+'×'+(d.max_holds?d.max_holds.length:0)+'：止损 × 最大持仓</div>'
+      +'<table style="width:100%;border-collapse:collapse;font-size:12px"><tr style="color:#9fb0c0;text-align:left"><th>止损</th><th>最大持仓</th><th>交易数</th><th>总收益</th><th>夏普</th><th>最大回撤</th><th>胜率</th></tr>'+rows+'</table>';
+    return;
+  }
+  const r=d.result||{};
+  const tag=r.synthetic?'<span class="tag-syn">合成数据(无真实行情)</span>':'<span class="tag-real">真实行情回测</span>';
+  let trows=(r.trades||[]).slice(-20).map(t=>{
+    const rc=t.net_ret>0?'up':'down';const sg=t.net_ret>0?'+':'';
+    return '<tr><td>'+t.entry_date+'</td><td>'+t.exit_date+'</td><td>'+t.entry_price+'→'+t.exit_price+'</td><td>'+t.qty+'</td><td class="'+rc+'">'+sg+(t.net_ret*100).toFixed(1)+'%</td><td>'+t.reason+'</td></tr>';
+  }).join('');
+  const kpi='<div class="kpi">'
+    +'<div class="cell"><div class="k">总收益</div><div class="v '+(r.total_return>0?'up':'down')+'">'+(r.total_return*100).toFixed(1)+'%</div></div>'
+    +'<div class="cell"><div class="k">夏普</div><div class="v">'+r.sharpe+'</div></div>'
+    +'<div class="cell"><div class="k">最大回撤</div><div class="v down">'+(r.max_dd*100).toFixed(1)+'%</div></div>'
+    +'<div class="cell"><div class="k">胜率</div><div class="v">'+((r.win_rate||0)*100).toFixed(1)+'%</div></div>'
+    +'<div class="cell"><div class="k">交易数</div><div class="v">'+r.n_trades+'</div></div>'
+    +'<div class="cell"><div class="k">末值</div><div class="v">'+r.final_value+'</div></div></div>';
+  box.innerHTML=tag+'<div class="sub">'+d.symbol+' ｜ 止损'+(d.stop*100).toFixed(1)+'% ｜ 最大持仓'+d.max_hold+'天 ｜ 信号: signal_engine 五因子</div>'+kpi
+    +'<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:8px"><tr style="color:#9fb0c0;text-align:left"><th>进场</th><th>出场</th><th>价(进→出)</th><th>股数</th><th>净收益</th><th>离场原因</th></tr>'+trows+'</table>'
+    +'<div class="sub" style="margin-top:8px">⚠️ 历史回测不代表未来收益；本引擎为 point-in-time 撮合，已含 A 股真实摩擦。</div>';
+}
 window.onload=()=>{
   poll(); loadQuotes(); loadCrypto();
   setInterval(loadQuotes,10000); setInterval(loadCrypto,10000);
@@ -1174,6 +1230,50 @@ class Handler(BaseHTTPRequestHandler):
                     pass
             self._send(200, json.dumps({"exists": False}, ensure_ascii=False),
                        "application/json; charset=utf-8")
+        elif p.path.startswith("/api/backtest"):
+            # 历史回测接口：不触发钉钉推送，仅供面板复盘展示。
+            q = parse_qs(p.query)
+            sym = _resolve_symbol(q.get("symbol", [""])[0]) or "300034"
+            try:
+                stop = float(q.get("stop", ["0"])[0])
+            except Exception:  # noqa: BLE001
+                stop = 0.0
+            try:
+                max_hold = int(q.get("max_hold", ["0"])[0])
+            except Exception:  # noqa: BLE001
+                max_hold = 0
+            sweep = q.get("sweep", ["0"])[0] in ("1", "true", "True")
+            try:
+                days = int(q.get("days", ["500"])[0])
+            except Exception:  # noqa: BLE001
+                days = 500
+            use_engine = q.get("use_engine", ["1"])[0] not in ("0", "false")
+            try:
+                import backtest_engine as bt
+                if sweep:
+                    stops = [0.05, 0.08, 0.12]
+                    max_holds = [20, 30, 60]
+                    grid = bt.parameter_sweep(sym, days=days, stops=stops,
+                                              max_holds=max_holds,
+                                              use_engine=use_engine)
+                    self._send(200, json.dumps(
+                        {"symbol": sym, "sweep": True, "stops": stops,
+                         "max_holds": max_holds, "grid": _safe_json(grid)},
+                        ensure_ascii=False), "application/json; charset=utf-8")
+                else:
+                    r = bt.backtest_symbol(sym, days=days, use_engine=use_engine,
+                                           stop=stop, max_hold=max_hold)
+                    out = {"symbol": sym, "stop": stop, "max_hold": max_hold,
+                           "sweep": False}
+                    if "error" in r:
+                        out["error"] = r["error"]
+                    else:
+                        out["result"] = _safe_json(r)
+                    self._send(200, json.dumps(out, ensure_ascii=False, default=str),
+                               "application/json; charset=utf-8")
+            except Exception as e:  # noqa: BLE001
+                self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False),
+                           "application/json; charset=utf-8")
         elif p.path == "/static/echarts.min.js":
             ep = os.path.join(HERE, "static", "echarts.min.js")
             if os.path.exists(ep):
