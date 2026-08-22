@@ -28,6 +28,7 @@ import time
 
 DEFAULT_BANKROLL = 10000.0
 DEFAULT_MAX_SKEW = 300        # 单市场最大净库存(份额)，防过度集中于单一市场
+DEFAULT_FEE = 0.01             # 单边撮合手续费(默认 1%，可配置)，每次腿成交按成交额计
 _DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "arb_book.json")
 
@@ -45,6 +46,7 @@ class VirtualBook:
         self.inv_q = {}          # market_id -> 问题文案(展示用)
         self._seq = 0
         self.max_skew = DEFAULT_MAX_SKEW   # 单市场最大净库存(份额)，面板可调、持久化
+        self.fee_rate = DEFAULT_FEE        # 单边撮合手续费率，面板可调、持久化
         self._load()
 
     # ---------- 持久化 ----------
@@ -65,6 +67,8 @@ class VirtualBook:
             self.max_skew = int(d.get("max_skew", DEFAULT_MAX_SKEW))
             if self.max_skew < 10 or self.max_skew > 5000:
                 self.max_skew = DEFAULT_MAX_SKEW
+            fr = float(d.get("fee_rate", DEFAULT_FEE))
+            self.fee_rate = fr if 0.0 <= fr <= 0.1 else DEFAULT_FEE
         except Exception:
             pass
 
@@ -81,6 +85,7 @@ class VirtualBook:
                     "inv_q": self.inv_q,
                     "seq": self._seq,
                     "max_skew": self.max_skew,
+                    "fee_rate": self.fee_rate,
                 }, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
@@ -165,8 +170,10 @@ class VirtualBook:
             self._seq += 1
             pid = "MM%d" % self._seq
             ts = time.time()
+            fee = 0.0
             if side == "buy":
-                self.cash -= bid * size
+                fee = bid * size * self.fee_rate
+                self.cash -= bid * size + fee
                 self.inventory[mkt] = inv + size
                 prev_avg = float(self.avg_cost.get(mkt, 0.0))
                 self.avg_cost[mkt] = (prev_avg * max(inv, 0) + bid * size) \
@@ -176,21 +183,26 @@ class VirtualBook:
                     "pid": pid, "kind": "mm_leg", "side": "buy", "mkt": mkt,
                     "venue": opp.get("buy_venue", "poly"), "question": q,
                     "entry": round(bid, 4), "size": size, "ts": ts,
+                    "fee": round(fee, 4),
+                    "cash_after": round(self.cash, 2),
                 })
                 msg = "建多仓：买 @%.4f ×%d，当前净库存 %d（未锁利润，待对冲）" \
                       % (bid, size, self.inventory[mkt])
                 pnl = 0.0
             else:
-                self.cash += ask * size
+                fee = ask * size * self.fee_rate
+                self.cash += ask * size - fee
                 self.inventory[mkt] = inv - size
                 pnl = 0.0
                 if self.inventory[mkt] == 0:
-                    locked = round((ask - float(self.avg_cost.get(mkt, ask)))
-                                   * size, 4)
+                    buy_fee = float(self.avg_cost.get(mkt, bid)) * size \
+                        * self.fee_rate
+                    locked_raw = (ask - float(self.avg_cost.get(mkt, ask))) * size
+                    locked = round(locked_raw - fee - buy_fee, 4)
                     self.realized_pnl += locked
                     pnl = locked
                     self.avg_cost[mkt] = 0.0
-                    msg = "对冲平仓：卖 @%.4f ×%d，净库存归 0，锁定价差收益 $%.2f" \
+                    msg = "对冲平仓：卖 @%.4f ×%d，净库存归 0，锁定价差净收益 $%.2f（含费）" \
                           % (ask, size, locked)
                 else:
                     msg = "部分对冲：卖 @%.4f ×%d，当前净库存 %d" \
@@ -200,6 +212,8 @@ class VirtualBook:
                     "pid": pid, "kind": "mm_leg", "side": "sell", "mkt": mkt,
                     "venue": opp.get("sell_venue", "poly"), "question": q,
                     "entry": round(ask, 4), "size": size, "ts": ts,
+                    "fee": round(fee, 4),
+                    "cash_after": round(self.cash, 2),
                 })
             self._save()
             return {"ok": True, "msg": msg, "pnl": pnl,
@@ -222,6 +236,22 @@ class VirtualBook:
         return {"ok": True, "msg": "偏斜上限已设为 %d（已保存）" % v,
                 "max_skew": v}
 
+    def set_fee(self, value):
+        """面板可调：设置单边撮合手续费率（0~0.1 即 0%~10%，默认 1%，持久化）。"""
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return {"ok": False, "msg": "费率必须是 0~0.1 的小数（如 0.01=1%）"}
+        if v < 0:
+            return {"ok": False, "msg": "费率不能为负"}
+        if v > 0.1:
+            return {"ok": False, "msg": "费率过大（建议 <= 0.1 即 10%）"}
+        with self.lock:
+            self.fee_rate = v
+            self._save()
+        return {"ok": True, "msg": "手续费率已设为 %.2f%%（已保存）"
+                % (v * 100), "fee_rate": v}
+
     def rebalance(self, price_map=None, max_skew=None):
         """把仍偏斜的市场以实时价强制对冲平仓，库存归 0，锁定对应价差利润。
 
@@ -240,8 +270,10 @@ class VirtualBook:
                     ask = float(pm.get("ask") or self.avg_cost.get(mkt, 0.0))
                     if ask <= 0:
                         continue
-                    self.cash += ask * inv
-                    pnl = round((ask - float(self.avg_cost.get(mkt, ask))) * inv, 4)
+                    fee = ask * inv * self.fee_rate
+                    self.cash += ask * inv - fee
+                    pnl = round((ask - float(self.avg_cost.get(mkt, ask))) * inv
+                                - fee, 4)
                     self.realized_pnl += pnl
                     pnl_total += pnl
                     self._seq += 1
@@ -249,14 +281,17 @@ class VirtualBook:
                         "pid": "MM%d" % self._seq, "kind": "mm_leg",
                         "side": "sell", "mkt": mkt, "venue": "poly",
                         "question": "再平衡对冲", "entry": round(ask, 4),
-                        "size": inv, "ts": time.time(),
+                        "size": inv, "ts": time.time(), "fee": round(fee, 4),
+                        "cash_after": round(self.cash, 2),
                     })
                 else:
                     bid = float(pm.get("bid") or self.avg_cost.get(mkt, 0.0))
                     if bid <= 0:
                         continue
-                    self.cash -= bid * (-inv)
-                    pnl = round((float(self.avg_cost.get(mkt, bid)) - bid) * (-inv), 4)
+                    fee = bid * (-inv) * self.fee_rate
+                    self.cash -= bid * (-inv) + fee
+                    pnl = round((float(self.avg_cost.get(mkt, bid)) - bid) * (-inv)
+                                - fee, 4)
                     self.realized_pnl += pnl
                     pnl_total += pnl
                     self._seq += 1
@@ -264,7 +299,8 @@ class VirtualBook:
                         "pid": "MM%d" % self._seq, "kind": "mm_leg",
                         "side": "buy", "mkt": mkt, "venue": "poly",
                         "question": "再平衡对冲", "entry": round(bid, 4),
-                        "size": -inv, "ts": time.time(),
+                        "size": -inv, "ts": time.time(), "fee": round(fee, 4),
+                        "cash_after": round(self.cash, 2),
                     })
                 self.inventory[mkt] = 0
                 self.avg_cost[mkt] = 0.0
@@ -285,16 +321,30 @@ class VirtualBook:
             self._save()
             return {"ok": True, "msg": "已结算 %s" % pid}
 
-    def view(self):
+    def view(self, price_map=None):
+        """price_map: {market_id: {"bid":..,"ask":..,"mid":..}} 实时行情，
+        用于按 mid 重估单边库存的未实现盈亏（方向性风险敞口）。"""
         with self.lock:
             inv_view = []
+            unreal = 0.0
             for mkt, raw_inv in self.inventory.items():
                 net = int(raw_inv)
                 if net == 0:
                     continue
+                avg = float(self.avg_cost.get(mkt, 0.0))
+                pm = (price_map or {}).get(mkt) or {}
+                mid = float(pm.get("mid") or pm.get("ask") or pm.get("bid")
+                            or avg)
+                if net > 0:
+                    u = (mid - avg) * net
+                else:
+                    u = (avg - mid) * (-net)
+                unreal += u
                 inv_view.append({
                     "mkt": mkt, "net": net,
-                    "avg_cost": round(float(self.avg_cost.get(mkt, 0.0)), 4),
+                    "avg_cost": round(avg, 4),
+                    "mid": round(mid, 4),
+                    "unrealized": round(u, 2),
                     "skew": round(net / self.max_skew, 3),
                     "question": self.inv_q.get(mkt, ""),
                 })
@@ -303,12 +353,16 @@ class VirtualBook:
                 "cash": round(self.cash, 2),
                 "bankroll": round(self.bankroll, 2),
                 "realized_pnl": round(self.realized_pnl, 2),
+                "unrealized_pnl": round(unreal, 2),
+                "equity": round(self.cash + unreal, 2),
                 "open_positions": len(self.positions),
                 "max_skew": self.max_skew,
+                "fee_rate": self.fee_rate,
                 "inventory": inv_view,
                 "positions": [
                     {k: p.get(k) for k in ("pid", "kind", "side", "venue",
-                                          "question", "entry", "size", "mkt")}
+                                          "question", "entry", "size", "mkt",
+                                          "fee", "ts", "cash_after")}
                     for p in self.positions
                 ],
             }

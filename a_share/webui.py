@@ -727,6 +727,10 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
         <input id="arbSkewInput" value="300" title="单市场最大净库存(份额)，10~5000" style="width:64px;background:#0e1620;color:#cfe0f0;border:1px solid #2a3a4a;border-radius:6px;padding:3px 6px">
       </label>
       <button class="ghost" onclick="setSkew()">设置</button>
+      <label style="color:#cfe0f0;font-size:13px">手续费率%
+        <input id="arbFeeInput" value="1.0" title="单边撮合手续费(百分比), 0~10" style="width:54px;background:#0e1620;color:#cfe0f0;border:1px solid #2a3a4a;border-radius:6px;padding:3px 6px">
+      </label>
+      <button class="ghost" onclick="setFee()">设置费率</button>
       <label style="color:#cfe0f0;font-size:13px"><input type="checkbox" id="arbSkipSkewed" checked> 轮动跳过高偏斜市场</label>
       <label style="color:#cfe0f0;font-size:13px"><input type="checkbox" id="arbAutoReb"> 轮动后自动再平衡</label>
       <label style="color:#cfe0f0;font-size:13px">最小流动性
@@ -746,6 +750,25 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
     <div class="arbSec" style="margin-top:14px">
       <div class="ttl" style="color:#cfe0f0;font-size:14px">📒 持仓 / 盈亏（虚拟）</div>
       <div id="arbBook"></div>
+    </div>
+    <div class="arbSec" style="margin-top:14px">
+      <div class="ttl" style="color:#cfe0f0;font-size:14px">📈 历史回测（验证策略历史表现，只读公开历史价格）</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0">
+        <label style="color:#cfe0f0;font-size:13px">市场
+          <select id="btMarket" style="max-width:320px;background:#0e1620;color:#cfe0f0;border:1px solid #2a3a4a;border-radius:6px;padding:3px 6px"></select>
+        </label>
+        <label style="color:#cfe0f0;font-size:13px">回看天数
+          <input id="btDays" value="30" style="width:50px;background:#0e1620;color:#cfe0f0;border:1px solid #2a3a4a;border-radius:6px;padding:3px 6px">
+        </label>
+        <label style="color:#cfe0f0;font-size:13px">频率(分钟)
+          <input id="btEvery" value="1440" title="每多少分钟做一次成对做市" style="width:60px;background:#0e1620;color:#cfe0f0;border:1px solid #2a3a4a;border-radius:6px;padding:3px 6px">
+        </label>
+        <label style="color:#cfe0f0;font-size:13px">份额
+          <input id="btSize" value="100" style="width:54px;background:#0e1620;color:#cfe0f0;border:1px solid #2a3a4a;border-radius:6px;padding:3px 6px">
+        </label>
+        <button class="ghost" onclick="runBacktest()">📈 运行回测</button>
+      </div>
+      <div id="btResult"></div>
     </div>
   </div>
 </div>
@@ -1322,6 +1345,10 @@ function renderArb(d){
   } else h+='<div class="sub" style="margin-top:6px">暂无确认中的互斥套利（Polymarket 已消除大部分无风险免费钱；此块仅供人工复核线索）。</div>';
   h+='</div>';
   list.innerHTML=h;
+  const sel=document.getElementById('btMarket');
+  if(sel){
+    sel.innerHTML = arbState.mm.slice(0,20).map(o=>'<option value="'+o.buy_id+'">'+escapeHtml((o.question||'').slice(0,60))+'</option>').join('');
+  }
 }
 function renderArbFromPairs(pairs, note, d){
   const sum=document.getElementById('arbSummary');
@@ -1379,6 +1406,12 @@ function setSkew(){
    .then(r=>r.json()).then(j=>{ if(j.ok){document.getElementById('arbMaxSkew').textContent=j.max_skew; alert(j.msg); loadArbBook();} else alert(j.msg||'设置失败'); })
    .catch(e=>alert('设置失败：'+e));
 }
+function setFee(){
+  const v=parseFloat(document.getElementById('arbFeeInput').value)||0;
+  fetch('/api/arb_set_fee',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:v/100})})
+   .then(r=>r.json()).then(j=>{ if(j.ok){ alert(j.msg); loadArbBook();} else alert(j.msg||'设置失败'); })
+   .catch(e=>alert('设置失败：'+e));
+}
 function resetArb(){
   if(!confirm('确定清空虚拟账本？\n本金/持仓/库存将清空，但偏斜上限设置会保留。'))return;
   fetch('/api/arb_reset',{method:'POST'}).then(r=>r.json()).then(j=>{ if(j.ok){loadArbBook(); alert(j.msg);} else alert(j.msg||'重置失败'); }).catch(e=>alert('重置失败：'+e));
@@ -1387,6 +1420,55 @@ function rebalanceArb(){
   fetch('/api/arb_rebalance',{method:'POST'}).then(r=>r.json()).then(j=>{
     if(j.ok){ loadArbBook(); alert(j.msg); } else alert(j.msg||'再平衡失败');
   }).catch(e=>alert('再平衡失败：'+e));
+}
+function runBacktest(){
+  const mid=document.getElementById('btMarket').value;
+  if(!mid){ alert('请先刷新扫描以载入市场列表'); return; }
+  const days=parseInt(document.getElementById('btDays').value,10)||30;
+  const every=parseInt(document.getElementById('btEvery').value,10)||1440;
+  const size=parseInt(document.getElementById('btSize').value,10)||100;
+  const el=document.getElementById('btResult');
+  el.innerHTML='<div class="sub" style="color:#9fb0c0">回测中（拉取历史价格，请稍候）…</div>';
+  fetch('/api/arb_backtest?market='+encodeURIComponent(mid)+'&days='+days+'&every='+every+'&size='+size)
+    .then(r=>r.json()).then(renderBacktest).catch(e=>{el.innerHTML='<div class="sub" style="color:#ef7a66">回测失败：'+e+'</div>';});
+}
+function renderBacktest(j){
+  const el=document.getElementById('btResult');
+  if(!j.ok){ el.innerHTML='<div class="sub" style="color:#ef7a66">'+escapeHtml(j.msg||'回测失败')+'</div>'; return; }
+  let h='<div class="arbSummary"><div>样本点 <b>'+j.points+'</b></div><div>交易笔数 <b>'+j.trades+'</b></div><div>胜率 <b>'+((j.win_rate||0)*100).toFixed(1)+'%</b></div><div>净盈亏 <b style="color:'+(j.net_pnl>=0?'#5fd38a':'#ef7a66')+'">$'+(j.net_pnl>=0?'+':'')+j.net_pnl.toFixed(2)+'</b></div><div>最终权益 <b>$'+j.final_equity.toFixed(2)+'</b></div><div>最大回撤 <b style="color:#ef7a66">$'+j.max_drawdown.toFixed(2)+'</b></div><div>半价差 <b>'+(j.half_spread*100).toFixed(2)+'%</b></div><div>费率 <b>'+(j.fee_rate*100).toFixed(2)+'%</b></div></div>';
+  h+='<div class="sub" style="margin:6px 0;color:#9fb0c0">'+escapeHtml(j.note||'')+'</div>';
+  h+=drawCurve(j.curve);
+  el.innerHTML=h;
+}
+function drawCurve(curve){
+  if(!curve||!curve.length) return '';
+  const W=680,H=200,pad=30;
+  const eqs=curve.map(c=>c.equity);
+  const lo=Math.min(Math.min(eqs),10000), hi=Math.max(Math.max(eqs),10000);
+  const x=i=>pad+(W-2*pad)*i/(curve.length-1||1);
+  const y=v=>H-pad-(H-2*pad)*(v-lo)/((hi-lo)||1);
+  let pts=curve.map((c,i)=>x(i).toFixed(1)+','+y(c.equity).toFixed(1)).join(' ');
+  const yb=y(10000);
+  return '<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;max-width:680px;background:#0e1620;border:1px solid #2a3a4a;border-radius:8px;margin-top:6px">'
+    +'<line x1="'+pad+'" y1="'+yb+'" x2="'+(W-pad)+'" y2="'+yb+'" stroke="#3a4a5a" stroke-dasharray="4 4"/>'
+    +'<polyline points="'+pts+'" fill="none" stroke="#5fd38a" stroke-width="2"/>'
+    +'<text x="'+pad+'" y="'+(yb-4)+'" fill="#9fb0c0" font-size="10">基准 $10000</text>'
+    +'<text x="'+(W-pad-70)+'" y="16" fill="#9fb0c0" font-size="10">权益曲线</text></svg>';
+}
+function drawEquityCurve(positions){
+  if(!positions||positions.length<2) return '';
+  const vals=positions.map(p=>p.cash_after!=null?p.cash_after:0);
+  const W=680,H=180,pad=28;
+  const lo=Math.min(Math.min.apply(null,vals),10000), hi=Math.max(Math.max.apply(null,vals),10000);
+  const x=i=>pad+(W-2*pad)*i/(positions.length-1||1);
+  const y=v=>H-pad-(H-2*pad)*(v-lo)/((hi-lo)||1);
+  let pts=positions.map((p,i)=>x(i).toFixed(1)+','+y(p.cash_after!=null?p.cash_after:0).toFixed(1)).join(' ');
+  const yb=y(10000);
+  return '<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;max-width:680px;background:#0e1620;border:1px solid #2a3a4a;border-radius:8px;margin:6px 0">'
+    +'<line x1="'+pad+'" y1="'+yb+'" x2="'+(W-pad)+'" y2="'+yb+'" stroke="#3a4a5a" stroke-dasharray="4 4"/>'
+    +'<polyline points="'+pts+'" fill="none" stroke="#5fa8d3" stroke-width="2"/>'
+    +'<text x="'+pad+'" y="'+(yb-4)+'" fill="#9fb0c0" font-size="10">起始 $10000</text>'
+    +'<text x="'+(W-pad-80)+'" y="14" fill="#9fb0c0" font-size="10">账户资金曲线</text></svg>';
 }
 function loadArbBook(){
   fetch('/api/arb_book').then(r=>r.json()).then(renderArbBook).catch(e=>{document.getElementById('arbBook').innerHTML='<div class="sub" style="color:#ef7a66">读取持仓失败：'+e+'</div>';});
@@ -1401,25 +1483,33 @@ function renderArbBook(d){
       let ih='<div class="arbInvList">';
       d.inventory.forEach(x=>{
         const sk=x.skew; const col=Math.abs(sk)>=0.8?'#ef7a66':(Math.abs(sk)>=0.5?'#e8c46a':'#5fd38a');
+        const u=x.unrealized||0; const ucol=u>=0?'#5fd38a':'#ef7a66';
         ih+='<div class="arbInvRow"><span class="invMkt" title="'+(x.mkt||'')+'">'+escapeHtml(x.question||x.mkt||'')+'</span>'
           +'<span class="invNet">净库存 '+(x.net>0?'+':'')+x.net+'</span>'
           +'<span class="invSkew" style="color:'+col+'">偏斜 '+(sk*100).toFixed(0)+'%</span>'
+          +'<span class="invMid">mid '+(x.mid!=null?x.mid.toFixed(4):'?')+'</span>'
+          +'<span class="invUnreal" style="color:'+ucol+'">未实现 '+(u>=0?'+':'')+'$'+u.toFixed(2)+'</span>'
           +'<span class="invBar"><span class="invBarFill" style="width:'+Math.min(100,Math.abs(sk)*100)+'%;background:'+col+'"></span></span></div>';
       });
       ih+='</div>';
       invEl.innerHTML=ih;
     } else invEl.innerHTML='<div class="sub" style="margin-top:6px">全部市场库存中性（净库存 0），无需再平衡。</div>';
   }
-  let h='<div class="arbSummary"><div>虚拟本金 <b>$'+d.bankroll.toFixed(2)+'</b></div><div>可用现金 <b>$'+d.cash.toFixed(2)+'</b></div><div>已实现盈亏 <b style="color:'+(d.realized_pnl>=0?'#5fd38a':'#ef7a66')+'">$'+(d.realized_pnl>=0?'+':'')+d.realized_pnl.toFixed(2)+'</b></div><div>未平仓腿 <b>'+d.open_positions+'</b></div></div>';
+  const up=d.unrealized_pnl||0, eq=d.equity||0, fr=(d.fee_rate!=null?d.fee_rate*100:1);
+  let h='<div class="arbSummary"><div>虚拟本金 <b>$'+d.bankroll.toFixed(2)+'</b></div><div>可用现金 <b>$'+d.cash.toFixed(2)+'</b></div><div>已实现盈亏 <b style="color:'+(d.realized_pnl>=0?'#5fd38a':'#ef7a66')+'">$'+(d.realized_pnl>=0?'+':'')+d.realized_pnl.toFixed(2)+'</b></div><div>未实现盈亏 <b style="color:'+(up>=0?'#5fd38a':'#ef7a66')+'">$'+(up>=0?'+':'')+up.toFixed(2)+'</b></div><div>权益市值 <b>$'+eq.toFixed(2)+'</b></div><div>费率 <b>'+fr.toFixed(2)+'%</b></div><div>未平仓腿 <b>'+d.open_positions+'</b></div></div>';
+  h+=drawEquityCurve(d.positions);
   if(d.positions&&d.positions.length){
     h+='<div style="margin-top:6px">';
-    d.positions.forEach(p=>{
+    d.positions.slice().reverse().forEach(p=>{
       const tag=p.kind==='mm_leg'?(p.side==='buy'?'建多仓':'对冲卖'):(p.kind==='long'?'买':'卖');
-      h+='<div class="arbBookRow"><span class="pid">'+p.pid+'</span><span class="qn">'+escapeHtml(p.question||'')+'</span><span>'+tag+' '+escapeHtml(p.venue||'')+' @'+(p.entry!=null?p.entry.toFixed(4):'?')+' ×'+(p.size||0)+'</span><button class="arbBtn" onclick="settleArb(\''+p.pid+'\')">结算</button></div>';
+      const t=p.ts?new Date(p.ts*1000).toLocaleString():'-';
+      const fee=(p.fee!=null&&p.fee)?' 费$'+p.fee.toFixed(2):'';
+      const ca=(p.cash_after!=null)?p.cash_after.toFixed(2):'?';
+      h+='<div class="arbBookRow"><span class="pid">'+p.pid+'</span><span class="qn">'+escapeHtml(p.question||'')+'</span><span>'+tag+' '+escapeHtml(p.venue||'')+' @'+(p.entry!=null?p.entry.toFixed(4):'?')+' ×'+(p.size||0)+fee+'</span><span class="ts">'+t+'</span><span class="cashAfter">余$'+ca+'</span><button class="arbBtn" onclick="settleArb(\''+p.pid+'\')">结算</button></div>';
     });
     h+='</div>';
   } else {
-    h+='<div class="sub" style="margin-top:6px">暂无持仓。</div>';
+    h+='<div class="sub" style="margin-top:6px">暂无成交记录。</div>';
   }
   el.innerHTML=h;
 }
@@ -1889,8 +1979,20 @@ class Handler(BaseHTTPRequestHandler):
                     ensure_ascii=False),
                     "application/json; charset=utf-8")
         elif p.path == "/api/arb_book":
-            self._send(200, json.dumps(arb_book.get_book().view(),
-                                       ensure_ascii=False, default=str),
+            try:
+                pq = polymarket.fetch_poly_quotes(300)
+                pm = {}
+                for q in pq:
+                    if "error" in q or not q.get("id"):
+                        continue
+                    bid = q.get("yes_bid") or 0
+                    ask = q.get("yes_ask") or 0
+                    pm[q["id"]] = {"bid": bid, "ask": ask,
+                                   "mid": (bid + ask) / 2 if bid and ask else 0}
+                res = arb_book.get_book().view(pm)
+            except Exception:
+                res = arb_book.get_book().view()
+            self._send(200, json.dumps(res, ensure_ascii=False, default=str),
                        "application/json; charset=utf-8")
         elif p.path == "/api/arb_demo":
             self._send(200, json.dumps({"pairs": arbitrage.demo_pairs()},
@@ -1969,6 +2071,33 @@ class Handler(BaseHTTPRequestHandler):
                     "ts": datetime.now().strftime("%H:%M:%S"),
                 }, ensure_ascii=False, default=str),
                     "application/json; charset=utf-8")
+            except Exception as e:  # noqa: BLE001
+                self._send(200, json.dumps({"ok": False, "msg": str(e)},
+                                           ensure_ascii=False),
+                           "application/json; charset=utf-8")
+        elif p.path == "/api/arb_backtest":
+            try:
+                qs = parse_qs(p.query)
+                mid = (qs.get("market") or [None])[0]
+                if not mid:
+                    self._send(200, json.dumps(
+                        {"ok": False, "msg": "缺 market 参数"},
+                        ensure_ascii=False),
+                        "application/json; charset=utf-8")
+                    return
+                try:
+                    days = int((qs.get("days") or ["30"])[0])
+                    every = int((qs.get("every") or ["1440"])[0])
+                    size = int((qs.get("size") or ["100"])[0])
+                except Exception:
+                    days, every, size = 30, 1440, 100
+                import arb_backtest as _abt
+                res = _abt.run_backtest(mid, days=days, every_min=every,
+                                        size=size,
+                                        fee_rate=arb_book.get_book().fee_rate)
+                self._send(200, json.dumps(res, ensure_ascii=False,
+                                           default=str),
+                           "application/json; charset=utf-8")
             except Exception as e:  # noqa: BLE001
                 self._send(200, json.dumps({"ok": False, "msg": str(e)},
                                            ensure_ascii=False),
@@ -2308,6 +2437,20 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:  # noqa: BLE001
                 value = 0
             res = arb_book.get_book().set_max_skew(value)
+            self._send(200, json.dumps(res, ensure_ascii=False, default=str),
+                       "application/json; charset=utf-8")
+        elif p.path == "/api/arb_set_fee":
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                data = json.loads(raw.decode("utf-8") or "{}")
+            except Exception:  # noqa: BLE001
+                data = {}
+            try:
+                value = float(data.get("value", -1))
+            except Exception:  # noqa: BLE001
+                value = -1
+            res = arb_book.get_book().set_fee(value)
             self._send(200, json.dumps(res, ensure_ascii=False, default=str),
                        "application/json; charset=utf-8")
         elif p.path == "/api/arb_reset":

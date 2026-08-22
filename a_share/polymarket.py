@@ -297,3 +297,38 @@ def fetch_poly_quotes(limit: int = 300, force: bool = False) -> list:
     _poly_quotes_cache["ts"] = now
     _poly_quotes_cache["data"] = out
     return out
+
+
+def fetch_price_history(market_id, token_id=None, interval="max"):
+    """返回 [(t, p), ...] 升序历史价格序列（CLOB prices-history），用于回测。
+
+    market_id 为 Gamma 市场 id；token_id 缺失时自动由 markets/{id} 获取
+    clobTokenIds[0]。失败返回 [{"error": "..."}]。
+    """
+    try:
+        if not token_id:
+            detail = json.loads(_http_get("%s/%s" % (_GAMMA, market_id),
+                                          timeout=20))
+            toks = detail.get("clobTokenIds")
+            if toks:
+                try:
+                    token_id = json.loads(toks)[0]
+                except Exception:
+                    token_id = toks
+        if not token_id:
+            return [{"error": "无法获取 token_id"}]
+        url = "https://clob.polymarket.com/prices-history?market=%s&interval=%s" \
+              % (token_id, interval)
+        d = json.loads(_http_get(url, timeout=25))
+        hist = (d.get("history") or []) if isinstance(d, dict) else []
+        out = []
+        for it in hist:
+            t = it.get("t")
+            p = it.get("p")
+            if t is None or p is None:
+                continue
+            out.append((int(t), float(p)))
+        out.sort(key=lambda x: x[0])
+        return out
+    except Exception as e:  # noqa: BLE001
+        return [{"error": str(e)}]
