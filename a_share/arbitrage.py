@@ -33,15 +33,19 @@ def _norm(text):
 
 
 # ---------- 单边做市价差 ----------
-def scan_poly_marketmaking(quotes, top_n=20, min_spread=_MIN_SPREAD):
+def scan_poly_marketmaking(quotes, top_n=20, min_spread=_MIN_SPREAD,
+                           min_liquidity=0):
     """对每个有真实双边流动性的市场，模拟买 bid / 卖 ask 的价差收益。
-    返回按 spread 降序的机会列表（含供模拟成交的字段）。"""
+    返回按 (价差降序, 流动性降序) 排序的机会列表（含供模拟成交的字段）。"""
     out = []
     for q in quotes:
         if "error" in q:
             continue
         bid, ask = q.get("yes_bid"), q.get("yes_ask")
         if not bid or not ask or bid <= 0 or ask <= 0 or ask <= bid:
+            continue
+        liq = float(q.get("liquidity", 0) or 0)
+        if liq < min_liquidity:
             continue
         mid = (bid + ask) / 2
         spread = round(ask - bid, 4)
@@ -56,6 +60,7 @@ def scan_poly_marketmaking(quotes, top_n=20, min_spread=_MIN_SPREAD):
             "confidence": 1.0,
             "question": q["question"],
             "event_id": q.get("event_id"),
+            "liquidity": liq,
             "bid": bid, "ask": ask, "mid": round(mid, 4),
             "spread": spread, "spread_pct": spread_pct,
             "unit_profit": unit,
@@ -67,7 +72,7 @@ def scan_poly_marketmaking(quotes, top_n=20, min_spread=_MIN_SPREAD):
             "action": "在 %.4f 买 / %.4f 卖，每单位锁定价差 %.4f" % (bid, ask, unit),
             "edge": spread,
         })
-    out.sort(key=lambda o: o["spread"], reverse=True)
+    out.sort(key=lambda o: (o["spread"], o.get("liquidity", 0)), reverse=True)
     return out[:top_n]
 
 

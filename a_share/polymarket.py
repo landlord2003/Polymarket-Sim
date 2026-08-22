@@ -284,6 +284,8 @@ def fetch_poly_quotes(limit: int = 300, force: bool = False) -> list:
                 "question": q,
                 "yes_bid": round(ob, 4), "yes_ask": round(oa, 4),
                 "no_bid": round(1 - oa, 4), "no_ask": round(1 - ob, 4),
+                "liquidity": round(_to_num(m.get("liquidityNum"))
+                                   or _to_num(m.get("liquidity")) or 0.0, 2),
                 "ts": now,
             })
             if len(out) >= limit:

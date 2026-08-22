@@ -3,11 +3,20 @@
 
 VirtualBook 维护：
   - cash：虚拟本金（默认 $10,000）
-  - positions：跨平台套利持仓（两腿对冲，锁定无风险收益）
+  - positions：做市成交腿(mm_leg) 与跨平台套利持仓(long/short)
   - realized_pnl：已实现盈亏
-执行一笔跨平台套利 = 在便宜平台买入 primary、在贵平台卖出 primary，
-两腿对冲后无论事件结果如何净敞口为 0，收益在成交时即锁定 = (卖价 - 买价) * 份额。
-结算(settle)仅用于走完生命周期、核销两腿（结果恒为 0 对冲）。
+  - inventory：每个市场(market_id)的净库存(份额, +多 -空) —— 做市偏斜控制核心
+  - avg_cost：每个市场的建仓均价
+
+做市模型（单边成交 + 自动反向对冲）：
+  market_make 模拟做市商在同一市场双边挂单，但按真实场景**逐腿成交**：
+    · 库存为 0 时首笔在 bid 买入建多仓（不锁利润，仅记库存）；
+    · 库存 > 0（已净多）时自动在 ask 卖出对冲，库存归 0 时锁定 spread 利润；
+    · 库存 < 0（已净空）时自动在 bid 买入对冲。
+  这样单市场连续做市天然形成「建仓→对冲→建仓→对冲」循环，库存始终被
+  偏斜上限(max_skew)约束，实现「单边成交后自动反向对冲」。
+  rebalance(price_map)：把仍偏斜的市场以实时价强制对冲平仓，库存归 0。
+
 持久化到独立文件 arb_book.json（与 A股模拟盘 sim_book.json 完全分离）。
 """
 from __future__ import annotations
@@ -18,6 +27,7 @@ import threading
 import time
 
 DEFAULT_BANKROLL = 10000.0
+DEFAULT_MAX_SKEW = 300        # 单市场最大净库存(份额)，防过度集中于单一市场
 _DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "arb_book.json")
 
@@ -30,6 +40,9 @@ class VirtualBook:
         self.bankroll = bankroll
         self.positions = []
         self.realized_pnl = 0.0
+        self.inventory = {}      # market_id -> 净库存(份额, +多 -空)
+        self.avg_cost = {}       # market_id -> 建仓均价
+        self.inv_q = {}          # market_id -> 问题文案(展示用)
         self._seq = 0
         self._load()
 
@@ -44,6 +57,9 @@ class VirtualBook:
             self.bankroll = float(d.get("bankroll", self.bankroll))
             self.realized_pnl = float(d.get("realized_pnl", 0.0))
             self.positions = d.get("positions", [])
+            self.inventory = d.get("inventory", {}) or {}
+            self.avg_cost = d.get("avg_cost", {}) or {}
+            self.inv_q = d.get("inv_q", {}) or {}
             self._seq = int(d.get("seq", 0))
         except Exception:
             pass
@@ -56,6 +72,9 @@ class VirtualBook:
                     "bankroll": self.bankroll,
                     "realized_pnl": self.realized_pnl,
                     "positions": self.positions,
+                    "inventory": self.inventory,
+                    "avg_cost": self.avg_cost,
+                    "inv_q": self.inv_q,
                     "seq": self._seq,
                 }, f, ensure_ascii=False, indent=2)
         except Exception:
@@ -63,14 +82,7 @@ class VirtualBook:
 
     # ---------- 操作 ----------
     def execute_arb(self, opp, size_shares):
-        """执行一笔跨平台套利（模拟）。
-
-        opp 来自 arbitrage.scan 的单个机会，含：
-          buy_venue/buy_id/buy_ask, sell_venue/sell_id/sell_bid,
-          question, edge(每份额外收益), outcome_label
-        size_shares：买入/卖出的份额（整数，>=1）
-        返回 {ok, msg, pnl, positions}
-        """
+        """执行一笔跨平台套利（模拟，仅演示对 demo=True 用）。"""
         size = int(size_shares)
         if size < 1:
             return {"ok": False, "msg": "份额必须 >= 1"}
@@ -99,7 +111,7 @@ class VirtualBook:
                 "entry": float(opp["sell_bid"]), "size": size, "ts": ts,
                 "arb": "A%d" % base,
             })
-            pnl = edge * size  # 成交即锁定的无风险收益
+            pnl = edge * size
             self.cash += pnl
             self.realized_pnl += pnl
             self._save()
@@ -108,56 +120,140 @@ class VirtualBook:
                 "msg": "已模拟成交：买 %s @ %.4f / 卖 %s @ %.4f ×%d，锁定收益 $%.2f"
                        % (opp["buy_venue"], opp["buy_ask"], opp["sell_venue"],
                           opp["sell_bid"], size, pnl),
-                "pnl": pnl,
-                "cash": self.cash,
+                "pnl": pnl, "cash": self.cash,
                 "positions": ["L%d" % base, "S%d" % base],
             }
 
-    def market_make(self, opp, size_shares):
-        """模拟单边做市：在同一市场买 bid / 卖 ask，库存中性下每轮锁定 spread。
+    def market_make(self, opp, size_shares, max_skew=DEFAULT_MAX_SKEW):
+        """模拟做市（单边成交 + 自动反向对冲，库存偏斜受控）。
 
-        理想假设：双边均成交（实际做市存在单边成交的库存风险，此处为模拟简化）。
-        锁定毛利 = (ask - bid) * size，立即计入 realized_pnl。
-        opp 来自 arbitrage.scan_poly_marketmaking 的单个机会（buy_ask=买价bid，
-        sell_bid=卖价ask，同标的同 venue）。
+        方向自动决定：
+          · 当前净库存 > 0（已多）→ 本次在 ask 卖出对冲；
+          · 当前净库存 < 0（已空）→ 本次在 bid 买入对冲；
+          · 当前为 0（首笔）    → 本次在 bid 买入建多仓。
+        偏斜上限：若本次将使 |净库存| 超过 max_skew，则拒绝（提示先再平衡）。
+        利润：仅在对冲使库存归 0 的成交中实现 = (ask - 建仓均价) * 份额。
+        opp 来自 arbitrage.scan_poly_marketmaking（buy_ask=bid, sell_bid=ask, 同标的）。
         """
         size = int(size_shares)
         if size < 1:
             return {"ok": False, "msg": "份额必须 >= 1"}
-        bid = float(opp.get("buy_ask", 0.0))    # 对 mm opp：buy_ask 即买价(bid)
-        ask = float(opp.get("sell_bid", 0.0))   # 对 mm opp：sell_bid 即卖价(ask)
+        bid = float(opp.get("buy_ask", 0.0))    # 买价(bid)
+        ask = float(opp.get("sell_bid", 0.0))   # 卖价(ask)
         if bid <= 0 or ask <= bid:
             return {"ok": False, "msg": "价差非正，无法做市"}
-        cost = bid * size
-        if cost > self.cash:
-            return {"ok": False, "msg": "虚拟本金不足（买端需 $%.2f，余 $%.2f）"
-                    % (cost, self.cash)}
+        mkt = opp.get("buy_id")
+        q = opp.get("question", "")
         with self.lock:
+            inv = int(self.inventory.get(mkt, 0))
+            side = "sell" if inv > 0 else "buy"
+            if side == "buy" and inv + size > max_skew:
+                return {"ok": False,
+                        "msg": "库存偏斜上限(%d)：该市场净多 %d，先点「再平衡」"
+                               % (max_skew, inv)}
+            if side == "sell" and inv - size < -max_skew:
+                return {"ok": False,
+                        "msg": "库存偏斜上限(%d)：该市场净空 %d，先点「再平衡」"
+                               % (max_skew, inv)}
             self._seq += 1
             pid = "MM%d" % self._seq
             ts = time.time()
-            locked = round((ask - bid) * size, 4)
-            self.cash -= cost            # 买入支出
-            self.cash += ask * size      # 卖出收入（净变化 = locked）
-            self.realized_pnl += locked
-            self.positions.append({
-                "pid": pid, "kind": "mm",
-                "venue": opp.get("buy_venue", "poly"),
-                "market_id": opp.get("buy_id"),
-                "question": opp.get("question", ""),
-                "entry_bid": round(bid, 4), "entry_ask": round(ask, 4),
-                "size": size, "locked": locked, "ts": ts,
-            })
+            if side == "buy":
+                self.cash -= bid * size
+                self.inventory[mkt] = inv + size
+                prev_avg = float(self.avg_cost.get(mkt, 0.0))
+                self.avg_cost[mkt] = (prev_avg * max(inv, 0) + bid * size) \
+                    / (inv + size) if (inv + size) > 0 else bid
+                self.inv_q[mkt] = q
+                self.positions.append({
+                    "pid": pid, "kind": "mm_leg", "side": "buy", "mkt": mkt,
+                    "venue": opp.get("buy_venue", "poly"), "question": q,
+                    "entry": round(bid, 4), "size": size, "ts": ts,
+                })
+                msg = "建多仓：买 @%.4f ×%d，当前净库存 %d（未锁利润，待对冲）" \
+                      % (bid, size, self.inventory[mkt])
+                pnl = 0.0
+            else:
+                self.cash += ask * size
+                self.inventory[mkt] = inv - size
+                pnl = 0.0
+                if self.inventory[mkt] == 0:
+                    locked = round((ask - float(self.avg_cost.get(mkt, ask)))
+                                   * size, 4)
+                    self.realized_pnl += locked
+                    pnl = locked
+                    self.avg_cost[mkt] = 0.0
+                    msg = "对冲平仓：卖 @%.4f ×%d，净库存归 0，锁定价差收益 $%.2f" \
+                          % (ask, size, locked)
+                else:
+                    msg = "部分对冲：卖 @%.4f ×%d，当前净库存 %d" \
+                          % (ask, size, self.inventory[mkt])
+                self.inv_q[mkt] = q
+                self.positions.append({
+                    "pid": pid, "kind": "mm_leg", "side": "sell", "mkt": mkt,
+                    "venue": opp.get("sell_venue", "poly"), "question": q,
+                    "entry": round(ask, 4), "size": size, "ts": ts,
+                })
             self._save()
-            return {
-                "ok": True,
-                "msg": "已模拟做市：买 @ %.4f / 卖 @ %.4f ×%d，锁定价差收益 $%.2f（理想双边成交）"
-                       % (bid, ask, size, locked),
-                "pnl": locked, "cash": round(self.cash, 2), "pid": pid,
-            }
+            return {"ok": True, "msg": msg, "pnl": pnl,
+                    "cash": round(self.cash, 2), "pid": pid, "side": side,
+                    "inventory": self.inventory[mkt]}
+
+    def rebalance(self, price_map=None, max_skew=DEFAULT_MAX_SKEW):
+        """把仍偏斜的市场以实时价强制对冲平仓，库存归 0，锁定对应价差利润。
+
+        price_map: {market_id: {"bid":..,"ask":..}} 来自实时行情；
+        缺失时用建仓均价近似（利润≈0，仅清库存）。
+        """
+        with self.lock:
+            done = 0
+            pnl_total = 0.0
+            for mkt, raw_inv in list(self.inventory.items()):
+                inv = int(raw_inv)
+                if inv == 0:
+                    continue
+                pm = (price_map or {}).get(mkt) or {}
+                if inv > 0:
+                    ask = float(pm.get("ask") or self.avg_cost.get(mkt, 0.0))
+                    if ask <= 0:
+                        continue
+                    self.cash += ask * inv
+                    pnl = round((ask - float(self.avg_cost.get(mkt, ask))) * inv, 4)
+                    self.realized_pnl += pnl
+                    pnl_total += pnl
+                    self._seq += 1
+                    self.positions.append({
+                        "pid": "MM%d" % self._seq, "kind": "mm_leg",
+                        "side": "sell", "mkt": mkt, "venue": "poly",
+                        "question": "再平衡对冲", "entry": round(ask, 4),
+                        "size": inv, "ts": time.time(),
+                    })
+                else:
+                    bid = float(pm.get("bid") or self.avg_cost.get(mkt, 0.0))
+                    if bid <= 0:
+                        continue
+                    self.cash -= bid * (-inv)
+                    pnl = round((float(self.avg_cost.get(mkt, bid)) - bid) * (-inv), 4)
+                    self.realized_pnl += pnl
+                    pnl_total += pnl
+                    self._seq += 1
+                    self.positions.append({
+                        "pid": "MM%d" % self._seq, "kind": "mm_leg",
+                        "side": "buy", "mkt": mkt, "venue": "poly",
+                        "question": "再平衡对冲", "entry": round(bid, 4),
+                        "size": -inv, "ts": time.time(),
+                    })
+                self.inventory[mkt] = 0
+                self.avg_cost[mkt] = 0.0
+                done += 1
+            self._save()
+            return {"ok": True,
+                    "msg": "已再平衡 %d 个市场，锁定/调整利润 $%.2f"
+                           % (done, pnl_total),
+                    "rebalanced": done, "pnl": pnl_total}
 
     def settle(self, pid):
-        """结算单个持仓（演示用：走完生命周期，对冲腿互抵为 0；mm 类已锁定利润直接核销）。"""
+        """结算单个跨平台套利持仓（演示用）。做市腿请用 rebalance 管理。"""
         with self.lock:
             before = len(self.positions)
             self.positions = [p for p in self.positions if p["pid"] != pid]
@@ -168,15 +264,28 @@ class VirtualBook:
 
     def view(self):
         with self.lock:
+            inv_view = []
+            for mkt, raw_inv in self.inventory.items():
+                net = int(raw_inv)
+                if net == 0:
+                    continue
+                inv_view.append({
+                    "mkt": mkt, "net": net,
+                    "avg_cost": round(float(self.avg_cost.get(mkt, 0.0)), 4),
+                    "skew": round(net / DEFAULT_MAX_SKEW, 3),
+                    "question": self.inv_q.get(mkt, ""),
+                })
+            inv_view.sort(key=lambda x: abs(x["net"]), reverse=True)
             return {
                 "cash": round(self.cash, 2),
                 "bankroll": round(self.bankroll, 2),
                 "realized_pnl": round(self.realized_pnl, 2),
                 "open_positions": len(self.positions),
+                "max_skew": DEFAULT_MAX_SKEW,
+                "inventory": inv_view,
                 "positions": [
-                    {k: p.get(k) for k in ("pid", "kind", "venue", "question",
-                                          "outcome", "entry", "entry_bid",
-                                          "entry_ask", "size", "locked", "arb")}
+                    {k: p.get(k) for k in ("pid", "kind", "side", "venue",
+                                          "question", "entry", "size", "mkt")}
                     for p in self.positions
                 ],
             }
@@ -186,6 +295,9 @@ class VirtualBook:
             self.cash = self.bankroll
             self.realized_pnl = 0.0
             self.positions = []
+            self.inventory = {}
+            self.avg_cost = {}
+            self.inv_q = {}
             self._save()
 
 
