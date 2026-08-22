@@ -12,11 +12,20 @@
 """
 
 import json
+import socket
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Optional
+
+# 强制 IPv4 解析：gamma-api.polymarket.com 同时有 A/AAAA 记录，urllib 默认优先
+# 解析 AAAA(IPv6)；若本机 IPv6 出口不通，连接会挂起直到超时（curl 因自动回落
+# IPv4 正常）。全局改为仅解析 IPv4，避免「页面获取失败 / timed out」。
+_orig_getaddrinfo = socket.getaddrinfo
+def _getaddrinfo_ipv4(host, port, family=socket.AF_UNSPEC, type=0, proto=0, flags=0):
+    return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+socket.getaddrinfo = _getaddrinfo_ipv4
 
 _GAMMA = "https://gamma-api.polymarket.com/markets"
 
@@ -53,7 +62,7 @@ def _is_blocked(question: str, tags) -> bool:
     return False
 
 
-def _http_get(url: str, timeout: int = 12) -> str:
+def _http_get(url: str, timeout: int = 15) -> str:
     req = urllib.request.Request(url, headers={
         "User-Agent": "Mozilla/5.0 (compatible; QuantTrading/1.0)",
         "Accept": "application/json",
