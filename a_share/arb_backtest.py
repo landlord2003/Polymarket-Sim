@@ -14,6 +14,7 @@ from __future__ import annotations
 import time
 
 import polymarket as _pm
+from core.strategy import pair_fee, realized_pnl
 
 
 def _resample(series, every_min):
@@ -85,8 +86,8 @@ def run_backtest(market_id, days=30, every_min=1440, size=100,
             continue
         enter_bid = prev[0]
         exit_ask = ask
-        fee = (enter_bid * size + exit_ask * size) * fee_rate
-        profit = (exit_ask - enter_bid) * size - fee
+        fee = pair_fee(enter_bid * size, exit_ask * size, fee_rate)
+        profit = realized_pnl(enter_bid, exit_ask, size) - fee
         equity += profit
         trades += 1
         if profit >= 0:

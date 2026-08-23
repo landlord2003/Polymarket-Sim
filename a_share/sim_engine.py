@@ -18,6 +18,7 @@ import threading
 from datetime import datetime
 
 from datasource import fetch_realtime, DataSourceError
+from core.strategy import weighted_avg_cost, realized_pnl, unrealized_pnl
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BOOK_PATH = os.path.join(HERE, "sim_book.json")
@@ -75,7 +76,7 @@ def buy(symbol: str, name: str, price: float, qty: int) -> dict:
         if pos:
             tot_qty = pos["qty"] + qty
             pos["cost_price"] = round(
-                (pos["cost_price"] * pos["qty"] + cost) / tot_qty, 4)
+                weighted_avg_cost(pos["cost_price"], pos["qty"], price, qty), 4)
             pos["qty"] = tot_qty
             pos["buy_time"] = datetime.now().strftime("%Y-%m-%d %H:%M")
         else:
@@ -110,7 +111,7 @@ def sell(symbol: str, price: float, qty: int) -> dict:
             return {"ok": False, "msg": f"可卖数量不足：持有 {held}股，欲卖 {qty}股",
                     "book": b, "realized_pnl": 0.0}
         proceeds = round(price * qty, 2)
-        realized = round((price - pos["cost_price"]) * qty, 2)
+        realized = round(realized_pnl(pos["cost_price"], price, qty), 2)
         b["cash"] = round(b["cash"] + proceeds, 2)
         pos["qty"] -= qty
         if pos["qty"] == 0:
@@ -146,7 +147,7 @@ def mark_to_market() -> dict:
             cur = v["price"] if v and v.get("price") else p["cost_price"]
             p["current"] = round(cur, 2)
             p["market_value"] = round(cur * p["qty"], 2)
-            p["float_pnl"] = round((cur - p["cost_price"]) * p["qty"], 2)
+            p["float_pnl"] = round(unrealized_pnl(p["cost_price"], cur, p["qty"]), 2)
             p["float_pct"] = (round((cur / p["cost_price"] - 1) * 100, 2)
                               if p["cost_price"] > 0 else 0.0)
     else:

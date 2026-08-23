@@ -1,0 +1,41 @@
+{
+  "backtest": {
+    "default_days": 30,
+    "default_every_min": 1440,
+    "default_size": 100,
+    "half_spread": {
+      "min": 0.001,
+      "max": 0.05,
+      "step": 0.001,
+      "default": 0.005
+    },
+    "fee_rate": {
+      "min": 0.0,
+      "max": 0.1,
+      "step": 0.001,
+      "default": 0.01
+    },
+    "sweep_half_spreads": [
+      0.002,
+      0.005,
+      0.01,
+      0.02,
+      0.03
+    ],
+    "sweep_fee_rates": [
+      0.0,
+      0.005,
+      0.01,
+      0.02,
+      0.03
+    ]
+  },
+  "arb": {
+    "default_fee_rate": 0.01,
+    "default_max_skew": 300
+  },
+  "a_share_sim": {
+    "init_cash": 100000.0,
+    "lot": 100
+  }
+}

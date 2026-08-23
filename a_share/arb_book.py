@@ -25,6 +25,8 @@ import json
 import os
 import threading
 import time
+from core.strategy import (leg_fee, realized_pnl, unrealized_pnl,
+                           arb_avg_cost_on_buy)
 
 DEFAULT_BANKROLL = 10000.0
 DEFAULT_MAX_SKEW = 300        # 单市场最大净库存(份额)，防过度集中于单一市场
@@ -172,12 +174,11 @@ class VirtualBook:
             ts = time.time()
             fee = 0.0
             if side == "buy":
-                fee = bid * size * self.fee_rate
+                fee = leg_fee(bid, size, self.fee_rate)
                 self.cash -= bid * size + fee
                 self.inventory[mkt] = inv + size
                 prev_avg = float(self.avg_cost.get(mkt, 0.0))
-                self.avg_cost[mkt] = (prev_avg * max(inv, 0) + bid * size) \
-                    / (inv + size) if (inv + size) > 0 else bid
+                self.avg_cost[mkt] = arb_avg_cost_on_buy(prev_avg, inv, bid, size)
                 self.inv_q[mkt] = q
                 self.positions.append({
                     "pid": pid, "kind": "mm_leg", "side": "buy", "mkt": mkt,
@@ -190,15 +191,15 @@ class VirtualBook:
                       % (bid, size, self.inventory[mkt])
                 pnl = 0.0
             else:
-                fee = ask * size * self.fee_rate
+                fee = leg_fee(ask, size, self.fee_rate)
                 self.cash += ask * size - fee
                 self.inventory[mkt] = inv - size
                 pnl = 0.0
                 if self.inventory[mkt] == 0:
-                    buy_fee = float(self.avg_cost.get(mkt, bid)) * size \
-                        * self.fee_rate
-                    locked_raw = (ask - float(self.avg_cost.get(mkt, ask))) * size
-                    locked = round(locked_raw - fee - buy_fee, 4)
+                    buy_fee = leg_fee(float(self.avg_cost.get(mkt, bid)), size,
+                                     self.fee_rate)
+                    locked = round(realized_pnl(float(self.avg_cost.get(mkt, ask)),
+                                               ask, size) - fee - buy_fee, 4)
                     self.realized_pnl += locked
                     pnl = locked
                     self.avg_cost[mkt] = 0.0
@@ -270,10 +271,10 @@ class VirtualBook:
                     ask = float(pm.get("ask") or self.avg_cost.get(mkt, 0.0))
                     if ask <= 0:
                         continue
-                    fee = ask * inv * self.fee_rate
+                    fee = leg_fee(ask, inv, self.fee_rate)
                     self.cash += ask * inv - fee
-                    pnl = round((ask - float(self.avg_cost.get(mkt, ask))) * inv
-                                - fee, 4)
+                    pnl = round(realized_pnl(float(self.avg_cost.get(mkt, ask)),
+                                            ask, inv) - fee, 4)
                     self.realized_pnl += pnl
                     pnl_total += pnl
                     self._seq += 1
@@ -288,10 +289,10 @@ class VirtualBook:
                     bid = float(pm.get("bid") or self.avg_cost.get(mkt, 0.0))
                     if bid <= 0:
                         continue
-                    fee = bid * (-inv) * self.fee_rate
+                    fee = leg_fee(bid, -inv, self.fee_rate)
                     self.cash -= bid * (-inv) + fee
-                    pnl = round((float(self.avg_cost.get(mkt, bid)) - bid) * (-inv)
-                                - fee, 4)
+                    pnl = round(unrealized_pnl(float(self.avg_cost.get(mkt, bid)),
+                                              bid, inv) - fee, 4)
                     self.realized_pnl += pnl
                     pnl_total += pnl
                     self._seq += 1
@@ -335,10 +336,7 @@ class VirtualBook:
                 pm = (price_map or {}).get(mkt) or {}
                 mid = float(pm.get("mid") or pm.get("ask") or pm.get("bid")
                             or avg)
-                if net > 0:
-                    u = (mid - avg) * net
-                else:
-                    u = (avg - mid) * (-net)
+                u = unrealized_pnl(avg, mid, net)
                 unreal += u
                 inv_view.append({
                     "mkt": mkt, "net": net,

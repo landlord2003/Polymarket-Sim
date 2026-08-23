@@ -163,6 +163,7 @@ from dashboard import (render_dashboard, render_stock_detail, render_portfolio)
 import kalshi
 import polymarket
 import arbitrage
+from core.config import CONFIG, save_config
 
 PORT = int(os.getenv("QT_WEB_PORT", "8787"))
 
@@ -777,6 +778,7 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
           <input id="btFee" type="range" min="0" max="0.1" step="0.001" value="0.01" oninput="document.getElementById('btFeeVal').textContent=(this.value*100).toFixed(2)+'%'" style="vertical-align:middle">
         </label>
         <span class="sub" style="color:#9fb0c0">拖动滑块后点「运行回测」按当前值跑；「参数扫描」对 半价差×费率 网格自动扫一遍</span>
+        <button class="ghost" onclick="saveBtConfig()">💾 存为默认</button>
       </div>
       <div id="btResult"></div>
     </div>
@@ -794,6 +796,27 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
   <div id="mainModalBox" class="mbox"></div>
 </div>
 <script>
+function initConfig(){
+  fetch('/api/get_config').then(function(r){return r.json();}).then(function(j){
+    if(!j.ok) return;
+    var c=j.config||{}, bt=c.backtest||{};
+    var hs=bt.half_spread||{}, fr=bt.fee_rate||{}, el;
+    el=document.getElementById('btHalf');
+    if(el&&hs.min!=null){el.min=hs.min;el.max=hs.max;el.step=hs.step;el.value=hs.default;var hv=document.getElementById('btHalfVal');if(hv)hv.textContent=(el.value*100).toFixed(2)+'%';}
+    el=document.getElementById('btFee');
+    if(el&&fr.min!=null){el.min=fr.min;el.max=fr.max;el.step=fr.step;el.value=fr.default;var fv=document.getElementById('btFeeVal');if(fv)fv.textContent=(el.value*100).toFixed(2)+'%';}
+    el=document.getElementById('btDays'); if(el&&bt.default_days!=null) el.value=bt.default_days;
+    el=document.getElementById('btEvery'); if(el&&bt.default_every_min!=null) el.value=bt.default_every_min;
+    el=document.getElementById('btSize'); if(el&&bt.default_size!=null) el.value=bt.default_size;
+  }).catch(function(){});
+}
+function saveBtConfig(){
+  var g=function(id){return document.getElementById(id);};
+  var hs={min:parseFloat(g('btHalf').min),max:parseFloat(g('btHalf').max),step:parseFloat(g('btHalf').step),default:parseFloat(g('btHalf').value)};
+  var fr={min:parseFloat(g('btFee').min),max:parseFloat(g('btFee').max),step:parseFloat(g('btFee').step),default:parseFloat(g('btFee').value)};
+  fetch('/api/set_config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({half_spread:hs,fee_rate:fr,default_days:parseInt(g('btDays').value),default_every_min:parseInt(g('btEvery').value),default_size:parseInt(g('btSize').value)})}).then(function(r){return r.json();}).then(function(j){if(window.setStatus)setStatus(j.ok?'回测默认已保存':'保存失败');}).catch(function(e){if(window.setStatus)setStatus('保存失败：'+e);});
+}
+window.addEventListener('DOMContentLoaded', initConfig);
 let lastFinished=null, lastMode='daily', nextAt=0, isRunning=false, isTrading=false;
 function scan(mode){
   lastMode=mode;
@@ -2188,11 +2211,16 @@ class Handler(BaseHTTPRequestHandler):
                         "application/json; charset=utf-8")
                     return
                 try:
-                    days = int((qs.get("days") or ["30"])[0])
-                    every = int((qs.get("every") or ["1440"])[0])
-                    size = int((qs.get("size") or ["100"])[0])
+                    days = int((qs.get("days") or
+                                [str(CONFIG["backtest"]["default_days"])])[0])
+                    every = int((qs.get("every") or
+                                 [str(CONFIG["backtest"]["default_every_min"])])[0])
+                    size = int((qs.get("size") or
+                                [str(CONFIG["backtest"]["default_size"])])[0])
                 except Exception:
-                    days, every, size = 30, 1440, 100
+                    days = CONFIG["backtest"]["default_days"]
+                    every = CONFIG["backtest"]["default_every_min"]
+                    size = CONFIG["backtest"]["default_size"]
                 kw = {}
                 try:
                     hv = (qs.get("half") or [None])[0]
@@ -2242,16 +2270,27 @@ class Handler(BaseHTTPRequestHandler):
                     every = int((qs.get("every") or ["1440"])[0])
                     size = int((qs.get("size") or ["100"])[0])
                 except Exception:
-                    days, every, size = 30, 1440, 100
+                    days = CONFIG["backtest"]["default_days"]
+                    every = CONFIG["backtest"]["default_every_min"]
+                    size = CONFIG["backtest"]["default_size"]
                 import arb_backtest as _abt
                 res = _abt.sweep_backtest(
                     mid, days=days, every_min=every, size=size,
                     half_spreads=_nums("halfs",
-                                       (0.002, 0.005, 0.01, 0.02, 0.03)),
+                                       tuple(CONFIG["backtest"]["sweep_half_spreads"])),
                     fee_rates=_nums("fees",
-                                    (0.0, 0.005, 0.01, 0.02, 0.03)))
+                                    tuple(CONFIG["backtest"]["sweep_fee_rates"])))
                 self._send(200, json.dumps(res, ensure_ascii=False,
                                            default=str),
+                           "application/json; charset=utf-8")
+            except Exception as e:  # noqa: BLE001
+                self._send(200, json.dumps({"ok": False, "msg": str(e)},
+                                           ensure_ascii=False),
+                           "application/json; charset=utf-8")
+        elif p.path == "/api/get_config":
+            try:
+                self._send(200, json.dumps({"ok": True, "config": CONFIG},
+                                           ensure_ascii=False),
                            "application/json; charset=utf-8")
             except Exception as e:  # noqa: BLE001
                 self._send(200, json.dumps({"ok": False, "msg": str(e)},
@@ -2411,6 +2450,39 @@ class Handler(BaseHTTPRequestHandler):
                                  daemon=True)
             t.start()
             self._send(200, json.dumps({"ok": True, "msg": "已启动扫描"}),
+                       "application/json; charset=utf-8")
+        elif p.path == "/api/set_config":
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                data = json.loads(raw.decode("utf-8") or "{}")
+            except Exception:
+                data = {}
+            bt = CONFIG.setdefault("backtest", {})
+            for k in ("default_days", "default_every_min", "default_size"):
+                if k in data:
+                    try:
+                        bt[k] = int(data[k])
+                    except Exception:
+                        pass
+            for k in ("sweep_half_spreads", "sweep_fee_rates"):
+                if k in data and isinstance(data[k], list):
+                    try:
+                        bt[k] = [float(x) for x in data[k]]
+                    except Exception:
+                        pass
+            for sec in ("half_spread", "fee_rate"):
+                if sec in data and isinstance(data[sec], dict):
+                    dst = bt.setdefault(sec, {})
+                    for sk in ("min", "max", "step", "default"):
+                        if sk in data[sec]:
+                            try:
+                                dst[sk] = float(data[sec][sk])
+                            except Exception:
+                                pass
+            ok = save_config(CONFIG)
+            self._send(200, json.dumps({"ok": ok, "config": CONFIG},
+                                       ensure_ascii=False),
                        "application/json; charset=utf-8")
         elif p.path == "/api/trade":
             length = int(self.headers.get("Content-Length", 0) or 0)
