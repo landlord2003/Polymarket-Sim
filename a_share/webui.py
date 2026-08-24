@@ -647,7 +647,8 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
   <button id="b2" onclick="scan('screener')">板块选股</button>
   <button id="b3" onclick="scan('both')">全部运行</button>
   <button id="bP" onclick="openPortfolio()">模拟仓</button>
-  <button class="ghost" onclick="openRecommend()">🤖 自动荐股</button>
+  <button class="ghost" onclick="openCrossPortfolio()">📊 跨资产</button>
+  <button class="ghost" onclick="toggleCollapse('recSec');loadRecommendOnce()">🤖 自动荐股</button>
   <button class="ghost" onclick="openBacktest()">📈 回测</button>
   <button class="ghost" onclick="toggleCryptoPanel()">🪙 加密行情</button>
   <button class="ghost" onclick="togglePolyPanel()">📊 事件概率</button>
@@ -792,6 +793,15 @@ iframe { width:100%; height:calc(100vh - 132px); border:none; background:#0f1419
 <div class="cpBody" id="boardSecBody">
 <iframe id="board" src="/api/board"></iframe>
 </div>
+<div class="secHead" id="recHead" onclick="toggleCollapse('recSec');loadRecommendOnce()">
+  <span class="ttl">🤖 自动荐股</span>
+  <span class="caret" id="recSecCaret">▾ 展开</span>
+</div>
+<div class="cpBody" id="recSecBody" style="display:none">
+  <div class="sub" id="recSub">点击「🤖 自动荐股」展开加载榜单…</div>
+  <button id="recRefresh" onclick="refreshRecommend()">刷新荐股（后台扫39只）</button>
+  <div id="recBody" style="margin-top:10px"></div>
+</div>
 <div id="mainModalMask" class="mask" onclick="if(event.target===this)closeMain()">
   <div id="mainModalBox" class="mbox"></div>
 </div>
@@ -908,6 +918,38 @@ function toggleCollapse(id){
   if(caret)caret.textContent=txt;
 }
 function openPortfolio(){document.getElementById('board').src='/api/portfolio';}
+function openCrossPortfolio(){
+  openMain('<button class="close" onclick="closeMain()">关闭</button>'
+    +'<h2>📊 跨资产总览（虚拟聚合）</h2>'
+    +'<div class="sub" id="crossSub">加载中…</div>'
+    +'<div id="crossBody" style="margin-top:10px"></div>');
+  fetch('/api/portfolio_cross').then(r=>r.json()).then(d=>renderCross(d)).catch(e=>{
+    document.getElementById('crossSub').textContent='加载失败：'+e;
+  });
+}
+function renderCross(d){
+  const sub=document.getElementById('crossSub');
+  if(!d.ok){ sub.textContent='加载失败：'+(d.msg||'未知'); return; }
+  sub.innerHTML='截至 '+d.as_of+' ｜ 总记账权益 <b>¥'+d.total_equity.toLocaleString()+'</b>';
+  const cur={CNY:'¥',USD:'$',USDT:'$'};
+  let rows='';
+  for(const k of ['ashare','polymarket','crypto']){
+    const c=d.classes[k]||{}; const w=d.weights[k]||0;
+    const curSym=cur[c.currency]||'';
+    const eq=c.equity!=null?curSym+c.equity.toLocaleString():'—';
+    let extra='';
+    if(k==='ashare') extra='持仓'+ (c.positions||0) +' / 盈亏'+ (c.pnl>=0?'+':'')+(c.pnl||0);
+    if(k==='polymarket') extra='未实现'+ (c.unrealized>=0?'+':'')+(c.unrealized||0)+' / 库存'+(c.inventory||0);
+    if(k==='crypto') extra=(c.note||('观察'+ (c.watch||0) +'只'));
+    const err=c.error?'<span style="color:#ef7a66">'+c.error+'</span>':'';
+    rows+='<tr><td>'+ (c.label||k) +'</td><td>'+curSym+'</td><td>'+eq+'</td><td>'+w+'%</td><td>'+extra+'</td></tr>';
+  }
+  document.getElementById('crossBody').innerHTML=
+    '<table style="width:100%;border-collapse:collapse;font-size:13px">'
+    +'<tr style="color:#9fb0c0;text-align:left"><th>资产类别</th><th>币种</th><th>记账权益</th><th>占比</th><th>明细</th></tr>'
+    +rows+'</table>'
+    +'<div class="sub" style="margin-top:8px">'+ (d.note||'') +'</div>';
+}
 function searchStock(){
   const v=document.getElementById('qSearch').value.trim();
   if(!v){setStatus('请输入代码或名称');return;}
@@ -1193,14 +1235,13 @@ function renderCryptoDetail(d){
     +'</div>'
     +'<div class="sub" style="margin-top:6px">图上蓝色阴影带=下一周期1σ统计区间（'+(fc.next_time||'')+'）；区间基于近24根K线对数收益1σ（'+(fc.sigma_pct!=null?fc.sigma_pct.toFixed(2):'-')+'%），含方向研判但<b>不构成投资建议</b>；加密资产波动剧烈，风险自担。</div>';
 }
-function openRecommend(){
-  openMain('<button class="close" onclick="closeMain()">关闭</button>'
-    +'<h2>🤖 横截面相对排名荐股（相对沪深300多空）</h2>'
-    +'<div class="sub" id="recSub">加载中…</div>'
-    +'<button id="recRefresh" onclick="refreshRecommend()">刷新荐股（后台扫39只）</button>'
-    +'<div id="recBody" style="margin-top:10px"></div>');
+let _recLoaded=false;
+function loadRecommendOnce(){
+  if(_recLoaded) return;
+  _recLoaded=true;
+  const sub=document.getElementById('recSub'); if(sub) sub.textContent='加载中…';
   fetch('/api/recommend').then(r=>r.json()).then(d=>renderRecommend(d)).catch(e=>{
-    document.getElementById('recSub').textContent='加载失败：'+e;
+    const s=document.getElementById('recSub'); if(s) s.textContent='加载失败：'+e;
   });
 }
 function renderRecommend(d){
@@ -1251,11 +1292,18 @@ function recRow(r,i){
     +'<td><b>'+(r.prob*100).toFixed(1)+'%</b></td>'
     +'<td>'+r.last.toFixed(2)+'</td>'
     +'<td class="'+c+'">'+sg+r.pct.toFixed(2)+'%</td>'
+    +'<td>'+recActions(r.symbol,r.name)+'</td>'
     +'</tr>';
+}
+function recActions(symbol,name){
+  const n=String(name==null?'':name).replace(/'/g,"\\'");
+  return '<button class="arbBtn" onclick="showDetail(\''+symbol+'\',\''+n+'\')">详情</button>'
+    +' <button class="arbBtn" onclick="showTrade(\''+symbol+'\',\''+n+'\')">📝买卖</button>'
+    +' <button class="arbBtn" onclick="addToWatchlist(\''+symbol+'\',\''+n+'\')">＋自选</button>';
 }
 function recTable(rows){
   return '<table style="width:100%;border-collapse:collapse;font-size:12px">'
-    +'<tr style="color:#9fb0c0;text-align:left"><th>#</th><th>代码</th><th>名称</th><th>板块</th><th>跑赢概率</th><th>最新价</th><th>今日</th></tr>'
+    +'<tr style="color:#9fb0c0;text-align:left"><th>#</th><th>代码</th><th>名称</th><th>板块</th><th>跑赢概率</th><th>最新价</th><th>今日</th><th>操作</th></tr>'
     +rows+'</table>';
 }
 function refreshRecommend(){
@@ -1650,6 +1698,7 @@ window.onload=()=>{
   document.getElementById('qSearch').addEventListener('keydown',function(e){if(e.key==='Enter')searchStock();});
 };
 </script>
+<script src="/static/stock_actions.js"></script>
 </body></html>"""
     return _html.replace("[[SECTORS]]", _sec_boxes)
 
@@ -2119,6 +2168,14 @@ class Handler(BaseHTTPRequestHandler):
                 res = arb_book.get_book().view()
             self._send(200, json.dumps(res, ensure_ascii=False, default=str),
                        "application/json; charset=utf-8")
+        elif p.path == "/api/portfolio_cross":
+            try:
+                import portfolio
+                res = portfolio.cross_summary()
+            except Exception as e:  # noqa: BLE001
+                res = {"ok": False, "msg": str(e)[:200]}
+            self._send(200, json.dumps(res, ensure_ascii=False, default=str),
+                       "application/json; charset=utf-8")
         elif p.path == "/api/arb_demo":
             self._send(200, json.dumps({"pairs": arbitrage.demo_pairs()},
                                        ensure_ascii=False, default=str),
@@ -2416,6 +2473,13 @@ class Handler(BaseHTTPRequestHandler):
                            "application/json; charset=utf-8")
         elif p.path == "/static/echarts.min.js":
             ep = os.path.join(HERE, "static", "echarts.min.js")
+            if os.path.exists(ep):
+                with open(ep, "rb") as _f:
+                    self._send(200, _f.read(), "application/javascript; charset=utf-8")
+            else:
+                self._send(404, "not found", "text/plain")
+        elif p.path == "/static/stock_actions.js":
+            ep = os.path.join(HERE, "static", "stock_actions.js")
             if os.path.exists(ep):
                 with open(ep, "rb") as _f:
                     self._send(200, _f.read(), "application/javascript; charset=utf-8")

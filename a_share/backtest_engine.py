@@ -37,6 +37,9 @@ import pandas as pd
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+# 费用模型走 core.strategy 的可插拔注册表（Phase 5），与旧内联公式逐字等价
+from core.strategy import get_fill_model
+
 # 默认 A 股交易成本（可在调用时覆盖）
 DEFAULTS = {
     "cash": 100_000.0,
@@ -89,41 +92,39 @@ def run_backtest(df: pd.DataFrame, signals: pd.Series, **kw) -> dict:
 
     def buy(bar, price):
         nonlocal cash, pos, entry_price, entry_bar, cur_trade
-        price *= (1 + p["slip"])
+        sprice, _ = get_fill_model("ashare")(price, 1, "buy", p)  # 仅取滑点后价
         affordable = cash * p["stake_pct"]
         # 扣佣金后取整手：max(成交额×万3, 5元)
-        per_share = price * (1 + p["commission"]) + 1e-9
+        per_share = sprice * (1 + p["commission"]) + 1e-9
         shares = int(affordable / per_share // p["lot"]) * p["lot"]
         if shares <= 0:
             return
-        cost = shares * price
-        comm = max(cost * p["commission"], p["min_commission"])
+        _, comm = get_fill_model("ashare")(sprice, shares, "buy", p)
+        cost = shares * sprice
         if cost + comm > cash:
             return
         cash -= (cost + comm)
         pos = shares
-        entry_price = price
+        entry_price = sprice
         entry_bar = bar
         cur_trade = {
             "entry_date": dates[bar], "entry_bar": bar,
-            "entry_price": round(price, 4), "qty": shares,
+            "entry_price": round(sprice, 4), "qty": shares,
             "reason": None,
         }
 
     def sell(bar, price, reason):
         nonlocal cash, pos, entry_price, entry_bar, cur_trade
-        price *= (1 - p["slip"])
+        sprice, comm = get_fill_model("ashare")(price, pos, "sell", p)
         if pos <= 0:
             return
-        proceeds = pos * price
-        comm = max(proceeds * p["commission"], p["min_commission"]) \
-            + proceeds * p["stamp_duty"]      # 印花税仅卖出
+        proceeds = pos * sprice
         cash += (proceeds - comm)
-        net_ret = (price - entry_price) / entry_price if entry_price > 0 else 0.0
+        net_ret = (sprice - entry_price) / entry_price if entry_price > 0 else 0.0
         if cur_trade is not None:
             cur_trade.update({
-                "exit_date": dates[bar], "exit_price": round(price, 4),
-                "ret": round(price / entry_price - 1, 4),
+                "exit_date": dates[bar], "exit_price": round(sprice, 4),
+                "ret": round(sprice / entry_price - 1, 4),
                 "net_ret": round(net_ret - (comm / (pos * entry_price)), 4),
                 "reason": reason,
             })

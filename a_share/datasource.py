@@ -793,3 +793,101 @@ if __name__ == "__main__":  # 自检
                   f"最新={df['close'].iloc[-1]:.2f} 日期={df.index[-1].date()}")
         except DataSourceError as e:
             print(f"  {s}: FAIL {e}")
+
+
+# ============================================================ 数据源适配器（Phase 4）
+# 把各类行情源统一成一份 DataSource 接口（fetch_quotes / fetch_history），
+# 运行时通过 REGISTRY 按名取用。新增数据源只需写一个子类并 register，
+# 上层（webui / 回测 / 信号）即可用 get_source(name) 透明切换，零改调用点。
+
+class DataSource:
+    """统一行情源接口。子类实现 fetch_quotes / fetch_history。"""
+
+    name: str = "base"
+    label: str = "基础源"
+
+    def fetch_quotes(self, *args, **kwargs):
+        raise NotImplementedError
+
+    def fetch_history(self, *args, **kwargs):
+        raise NotImplementedError
+
+
+REGISTRY: dict = {}
+
+
+def register(src: "DataSource") -> None:
+    REGISTRY[src.name] = src
+
+
+def get_source(name: str) -> Optional["DataSource"]:
+    return REGISTRY.get(name)
+
+
+def list_sources() -> list:
+    return [{"name": s.name, "label": s.label} for s in REGISTRY.values()]
+
+
+def get_quotes(source: str, **kwargs):
+    """统一行情入口：get_quotes('ashare', symbols=[...]) 等。"""
+    s = get_source(source)
+    if s is None:
+        raise DataSourceError(f"未知数据源: {source}（可用: {list(REGISTRY)}）")
+    return s.fetch_quotes(**kwargs)
+
+
+class AshareSource(DataSource):
+    name = "ashare"
+    label = "A股（腾讯/东财/新浪多源）"
+
+    def fetch_quotes(self, symbols=None, **kwargs):
+        from .datasource import fetch_realtime
+        return fetch_realtime(symbols or [])
+
+    def fetch_history(self, symbol, days=320, **kwargs):
+        from .datasource import fetch_kline
+        return fetch_kline(symbol, days=days)
+
+
+class KalshiSource(DataSource):
+    name = "kalshi"
+    label = "Kalshi 预测市场"
+
+    def fetch_quotes(self, limit=200, force=False, **kwargs):
+        import kalshi
+        return kalshi.fetch_quotes(limit=limit, force=force)
+
+    def fetch_history(self, *args, **kwargs):
+        raise NotImplementedError("Kalshi 暂不支持历史序列")
+
+
+class PolySource(DataSource):
+    name = "polymarket"
+    label = "Polymarket 预测市场"
+
+    def fetch_quotes(self, limit=300, force=False, **kwargs):
+        import polymarket
+        return polymarket.fetch_poly_quotes(limit=limit, force=force)
+
+    def fetch_history(self, token_id, interval="max", **kwargs):
+        import polymarket
+        return polymarket.fetch_price_history(token_id=token_id, interval=interval)
+
+
+class CryptoSource(DataSource):
+    name = "crypto"
+    label = "加密货币（Binance 公开域）"
+
+    def fetch_quotes(self, symbols=None, **kwargs):
+        from .datasource import fetch_crypto_quotes
+        return fetch_crypto_quotes(symbols)
+
+    def fetch_history(self, symbol="BTC/USDT", timeframe="1m", limit=200, **kwargs):
+        from .datasource import fetch_crypto_kline
+        return fetch_crypto_kline(symbol=symbol, timeframe=timeframe, limit=limit)
+
+
+register(AshareSource())
+register(KalshiSource())
+register(PolySource())
+register(CryptoSource())

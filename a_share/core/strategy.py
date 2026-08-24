@@ -67,3 +67,76 @@ def arb_avg_cost_on_buy(prev_avg: float, prev_qty: float,
 def portfolio_equity(cash: float, unrealized: float) -> float:
     """权益 = 现金 + 未实现盈亏（arb_book.view 口径）。"""
     return float(cash) + float(unrealized)
+
+
+# ====================================================== 可插拔费用模型（Phase 5）
+# 把「不同资产类别的撮合/费用规则」抽成可注册的 FillModel，
+# 运行时按名取用（get_fill_model）。新增资产类别的费用规则只写一处并注册，
+# 回测/模拟盘即可透明切换，消除散落的 if/else 与重复实现。
+#
+# FillModel 签名：fn(raw_price, qty, side, params) -> (fill_price, fee)
+#   - fill_price：含滑点后的实际成交价（买多付、卖少收）
+#   - fee：该笔总费用（含佣金/印花税/单边撮合费等，依规则而定）
+#   - side：'buy' / 'sell'
+
+_FILL_MODELS: dict = {}
+
+
+def register_fill_model(name: str, fn) -> None:
+    _FILL_MODELS[name] = fn
+
+
+def get_fill_model(name: str):
+    m = _FILL_MODELS.get(name)
+    if m is None:
+        raise KeyError(f"未知费用模型: {name}（可用: {list(_FILL_MODELS)}）")
+    return m
+
+
+def ashare_fill(raw_price: float, qty: float, side: str, params: dict):
+    """A股费用模型：佣金万3(单边, 最低5元) + 卖出印花税千1 + 滑点0.1%。
+
+    与 backtest_engine 原 buy/sell 内联公式逐字等价：
+      buy : fill = price*(1+slip);  fee = max(fill*qty*commission, min_commission)
+      sell: fill = price*(1-slip);  fee = max(fill*qty*commission, min_commission)
+                               + fill*qty*stamp_duty
+    """
+    p = params or {}
+    slip = p.get("slip", 0.001)
+    commission = p.get("commission", 0.0003)
+    min_commission = p.get("min_commission", 5.0)
+    stamp = p.get("stamp_duty", 0.0005)
+    if side == "buy":
+        fill = float(raw_price) * (1.0 + slip)
+        fee = max(fill * float(qty) * commission, min_commission)
+    else:
+        fill = float(raw_price) * (1.0 - slip)
+        fee = (max(fill * float(qty) * commission, min_commission)
+               + fill * float(qty) * stamp)
+    return float(fill), float(fee)
+
+
+def polymarket_fill(raw_price: float, qty: float, side: str, params: dict):
+    """Polymarket 单腿撮合费：成交额 × 费率（arb_book 口径，与 leg_fee 等价）。"""
+    p = params or {}
+    fee_rate = p.get("fee_rate", 0.01)
+    fill = float(raw_price)  # 预测市场按 mid 成交，无滑点
+    fee = fill * float(qty) * fee_rate
+    return fill, float(fee)
+
+
+def crypto_fill(raw_price: float, qty: float, side: str, params: dict):
+    """加密货币 maker/taker 费：默认 taker = 成交额 × 0.1%。"""
+    p = params or {}
+    taker = p.get("taker", 0.001)
+    maker = p.get("maker", 0.0008)
+    is_maker = bool(p.get("maker_only", False))
+    rate = maker if is_maker else taker
+    fill = float(raw_price)
+    fee = fill * float(qty) * rate
+    return fill, float(fee)
+
+
+register_fill_model("ashare", ashare_fill)
+register_fill_model("polymarket", polymarket_fill)
+register_fill_model("crypto", crypto_fill)
