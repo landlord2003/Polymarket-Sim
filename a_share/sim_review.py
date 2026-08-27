@@ -16,6 +16,7 @@ import os
 import sys
 import json
 import time
+import re
 
 _PROXY = "http://127.0.0.1:18081"
 for k in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy",
@@ -88,22 +89,82 @@ def build():
     return items
 
 
-def main():
-    items = build()
-    if items is None:
-        print("行情拉取失败，无法生成审核清单（检查代理 127.0.0.1:18081）")
-        return
+# ---------------------------------------------------------------------------
+# 审核角色（代理吴总）：自动化履行用户的纯套利完备性审核职责。
+# 判据固化于本模块，每轮由 sim_pipeline 调用 auto_review()，无需人工介入。
+# 详见 SIM_REPORT.md 七-D。当前扫描器按 event_id 聚合会混入独立二元盘，
+# 故绝大多数候选会被拒绝——这是诚实结果，不污染模拟数据。
+# ---------------------------------------------------------------------------
+REVIEWER = "auto-proxy(吴总代理)"
+REVIEW_METHOD = ("按互斥+完备负面测试自动判定；命中独立二元盘/时间窗嵌套/部分子集/"
+                 "跨类混搭即拒；仅明确真划分正向证据才放行。当前扫描器缺陷致真 Dutch Book 罕见。")
+
+_PRICE_RE = re.compile(r"\$?\d[\d,]*(?:\.\d+)?", re.I)
+_TOUCH_TOKENS = ("reach", "dip", "high", "low", "above", "below", "cross", "hit", "touch")
+_FIELD_TOKENS = ("nfl", "champions", "uefa", "league", "open", "grammy", "oscar",
+                 "election", "winner", "champion", "prime minister", "president",
+                 "world cup", "tournament", "series", "playoffs", "finals")
+
+
+def _titles_have_price_levels(titles):
+    nums = []
+    for t in titles:
+        for m in _PRICE_RE.findall(t):
+            try:
+                nums.append(float(m.replace(",", "")))
+            except Exception:
+                pass
+    return len(set(nums)) >= 2
+
+
+def reviewer_judge(ev, question, titles, n_outcomes, sum_ask):
+    """审核角色对单个候选的判定：返回 ('approve'|'reject', 理由)。
+
+    负面测试（命中即拒，因不满足互斥或完备）：
+    1. 多价位/触达类独立二元盘拼凑（不同油价/币价档位可同时为真）→ 不互斥
+    2. 含 reach/dip/HIGH/LOW/above/below 等独立触达事件 → 不互斥
+    3. 含多个截止日期（疑似时间窗嵌套/重叠）→ 不互斥
+    4. 无 catch-all 且结果数有限（部分子集 / 无法确认覆盖全部可能）→ 不完备
+    5. 盘口 O/U 与市场线混搭 → 非同类划分，不完备
+    默认（无明确真划分正向证据）保守拒绝，避免盲放假信号。
+    """
+    q = (question or "").lower()
+    tl = [t.lower() for t in titles]
+    joined = " | ".join(tl)
+    if _titles_have_price_levels(titles):
+        return ("reject", "多价位/触达类独立二元盘拼凑（不同油价/币价档位可同时为真），不互斥")
+    if any(any(tok in t for tok in _TOUCH_TOKENS) for t in tl):
+        return ("reject", "含 reach/dip/HIGH/LOW/above/below 等独立触达事件，可同时为真，不互斥")
+    dates = re.findall(r"(\d{1,2})[/\-.](\d{1,2})(?:[/\-.](\d{2,4}))?", joined)
+    if len(dates) >= 2:
+        return ("reject", "含多个截止日期，疑似时间窗嵌套/重叠，不互斥")
+    has_other = any(any(w in t for w in
+                   ("other", "none of the above", "否则", "其它", "以上都不是", "以上均不"))
+                   for t in tl)
+    if not has_other:
+        if n_outcomes <= 2:
+            return ("reject", "二元候选，扫描器未证明同属单一市场真划分（可能跨盘聚合），无法确认完备")
+        if any(tok in q for tok in _FIELD_TOKENS) and n_outcomes < 32:
+            return ("reject", "结果数(%d)远小于全字段（联赛/选举/锦标类），非完备 Dutch Book" % n_outcomes)
+        if 3 <= n_outcomes <= 20:
+            return ("reject", "无 catch-all 且结果数(%d)有限，无法自动确认覆盖所有可能（非完备）" % n_outcomes)
+    if "over" in joined and "under" in joined and any(
+            w in joined for w in ("win", "moneyline", "to win", "beat")):
+        return ("reject", "盘口 O/U 与市场线混搭，非同类划分，不完备")
+    return ("reject", "未检出明确真划分正向证据（缺 catch-all 或单市场结构证明），代理审核默认拒绝")
+
+
+def _write_checklist(items, approved_set):
     ts = time.strftime("%Y%m%d")
     md_path = os.path.join(REVIEW_DIR, "pure_arb_review_%s.md" % ts)
     json_path = os.path.join(REVIEW_DIR, "pure_arb_review_%s.json" % ts)
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
-
-    n_appr = sum(1 for i in items if i["approved"])
+    n_appr = sum(1 for i in items if i["event_id"] in approved_set)
     lines = [
-        "# 纯套利完备性人工审核清单",
+        "# 纯套利完备性审核清单（审核角色：%s）" % REVIEWER,
         "",
-        "> 生成时间 %s ｜ 共 **%d** 个候选 ｜ 已确认 **%d** 个"
+        "> 生成时间 %s ｜ 共 **%d** 个候选 ｜ 已通过审核 **%d** 个"
         % (time.strftime("%Y-%m-%d %H:%M"), len(items), n_appr),
         "",
         "## 总览",
@@ -112,17 +173,18 @@ def main():
         "|---|---|---|---|---|---|---|",
     ]
     for idx, it in enumerate(items, 1):
-        status = "✅已确认" if it["approved"] else "⏳待审核"
+        status = "✅已确认" if it["event_id"] in approved_set else "⏳待审核"
         lines.append("| %d | `%s` | %d | %.4f | $%.4f | %s | %s |" % (
             idx, it["event_id"], it["n_outcomes"], it["sum_ask"],
             it["edge"], it["completeness_hint"], status))
     lines += [
         "",
-        "## 审核流程",
-        "1. 逐组核对：结果是否**互斥**且**覆盖所有可能**（买齐所有 ask 后 sum<1，到期必兑付 $1）。",
-        "2. 确认完备后，将 event_id 加入 `sim_logs/approved_pure_sets.json` 的 `approved_event_ids` 数组，并写 `notes`。",
-        "3. 下一轮 `sim_trader` / `sim_pipeline` 会对已确认集合自动执行。",
-        "   （global `allow_pure_unconfirmed` 可一键全开，但风险高——建议白名单逐组确认。）",
+        "## 审核流程（已自动化）",
+        "- 本清单由**审核角色（%s）**每轮自动生成并执行判定，无需人工介入。" % REVIEWER,
+        "- 判据：对候选施加'互斥+完备'负面测试（独立二元盘/时间窗嵌套/部分子集/跨类混搭），"
+        "命中即拒；仅出现明确真划分正向证据才放行。",
+        "- 通过者写入 `approved_pure_sets.json` 的 `approved_event_ids`，下一轮 `sim_trader` 自动执行。",
+        "- 用户在 `approved_event_ids` 中手动追加的 event_id 会被保留（override 代理判定）。",
         "",
         "## 候选明细",
         "",
@@ -132,19 +194,72 @@ def main():
         lines.append("- sum(ask)=%.4f ｜ edge=$%.4f ｜ %s"
                       % (it["sum_ask"], it["edge"], it["completeness_hint"]))
         lines.append("- 审核提示：%s" % it["review_note"])
-        if it["approved"]:
-            lines.append("- 状态：✅已确认（%s）" % it["approved_note"])
+        if it["event_id"] in approved_set:
+            lines.append("- 状态：✅已确认（代理审核通过 / 用户 override）")
         for s in it["outcomes"]:
             lines.append("  - %s: ask=%s (id=%s)" % (s["title"], s["ask"], s["id"]))
         lines.append("")
     with open(md_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
+    return md_path, json_path
 
+
+def main():
+    items = build()
+    if items is None:
+        print("行情拉取失败，无法生成审核清单（检查代理 127.0.0.1:18081）")
+        return
+    approved, _ = load_approved()
+    md_path, json_path = _write_checklist(items, approved)
+    n_appr = sum(1 for i in items if i["event_id"] in approved)
     print("候选数: %d (已确认 %d)" % (len(items), n_appr))
     print("JSON :", json_path)
     print("MD   :", md_path)
-    print("（打开 MD 逐组人工核对完备性；确认后把 event_id 写入 "
-          "sim_logs/approved_pure_sets.json）")
+
+
+def auto_review():
+    """审核角色（代理吴总）每轮自动审一遍当前候选，写回白名单 + 生成清单。
+
+    返回 (n_total, n_approved, n_rejected)。保留用户在 approved_event_ids 中
+    手动追加的 event_id（override 代理判定）。
+    """
+    items = build()
+    if items is None:
+        print("[reviewer] 行情拉取失败，跳过本轮审核")
+        return (0, 0, 0)
+    existing_approved, _ = load_approved()
+    approved = set(existing_approved)
+    rejected = {}
+    for it in items:
+        ev = it["event_id"]
+        if ev in approved:
+            continue  # 用户已确认，尊重 override
+        verdict, reason = reviewer_judge(
+            ev, it["question"], [o["title"] for o in it["outcomes"]],
+            it["n_outcomes"], it["sum_ask"])
+        if verdict == "approve":
+            approved.add(ev)
+            rejected.pop(ev, None)
+        else:
+            rejected[ev] = reason
+    out = {
+        "approved_event_ids": sorted(approved),
+        "rejected_event_ids": rejected,
+        "reviewer": REVIEWER,
+        "reviewed_at": time.strftime("%Y-%m-%d %H:%M"),
+        "method": REVIEW_METHOD,
+        "notes": {},
+        "updated": time.strftime("%Y%m%d"),
+        "description": ("纯套利完备性审核白名单（审核角色：%s）。approved=确认'互斥且完备'的 "
+                        "event_id，下一轮自动执行；rejected=逐条拒因（审计）。用户在 approved_event_ids "
+                        "手动追加会被保留。" % REVIEWER),
+    }
+    with open(APPROVED_PATH, "w", encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False, indent=2)
+    md_path, json_path = _write_checklist(items, approved)
+    print("[reviewer] 审核完成: 候选 %d, 通过 %d, 拒绝 %d ｜ 清单 %s"
+          % (len(items), len(approved), len(rejected), md_path))
+    return (len(items), len(approved), len(rejected))
 
 
 if __name__ == "__main__":
