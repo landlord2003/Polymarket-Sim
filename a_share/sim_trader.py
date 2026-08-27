@@ -29,7 +29,7 @@ from polymarket import fetch_poly_quotes   # noqa: E402
 from arbitrage import scan_poly             # noqa: E402
 from sim_rigor import (                     # noqa: E402
     RigorVirtualBook, rigor_params_from_config,
-    depth_feasible, estimate_pure_fill,
+    depth_feasible, estimate_pure_fill, time_gate_ok,
 )
 
 DEFAULT_PARAMS = {
@@ -121,6 +121,27 @@ def run_once(params, book_path, run_id, logf, verbose=False, rigor=None):
                         "pnl": 0, "cash": book.view().get("cash")})
             if verbose:
                 print("  [MMx]  深度不足跳过: %s | %s" % (opp.get("question"), reason))
+            continue
+        # 时间衰减门控：距到期过近则跳过（无法安全完成建仓-对冲周期）
+        ok_time, reason_t = time_gate_ok(opp, rigor)
+        if not ok_time:
+            _log_trade(logf, run_id, "mm_skip_time", opp,
+                       {"ok": False, "msg": "时间门控跳过: " + reason_t,
+                        "pnl": 0, "cash": book.view().get("cash")})
+            if verbose:
+                print("  [MMt]  时间门控跳过: %s | %s" % (opp.get("question"), reason_t))
+            continue
+        # 单市场日成交上限：滚动窗口内累计成交额 + 本笔超上限则跳过
+        mkt = opp.get("buy_id")
+        notional = size * max(float(opp.get("buy_ask", 0)),
+                              float(opp.get("sell_bid", 0)))
+        ok_cap, reason_c = book.volume_gate_ok(mkt, notional)
+        if not ok_cap:
+            _log_trade(logf, run_id, "mm_skip_cap", opp,
+                       {"ok": False, "msg": "日上限跳过: " + reason_c,
+                        "pnl": 0, "cash": book.view().get("cash")})
+            if verbose:
+                print("  [MMc]  日上限跳过: %s | %s" % (opp.get("question"), reason_c))
             continue
         res = book.market_make(opp, size)
         _log_trade(logf, run_id, "mm", opp, res)

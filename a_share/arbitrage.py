@@ -74,6 +74,7 @@ def scan_poly_marketmaking(quotes, top_n=20, min_spread=_MIN_SPREAD,
             "confidence": 1.0,
             "question": q["question"],
             "event_id": q.get("event_id"),
+            "end_date": q.get("end_date"),   # 透传到期时间，供时间衰减门控
             "cur_inv": cur_inv,
             "liquidity": liq,
             "bid": bid, "ask": ask, "mid": round(mid, 4),

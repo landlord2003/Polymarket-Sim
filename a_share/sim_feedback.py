@@ -52,6 +52,7 @@ def analyze(rows):
     mm_pnl = 0.0
     mm_slip_cost = 0.0      # 走簿滑点总成本（size * slip/unit）
     mm_losses = 0           # 严谨度下单笔净亏的做市笔数（真实胜率分母修正）
+    mm_skip_depth = mm_skip_time = mm_skip_cap = 0  # 各类门控跳过的笔数
     pure_exec = pure_ok = 0
     pure_pnl = 0.0
     pure_cand = pure_cand_edge = 0
@@ -70,7 +71,11 @@ def analyze(rows):
             if pnl < 0:
                 mm_losses += 1
         elif k == "mm_skip_depth":
-            pass  # 深度不足跳过，不计入成交/胜率
+            mm_skip_depth += 1   # 深度不足跳过，不计入成交/胜率
+        elif k == "mm_skip_time":
+            mm_skip_time += 1    # 时间衰减门控跳过
+        elif k == "mm_skip_cap":
+            mm_skip_cap += 1     # 单市场日成交上限跳过
         elif k == "pure":
             pure_exec += 1
             if r.get("ok"):
@@ -93,6 +98,9 @@ def analyze(rows):
             "loss_trades": mm_losses,
             "net_win_rate": round((mm_ok - mm_losses) / mm_exec, 3)
                            if mm_exec else 0,
+            "skips": {
+                "depth": mm_skip_depth, "time": mm_skip_time, "cap": mm_skip_cap,
+            },
         },
         "pure_executed": {"executed": pure_exec, "ok": pure_ok,
                           "pnl": round(pure_pnl, 2)},
@@ -111,6 +119,12 @@ def suggest(a, params):
     new = dict(params)
     pc = a["pure_candidates"]
     mm = a["mm"]
+    sk = mm.get("skips", {})
+    if (sk.get("time", 0) + sk.get("cap", 0) + sk.get("depth", 0)) > 0:
+        notes.append(
+            "门控触发：深度跳过 %d 笔、时间衰减门控跳过 %d 笔、单市场日上限跳过 %d 笔"
+            "——严谨度模型在主动过滤不可执行/过度暴露的机会。" % (
+                sk.get("depth", 0), sk.get("time", 0), sk.get("cap", 0)))
     if pc["count"] > 0:
         notes.append(
             "纯套利候选 %d 个（平均 edge=%.4f，平均成交率 %.0f%%，残余库存 %d 份）。"

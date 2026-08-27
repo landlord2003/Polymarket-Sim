@@ -28,6 +28,13 @@ DEFAULT_RIGOR = {
     "adverse_frac": 0.30,    # 对冲基准价不利漂移占价差比例
     "min_depth_ratio": 0.10, # 单笔成交额 <= liquidity*该比例 才可行
     "slip_cap_warn": 0.004,  # 单腿滑点(每单位)超过该值告警
+    # ---- 时间衰减门控 ----
+    "min_time_to_settle_h": 6.0,   # 距到期不足该小时数则硬门控跳过（无法安全完成建仓-对冲）
+    "time_decay_ref_h": 72.0,      # 时间衰减参考窗口：ttm>=该值时不额外惩罚
+    "time_decay_max": 0.20,        # ttm==min 时对对冲基准价的额外不利漂移上限（占价差）
+    # ---- 单市场日成交上限 ----
+    "daily_cap_notional": 500.0,   # 单市场每 daily_cap_window_h 小时内累计成交额上限(USD)
+    "daily_cap_window_h": 24.0,    # 日成交窗口（滚动）
 }
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -110,6 +117,65 @@ def estimate_pure_fill(subs, size, event_liq, rigor):
     return fill_ratio, (worst[0] if worst else 0.0), residual, residual_cost
 
 
+def parse_end_date(ed):
+    """Polymarket 到期时间(ISO, 可能含 Z) -> epoch 秒；解析失败返回 None。"""
+    if not ed:
+        return None
+    s = str(ed).replace("Z", "+00:00")
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return None
+
+
+def time_to_settle_hours(opp):
+    """距到期的小时数；无到期时间返回 None。"""
+    ts = parse_end_date(opp.get("end_date"))
+    if ts is None:
+        return None
+    return (ts - time.time()) / 3600.0
+
+
+def time_gate_ok(opp, rigor):
+    """时间衰减硬门控：距到期 < min_time_to_settle_h 则跳过（无法安全完成建仓-对冲）。
+
+    返回 (ok, reason)。无到期时间时不门控（保守放行，仅记录）。
+    """
+    ttm = time_to_settle_hours(opp)
+    if ttm is None:
+        return True, "无到期时间(不门控)"
+    mn = float(rigor.get("min_time_to_settle_h", 0) or 0)
+    if mn > 0 and ttm < mn:
+        return False, ("距到期仅 %.1f 小时(< %.1f)，无法安全完成建仓-对冲周期"
+                       % (ttm, mn))
+    return True, ""
+
+
+def time_decay_penalty(ttm, rigor):
+    """时间衰减惩罚：对冲基准价的额外不利漂移占价差比例。
+
+    ttm>=time_decay_ref_h -> 0；ttm==min_time_to_settle_h -> time_decay_max；
+    之间线性插值。用于随到期临近逐步压薄可锁利润（真实时间风险）。
+    """
+    if ttm is None:
+        return 0.0
+    mn = float(rigor.get("min_time_to_settle_h", 0) or 0)
+    ref = float(rigor.get("time_decay_ref_h", 72) or 72)
+    mx = float(rigor.get("time_decay_max", 0) or 0)
+    if mx <= 0 or ttm >= ref:
+        return 0.0
+    if ttm <= mn:
+        return mx
+    if ref <= mn:
+        return mx
+    frac = (ref - ttm) / (ref - mn)
+    return mx * max(0.0, min(1.0, frac))
+
+
 # =====================================================================
 # RigorVirtualBook：在 VirtualBook 之上叠加真实摩擦（仅模拟盘使用）
 # =====================================================================
@@ -127,6 +193,54 @@ class RigorVirtualBook(VirtualBook):
         super().__init__(path or os.path.join(_HERE, "sim_book_poly.json"),
                          bankroll)
         self.rigor = rigor or rigor_params_from_config()
+        # 单市场日成交上限状态（独立 JSON 持久化，跨轮次累积；不污染 webui 账本）
+        self.daily_caps_path = os.path.join(_HERE, "sim_daily_caps.json")
+        self.daily_caps = self._load_caps()
+
+    # ---------- 单市场日成交上限（独立持久化） ----------
+    def _load_caps(self):
+        try:
+            with open(self.daily_caps_path, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_caps(self):
+        try:
+            with open(self.daily_caps_path, "w", encoding="utf-8") as f:
+                json.dump(self.daily_caps, f)
+        except Exception:
+            pass
+
+    def _prune_caps(self, mkt, window_h):
+        now = time.time()
+        cutoff = now - window_h * 3600
+        self.daily_caps[mkt] = [
+            (ts, nt) for (ts, nt) in self.daily_caps.get(mkt, [])
+            if ts >= cutoff
+        ]
+
+    def _record_volume(self, mkt, notional):
+        window = float(self.rigor.get("daily_cap_window_h", 24) or 24)
+        self._prune_caps(mkt, window)
+        self.daily_caps.setdefault(mkt, []).append((time.time(), float(notional)))
+        self._save_caps()
+
+    def _market_daily_volume(self, mkt):
+        window = float(self.rigor.get("daily_cap_window_h", 24) or 24)
+        self._prune_caps(mkt, window)
+        return sum(nt for _, nt in self.daily_caps.get(mkt, []))
+
+    def volume_gate_ok(self, mkt, notional):
+        """单市场滚动窗口内累计成交额 + 本笔是否超 daily_cap_notional。"""
+        cap = float(self.rigor.get("daily_cap_notional", 0) or 0)
+        if cap <= 0:
+            return True, ""
+        vol = self._market_daily_volume(mkt)
+        if vol + notional > cap:
+            return False, ("单市场日内成交 $%.2f + 本笔 $%.2f 超上限 $%.2f"
+                           % (vol, notional, cap))
+        return True, ""
 
     # ---------- 单边做市（带滑点 + 对冲漂移） ----------
     def market_make(self, opp, size_shares, max_skew=None):
@@ -144,6 +258,9 @@ class RigorVirtualBook(VirtualBook):
         q = opp.get("question", "")
         spread = ask - bid
         adverse = float(self.rigor.get("adverse_frac", 0.30))
+        # 时间衰减：距到期越近，对冲基准价额外不利漂移越大（真实时间风险）
+        ttm = time_to_settle_hours(opp)
+        extra = time_decay_penalty(ttm, self.rigor) if ttm is not None else 0.0
         with self.lock:
             inv = int(self.inventory.get(mkt, 0))
             side = "sell" if inv > 0 else "buy"
@@ -173,11 +290,12 @@ class RigorVirtualBook(VirtualBook):
                     "fee": round(fee, 4), "slip": round(slip, 4),
                     "tiers": tiers, "cash_after": round(self.cash, 2),
                 })
+                self._record_volume(mkt, avg_fill * size)
                 pnl = 0.0
                 msg = ("建多仓(滑点%.4f/单位,%d档): 买@%.4f×%d，净库存%d（未锁利）"
                        % (slip, tiers, avg_fill, size, self.inventory[mkt]))
             else:
-                hedge_base = ask - adverse * spread
+                hedge_base = ask - (adverse + extra) * spread
                 avg_fill, _, slip, tiers = model_fill("sell", hedge_base, size,
                                                       liq, self.rigor)
                 fee = leg_fee(avg_fill, size, self.fee_rate)
@@ -206,6 +324,7 @@ class RigorVirtualBook(VirtualBook):
                     "fee": round(fee, 4), "slip": round(slip, 4),
                     "tiers": tiers, "cash_after": round(self.cash, 2),
                 })
+            self._record_volume(mkt, avg_fill * size)
             self._save()
             return {"ok": True, "msg": msg, "pnl": pnl,
                     "cash": round(self.cash, 2), "pid": pid, "side": side,
