@@ -28,6 +28,9 @@ output/*.html
 .DS_Store
 Thumbs.db
 
+# WorkBuddy 会话数据（本地，不入库）
+.workbuddy/
+
 # 模拟交易账本（运行时状态，含测试成交，不入库）
 a_share/sim_book.json
 a_share/arb_book.json
