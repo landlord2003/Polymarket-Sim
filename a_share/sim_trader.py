@@ -50,6 +50,19 @@ os.makedirs(LOG_DIR, exist_ok=True)
 # 独立账本，避免污染 webui 的 arb_book.json
 DEFAULT_BOOK = os.path.join(_HERE, "sim_book_poly.json")
 
+# 纯套利完备性白名单：经人工审核确认"互斥且完备"的 event_id 集合。
+# 命中白名单的候选即便全局 allow_pure_unconfirmed=False 也视为已确认、允许自动执行。
+APPROVED_PURE_PATH = os.path.join(LOG_DIR, "approved_pure_sets.json")
+
+
+def load_approved_pure_sets():
+    try:
+        with open(APPROVED_PURE_PATH, encoding="utf-8") as f:
+            d = json.load(f)
+        return set(d.get("approved_event_ids", []))
+    except (FileNotFoundError, ValueError):
+        return set()
+
 
 def _log_trade(f, run_id, kind, opp, res, extra=None):
     rec = {
@@ -88,6 +101,7 @@ def run_once(params, book_path, run_id, logf, verbose=False, rigor=None):
     n_pure = len(scanned["pure_arb"])
     n_mm = len(scanned["marketmaking"])
     n_ev = len(scanned["event_arb"])
+    approved_pure = load_approved_pure_sets()
     executed = 0
     for opp in scanned["pure_arb"][:params["pure_max_per_run"]]:
         # 纯套利：记录腿风险估计（即便未执行），供反馈迭代评估候选质量
@@ -95,12 +109,18 @@ def run_once(params, book_path, run_id, logf, verbose=False, rigor=None):
             opp.get("submarkets", []),
             opp.get("size_hint", params["default_size"]),
             opp.get("liquidity", 0), rigor)
-        if opp.get("need_confirm") and not params.get("allow_pure_unconfirmed"):
+        # 完备性确认判定：① 无需确认；② 全局开关放开；③ event_id 命中人工白名单
+        ev = opp.get("event_id")
+        confirmed = (not opp.get("need_confirm")) \
+            or params.get("allow_pure_unconfirmed") \
+            or (ev in approved_pure)
+        if opp.get("need_confirm") and not confirmed:
             _log_trade(logf, run_id, "pure_candidate", opp,
-                       {"ok": False, "msg": "完备性待确认，未自动执行",
-                        "pnl": 0, "cash": book.view().get("cash")},
+                       {"ok": False, "msg": "完备性待确认，未自动执行 (event_id=%s)"
+                        % ev, "pnl": 0, "cash": book.view().get("cash")},
                        extra={"fill_ratio": round(fr, 3),
-                              "residual": residual, "residual_cost": round(rc, 2)})
+                              "residual": residual, "residual_cost": round(rc, 2),
+                              "approved": False})
             if verbose:
                 print("  [PURE?] 候选(待确认): %s | edge=$%.4f | 成交率%.0f%% 残余%d"
                       % (opp.get("question"), opp.get("edge"), fr * 100, residual))
