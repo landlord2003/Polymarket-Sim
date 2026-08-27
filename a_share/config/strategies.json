@@ -37,5 +37,12 @@
   "a_share_sim": {
     "init_cash": 100000.0,
     "lot": 100
+  },
+  "sim_rigor": {
+    "depth_frac": 0.01,
+    "tick": 0.002,
+    "adverse_frac": 0.30,
+    "min_depth_ratio": 0.10,
+    "slip_cap_warn": 0.004
   }
 }

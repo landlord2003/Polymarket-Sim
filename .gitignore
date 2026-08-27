@@ -31,6 +31,9 @@ Thumbs.db
 # 模拟交易账本（运行时状态，含测试成交，不入库）
 a_share/sim_book.json
 a_share/arb_book.json
+# Polymarket 模拟盘账本与日志（运行时状态，不入库）
+a_share/sim_book_poly.json
+a_share/sim_logs/
 
 # 信号持久化状态（每日重算生成，含 as_of 时间戳，不入库）
 a_share/signal_state.json

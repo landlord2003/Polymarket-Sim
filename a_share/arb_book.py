@@ -136,6 +136,62 @@ class VirtualBook:
                 "positions": ["L%d" % base, "S%d" % base],
             }
 
+    def pure_arb(self, opp, size_shares, fee_rate=None):
+        """同事件多结果完备集 Dutch Book（模拟，数学无方向性风险）。
+
+        买齐 opp["submarkets"] 中所有结果的 YES ask，成本 = sum(ask)*size + 双侧手续费；
+        结局互斥且完备时到期必有一个结果兑付 $1/份额，净锁定 1 - sum(ask) - 费用。
+        因到期确定兑付，立即记入已实现盈亏（等价锁定，不引入未实现波动）。
+        opp 来自 arbitrage.scan_poly_pure_arb。
+        """
+        size = int(size_shares)
+        if size < 1:
+            return {"ok": False, "msg": "份额必须 >= 1"}
+        if fee_rate is None:
+            fee_rate = self.fee_rate
+        subs = opp.get("submarkets") or []
+        if len(subs) < 2:
+            return {"ok": False, "msg": "结果数 < 2，非完备集"}
+        try:
+            total_ask = sum(float(s["ask"]) for s in subs)
+        except (TypeError, ValueError, KeyError):
+            return {"ok": False, "msg": "子市场盘口缺失"}
+        if total_ask >= 1:
+            return {"ok": False, "msg": "买齐成本 >= 1，无套利空间"}
+        cost = total_ask * size
+        fee_total = cost * fee_rate
+        total_cost = cost + fee_total
+        if total_cost > self.cash:
+            return {"ok": False, "msg": "虚拟本金不足（需 $%.2f，余 $%.2f）"
+                    % (total_cost, self.cash)}
+        gross = 1.0 * size
+        redeem_fee = gross * fee_rate
+        pnl = round(gross - total_cost - redeem_fee, 4)
+        if pnl <= 0:
+            return {"ok": False, "msg": "扣除费用后无正收益，跳过"}
+        with self.lock:
+            self._seq += 1
+            pid = "P%d" % self._seq
+            ts = time.time()
+            self.cash += pnl
+            self.realized_pnl += pnl
+            self.positions.append({
+                "pid": pid, "kind": "pure_arb_multi",
+                "event_id": opp.get("event_id"),
+                "venue": "poly", "question": opp.get("question", ""),
+                "submarkets": subs, "size": size,
+                "cost": round(total_cost, 4), "sum_ask": round(total_ask, 4),
+                "payoff": round(gross, 4), "pnl": pnl,
+                "ts": ts, "cash_after": round(self.cash, 2),
+            })
+            self._save()
+            return {
+                "ok": True,
+                "msg": "买齐 %d 结果锁利：成本 $%.2f，到期兑付 $%.2f，锁定 $%.2f"
+                       % (len(subs), total_cost, gross, pnl),
+                "pnl": pnl, "cash": round(self.cash, 2), "pid": pid,
+            }
+
     def market_make(self, opp, size_shares, max_skew=None):
         """模拟做市（单边成交 + 自动反向对冲，库存偏斜受控）。
 
