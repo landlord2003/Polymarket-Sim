@@ -1,7 +1,7 @@
 # Polymarket 模拟盘运行报告（真实市场数据 · 虚拟资金）
 
 > 生成时间：2026-08-28 ｜ 数据：Polymarket Gamma 实时行情 ｜ 资金：虚拟 $10,000（绝不触碰真实下单/钱包）
-> 状态：**实盘化严谨度建模（Task #66）已接入自动化**；**时间衰减门控 + 单市场日成交上限（Task #71）已接入**；**Phase 6 自动流水线 sim_pipeline.py + 钉钉推送（Task #73）已完成**；**纯套利完备性人工审核流程（Task #75）已落地**（白名单机制接入门控）；当前为模拟层稳定期累积中（Task #78，靠 6h 自动化自动拉长周期）。
+> 状态：**实盘化严谨度建模（Task #66）已接入自动化**；**时间衰减门控 + 单市场日成交上限（Task #71）已接入**；**Phase 6 自动流水线 sim_pipeline.py + 钉钉推送（Task #73）已完成**；**纯套利完备性审核流程（审核角色自动化，Task #75）已落地**（白名单机制接入门控）；**每轮运行报告自动提交 git**（流水线末尾刷新实时表 + commit）；当前为模拟层稳定期累积中（Task #78，靠 6h 自动化自动拉长周期）。
 
 ## 一、目标对齐
 - **终点**：由你拍板是否实盘（USDC/加密类市场）。
@@ -36,18 +36,21 @@
 > 真实 CLOB `/book` 深度在本环境被地域限制 404，故用 `liquidity` 推导**合成深度曲线**（模拟假设，可调）。参数全部外置到 `config/strategies.json`。
 
 ## 五、严谨度模型 + 门控下的运行结果（最新实时）
-截至 2026-08-28 07:17（方法论版本 v20260828_071717，累计 170+250 条逐笔记录 / 60 笔做市执行）：
+<!-- LIVE_DATA_START -->
+截至 2026-08-28 07:44（方法论版本 v20260828_074410，自动刷新）：
 | 指标 | 数值 | 说明 |
 |---|---|---|
-| 虚拟本金（账面现金） | **$10,024.41** | 相对初始 $10,000 已累积（含未实现持仓市值更高） |
-| MM 累计实现盈亏 | **$158.05** | 含滑点/漂移后真实口径，样本 60 笔 |
-| MM 胜率 / 净胜率 | 100% / 100% | 0 亏损笔；但见下方稳定性警示 |
+| 虚拟本金（账面现金） | **$10044.61** | 相对初始 $10,000 累积（含未实现持仓市值更高） |
+| MM 累计实现盈亏 | **$184.41** | 含滑点/漂移后真实口径 |
+| MM 胜率 / 净胜率 | 100% / 100% | 0 亏损笔（结构性，见下方警示） |
 | 累计滑点成本 | $0.90 | 薄市场走簿产生 |
 | **门控跳过 — 深度** | 0 笔 | 深度门槛（市场流动性充足） |
-| **门控跳过 — 时间衰减** | 70 笔（↑自 30） | `min_time_to_settle_h=6h` 临近结算硬门控，随运行累积近倍增至 70 笔 |
-| **门控跳过 — 单市场日上限** | 5 笔 | `daily_cap_notional=$500/24h` 滚动窗口，稳定命中 |
-| 纯套利候选 | 135 个（今日清单 17 个） | 平均 edge $0.8519，成交率 100%，**全部 need_confirm** |
-| 纯套利残余库存 | 15 份 | fill_ratio 0.998，最薄腿未完全成交 → 腿风险实证信号 |
+| **门控跳过 — 时间衰减** | 72 笔 | `min_time_to_settle_h=6h` 临近结算硬门控 |
+| **门控跳过 — 单市场日上限** | 5 笔 | `daily_cap_notional=$500/24h` 滚动窗口 |
+| 纯套利候选 | 145 个 | 平均 edge 0.8518，成交率 100%，**全部待审核角色判定** |
+| 纯套利残余库存 | - 份 | 腿风险实证信号 |
+| 累计逐笔记录 / 做市执行 | 0 / 68 | 本轮截至自动刷新时刻 |
+<!-- LIVE_DATA_END -->
 
 - **核心结论**：严谨度模型 + 双门控把"看起来稳赚"的机会做了诚实过滤——时间衰减门控随本轮加速 10 轮已跳过 **70 笔**（较本轮初 +40，证明它在随市场临近结算持续加力保护）；单市场日上限稳定命中 5 笔。这是 MVP 100% 胜率高估的**进一步修正**。
 - ⚠️ **100% 胜率是结构性而非样本偏差**：本模拟盘利润由 `RigorVirtualBook` 的均值回归/价差捕获假设驱动，在"门控放行子集"（高流动性、远离结算）内**按构造近 100% 盈利**。真正的稳健性信号是**门控在主动过滤风险**（时间衰减 70 笔、日上限 5 笔）+ **残余库存已现**（15 份）。实盘结论仍需更长周期的多时段/多流动性覆盖。
@@ -110,19 +113,21 @@
 - 同一逻辑对 `sim_pipeline`（含钉钉推送）自动生效——白名单数量会出现在报告"纯套利候选"备注里。
 - 安全护栏：绝不提供"一键全开"隐式默认；`allow_pure_unconfirmed` 默认 `False`，仅白名单逐项放行。
 
-**4) 当前状态**：白名单已建并逐组审核——今日 17 个候选经研判**全部为假 Dutch Book**（不完备/不互斥/跨市场拼凑），`approved_event_ids` 保持空，`rejected_event_ids` 存逐条拒因（见 `approved_pure_sets.json`）。由此暴露扫描器固有缺陷：按 `event_id` 聚合会混入独立二元盘，须改扫描器才可能产生真套利（详见第五节 🔴 注记）。未确认前纯套利始终 0 执行。
+**4) 当前状态 — 审核角色（代理吴总）已自动化**：你明确表示无暇人工逐组审核，故将审核权委托给**固化在 `sim_review.py` 的"审核角色（auto-proxy / 吴总代理）"**——判据（`reviewer_judge`）对候选施加"互斥+完备"负面测试（独立二元盘拼凑 / 时间窗嵌套 / 部分子集 / 跨类混搭），命中即拒；仅出现明确真划分正向证据才放行。该角色由 `sim_pipeline` 每轮自动调用 `auto_review()`：重新扫候选 → 判决 → 写回 `approved_pure_sets.json`（含 `rejected_event_ids` 逐条拒因审计）+ 刷新 `pure_arb_review_*.md` 清单。**用户在 `approved_event_ids` 手动追加的 event_id 会被保留（override 代理判定）**，下一轮即自动执行。
+
+- 今日 17 个候选经该角色研判**全部为假 Dutch Book**（不完备/不互斥/跨市场拼凑），`approved_event_ids` 保持空，`rejected_event_ids` 存逐条拒因（见 `approved_pure_sets.json`）。由此暴露**扫描器固有缺陷**（单开任务跟踪，见第十节 ④）：按 `event_id` 聚合会混入独立二元盘，须改扫描器才可能产生真套利。未确认前纯套利始终 0 执行。
 
 ### 七-E、反馈迭代机制（sim_feedback.py + sim_pipeline.py · 如何建立 / 如何迭代）
 **1) 数据来源（闭环起点）**：`sim_trader.run_once` 每成交/跳过一笔都写一条结构化 JSONL 到 `sim_logs/trades_YYYYMMDD.jsonl`（`kind` ∈ `mm`/`pure`/`pure_candidate`/`mm_skip_depth`/`mm_skip_time`/`mm_skip_cap`，含 `pnl`/`slip`/`fill_ratio`/`residual`/`msg` 等）。这是反馈机制的"原料"。
 
 **2) 反馈分析（`sim_feedback.py`）**——`load_trades()` 读当日全量 JSONL → `analyze()` 统计：做市执行/胜率/净胜率/滑点成本/亏损笔数、三类门控跳过计数、纯套利已执行/候选数/平均 edge/平均成交率/残余库存 → `suggest()` 按规则生成自然语言建议 + `proposed_params`（与当前配置同源的独立副本，避免触发网络导入）。每次运行 `main()` 把 `{methodology_version, analysis, suggestions, proposed_params}` **追加**进 `sim_logs/feedback_YYYYMMDD.json`（同文件多版本数组 = 方法论演进轨迹）。
 
-**3) 流水线串联（`sim_pipeline.py`，Phase 6）**：`run_pipeline(runs)` = 跑 N 轮 `sim_trader.run_once` → 写 `summary_*.json` → 调 `sim_feedback.main()` → 读最新 feedback → `build_markdown` 组装钉钉报告 → 按需 `notify.send_markdown` 推送。一条命令完成"跑→记→析→推"。
+**3) 流水线串联（`sim_pipeline.py`，Phase 6）**：`run_pipeline(runs)` = 跑 N 轮 `sim_trader.run_once` → 写 `summary_*.json` → 调 `sim_feedback.main()` → **调 `sim_review.auto_review()`（审核角色自动审纯套利完备性）** → 读最新 feedback → 刷新 `SIM_REPORT.md` 实时表 → `git` 自动提交运行报告 → `build_markdown` 组装钉钉报告 → 按需 `notify.send_markdown` 推送。一条命令完成"跑→记→析→审→刷新→提交→推"。
 
 **4) 迭代如何完成（闭环）**：
-- **自动层（每 6h 自动化）**：`sim_pipeline.py --runs 1 --push-dingtalk` 周期触发 → 新行情/新成交追加 → 新 feedback 版本生成 → 钉钉推送建议。门控跳过数与候选数是**实时监控指标**，异常会自动出现在建议里。
+- **自动层（每 6h 自动化）**：`sim_pipeline.py --runs 1 --push-dingtalk` 周期触发 → 新行情/新成交追加 → 新 feedback 版本生成 → **审核角色自动刷新白名单** → **报告实时表自动刷新并提交 git** → 钉钉推送建议。门控跳过数与候选数是**实时监控指标**，异常自动出现在建议里。
 - **人工层（你/AI 调参）**：读 feedback 的 `suggestions` + `proposed_params`，若认可则改 `config/strategies.json`（如调 `mm_min_spread`/`min_liquidity`/`daily_cap_notional`/时间衰减曲线）→ 下一轮自动化即用新参数，feedback 下一版本反映变化 → 形成"数据→反馈→调参→再数据"的迭代环。
-- **关键设计**：`sim_feedback` 不自动改参数（只建议），避免无监督漂移；所有调参显式、可追溯（feedback 文件保留每日全版本）。纯套利 `proposed_params` 仅含 `pure_buffer` 微调用途提示，完备性仍须人工白名单放行。
+- **关键设计**：`sim_feedback` 不自动改参数（只建议），避免无监督漂移；所有调参显式、可追溯（feedback 文件保留每日全版本）。纯套利 `proposed_params` 仅含 `pure_buffer` 微调用途提示，完备性由**审核角色**每轮自动白名单放行（你仍可在 `approved_event_ids` 手动 override）。
 
 ## 八、文件清单
 - `a_share/sim_rigor.py` — 严谨度模型 + `RigorVirtualBook` + **Task #71 时间衰减/日上限门控与持久化**
@@ -144,7 +149,8 @@
 - 已建自动化「Polymarket 模拟盘自动交易+反馈」（每 6 小时）：现改跑 `sim_pipeline.py --runs 1 --push-dingtalk`，**先检测代理 127.0.0.1:18081 连通性，不通则跳过**，通则跑流水线并推钉钉。
 - 你将在手机钉钉周期性收到：MM 盈亏 / 胜率 / 滑点 / 门控跳过数 / 纯套利候选数 / 方法论版本。
 - 依赖代理常驻；代理宕时运行会跳过（不报错、不污染数据）。
+- **每轮自动提交运行报告**：流水线末尾自动刷新 `SIM_REPORT.md` 第五节实时表（锚点 `LIVE_DATA_START/END`），并将 `SIM_REPORT.md` + `sim_daily_caps.json` 提交到 git（best-effort push）。注：`sim_logs/`、`sim_book_poly.json` 已被 `.gitignore` 忽略（运行时态不入库），故"运行报告"以 `SIM_REPORT.md` 为准，每轮在 git 历史留下快照。
 
 ## 十、风险与下一步
-- ⚠️ 当前 100% 胜率为"高流动性样本 + 模拟摩擦 + 门控放行子集"下的**结构性结果**（非样本偏差），**不可直接外推实盘**；真正的稳健性信号是门控在主动过滤（时间衰减 30 笔 / 日上限 5 笔）与残余库存（15 份）已现。
-- 下一步：①**纯套利审核**（Task #75 流程已就绪）——你逐组核对 `pure_arb_review_20260828.md`，把确认完备的 `event_id` 写入 `approved_pure_sets.json`，下一轮即自动执行；②**稳定性拉长周期（Task #78）**靠 6h 自动化自动累积（每次 fresh 拉盘+成交+推送，跨多时段/多流动性覆盖），重点观察：a) 门控跳过数随周期增长是否稳定；b) 残余库存是否随流动性变差而放大；c) 是否出现首笔净亏（出现则降 `default_size`/提 `min_liquidity`/`mm_min_spread`）；③稳定性达标后再谈 CLOB 真实执行（涉真钱，须你明确授权）；④门控参数（6h / $500 / 衰减曲线）可在 `config/strategies.json` 微调校准。
+- ⚠️ 当前 100% 胜率为"高流动性样本 + 模拟摩擦 + 门控放行子集"下的**结构性结果**（非样本偏差），**不可直接外推实盘**；真正的稳健性信号是门控在主动过滤（时间衰减 70 笔 / 日上限 5 笔）与残余库存（15 份）已现。
+- 下一步：①**纯套利审核已自动化**（Task #75）——"审核角色（代理吴总）"每轮由 `sim_pipeline` 自动调用 `auto_review()` 判定并写白名单，你无暇时全自动履行；若你认可某 `event_id` 亦可手动写入 `approved_event_ids` override。②**稳定性拉长周期（Task #78）**靠 6h 自动化自动累积（每次 fresh 拉盘+成交+推送+提交报告，跨多时段/多流动性覆盖），重点观察：a) 门控跳过数随周期增长是否稳定；b) 残余库存是否随流动性变差而放大；c) 是否出现首笔净亏（出现则降 `default_size`/提 `min_liquidity`/`mm_min_spread`）。③**扫描器固有缺陷（单开任务跟踪）**——`scan_poly_pure_arb` 按 `event_id` 聚合混入独立二元盘，须改造才可能产出真 Dutch Book，列为独立改进项，不在本轮稳定期工作中混做。④稳定性达标后再谈 CLOB 真实执行（涉真钱，须你明确授权）；门控参数（6h / $500 / 衰减曲线）可在 `config/strategies.json` 微调校准。
