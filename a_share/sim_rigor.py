@@ -25,7 +25,7 @@ import time
 DEFAULT_RIGOR = {
     "depth_frac": 0.01,      # 顶单价位档位深度 ≈ liquidity * depth_frac（份额）
     "tick": 0.002,           # 每档步长（walk-the-book，保守取 2 个 Polymarket tick）
-    "adverse_frac": 0.30,    # 对冲基准价不利漂移占价差比例
+    "adverse_frac": 0.15,    # 对冲基准价不利漂移占价差比例（买腿改吃完整价差后下调，0.15 即正期望）
     "min_depth_ratio": 0.10, # 单笔成交额 <= liquidity*该比例 才可行
     "slip_cap_warn": 0.004,  # 单腿滑点(每单位)超过该值告警
     # ---- 时间衰减门控 ----
@@ -38,6 +38,7 @@ DEFAULT_RIGOR = {
     # ---- 库存风险约束（消除净多暴露 / 系统性方向风险） ----
     "max_global_inv_notional": 1500.0,  # 全局净库存名义上限(USD)，超则拒新开仓
     "stop_loss_frac": 0.05,             # 单市场未实现亏损超该比例(相对成本)则强制平仓
+    "inventory_skew": 0.5,             # 有净头寸时双边报价推离 mid（抑制追单、鼓励平仓）
 }
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -199,6 +200,7 @@ class RigorVirtualBook(VirtualBook):
         # 单市场日成交上限状态（独立 JSON 持久化，跨轮次累积；不污染 webui 账本）
         self.daily_caps_path = os.path.join(_HERE, "sim_daily_caps.json")
         self.daily_caps = self._load_caps()
+        self.last_mid = {}  # 各市场最近成交中间价（盯市权益用）
 
     # ---------- 单市场日成交上限（独立持久化） ----------
     def _load_caps(self):
@@ -267,6 +269,7 @@ class RigorVirtualBook(VirtualBook):
         with self.lock:
             inv = int(self.inventory.get(mkt, 0))
             mid = (bid + ask) / 2.0
+            self.last_mid[mkt] = mid
             side = "sell" if inv > 0 else "buy"
             # 全局库存名义上限：超则拒新开仓（防系统性净多暴露）
             cap = float(self.rigor.get("max_global_inv_notional", 0) or 0)
@@ -295,8 +298,20 @@ class RigorVirtualBook(VirtualBook):
             self._seq += 1
             pid = "RMM%d" % self._seq
             ts = time.time()
+            # 库存偏置报价：买腿吃完整价差(bid+adverse)，卖腿吃完整价差(ask-adverse)；
+            # 有净头寸时把双边推离 mid 以抑制追单、鼓励平仓（clamp 在 [bid,ask] 内）。
+            skew = float(self.rigor.get("inventory_skew", 0.0))
+            off = skew * spread
+            buy_base = bid + (adverse + extra) * spread
+            sell_base = ask - (adverse + extra) * spread
+            if inv > 0:
+                sell_base = min(ask, sell_base + off)
+                buy_base = max(bid, buy_base - off)
+            elif inv < 0:
+                buy_base = max(bid, buy_base - off)
+                sell_base = min(ask, sell_base + off)
             if side == "buy":
-                build_base = mid if stop_loss_hit else bid
+                build_base = mid if stop_loss_hit else buy_base
                 avg_fill, _, slip, tiers = model_fill("buy", build_base, size, liq,
                                                       self.rigor)
                 fee = leg_fee(avg_fill, size, self.fee_rate)
@@ -318,7 +333,7 @@ class RigorVirtualBook(VirtualBook):
                 msg = ("建多仓(滑点%.4f/单位,%d档): 买@%.4f×%d，净库存%d（未锁利）"
                        % (slip, tiers, avg_fill, size, self.inventory[mkt]))
             else:
-                hedge_base = mid if stop_loss_hit else ask - (adverse + extra) * spread
+                hedge_base = mid if stop_loss_hit else sell_base
                 avg_fill, _, slip, tiers = model_fill("sell", hedge_base, size,
                                                       liq, self.rigor)
                 fee = leg_fee(avg_fill, size, self.fee_rate)
@@ -418,6 +433,17 @@ class RigorVirtualBook(VirtualBook):
         with self.lock:
             inv_val = sum(v * abs(self.avg_cost.get(mk, 0.0))
                           for mk, v in self.inventory.items() if v != 0)
+            return round(self.cash + inv_val, 2)
+
+    def equity_marked(self):
+        """盯市权益 = 现金 + 未平仓库存按最近中间价(last_mid)计价（含未实现盈亏）。"""
+        with self.lock:
+            inv_val = 0.0
+            for mk, v in self.inventory.items():
+                if v == 0:
+                    continue
+                px = self.last_mid.get(mk, abs(self.avg_cost.get(mk, 0.0)))
+                inv_val += v * px
             return round(self.cash + inv_val, 2)
 
     def inventory_notional(self):

@@ -41,13 +41,16 @@
   "sim_rigor": {
     "depth_frac": 0.01,
     "tick": 0.002,
-    "adverse_frac": 0.30,
+    "adverse_frac": 0.15,
     "min_depth_ratio": 0.10,
     "slip_cap_warn": 0.004,
     "min_time_to_settle_h": 6.0,
     "time_decay_ref_h": 72.0,
     "time_decay_max": 0.20,
     "daily_cap_notional": 500.0,
-    "daily_cap_window_h": 24.0
+    "daily_cap_window_h": 24.0,
+    "max_global_inv_notional": 1500.0,
+    "stop_loss_frac": 0.05,
+    "inventory_skew": 0.5
   }
 }

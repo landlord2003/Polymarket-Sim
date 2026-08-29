@@ -1,0 +1,44 @@
+{
+  "init_capital": 10000.0,
+  "final_cash": 9837.49,
+  "total_return_usd": -162.51,
+  "total_return_pct": -1.63,
+  "mm_fills": 197,
+  "mm_pnl_total": 517.24,
+  "mm_win": 88,
+  "mm_loss": 109,
+  "mm_win_rate": 0.4467,
+  "max_drawdown_usd": 386.75,
+  "max_drawdown_pct": 3.8,
+  "pure_candidates": 355,
+  "pure_executed": 0,
+  "mm_skips": 158,
+  "days": [
+    "2026-08-27",
+    "2026-08-28",
+    "2026-08-29"
+  ],
+  "daily": {
+    "2026-08-27": {
+      "mm_fills": 90,
+      "mm_pnl": 333.89,
+      "pure": 90,
+      "skips": 0,
+      "cash_end": 10086.74
+    },
+    "2026-08-28": {
+      "mm_fills": 90,
+      "mm_pnl": 188.23,
+      "pure": 230,
+      "skips": 140,
+      "cash_end": 9941.57
+    },
+    "2026-08-29": {
+      "mm_fills": 17,
+      "mm_pnl": -4.87,
+      "pure": 35,
+      "skips": 18,
+      "cash_end": 9837.49
+    }
+  }
+}

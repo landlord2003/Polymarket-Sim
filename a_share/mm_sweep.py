@@ -58,6 +58,12 @@ def mk_opp(s, p, L):
             "buy_id": "MKT1", "sell_id": "MKT1", "question": "test",
             "end_date": None, "buy_venue": "poly", "sell_venue": "poly"}
 
+_book_cache = {}
+def get_book(rigor):
+    b = RigorVirtualBook(rigor=rigor)
+    b._save = lambda: None   # 扫描不落盘，提速
+    return b
+
 def reset(book):
     book.cash = 10000.0
     book.inventory = {}
@@ -65,30 +71,30 @@ def reset(book):
     book.realized_pnl = 0.0
     book.positions = []
     book.daily_caps = {}
+    book.last_mid = {}
 
-def trial(rigor, mm_min_spread, size):
+def trial(rigor, mm_min_spread, size, book):
     s = sample_spread()
     if s < mm_min_spread:
         return None  # 被策略门槛拒
     p = sample_price()
     L = sample_liq()
     opp = mk_opp(s, p, L)
-    book = RigorVirtualBook(rigor=rigor)
     reset(book)
     r1 = book.market_make(opp, size)
     if not r1.get("ok"):
         return 0.0  # 建仓被拒（深度/偏斜），视为 0 而非亏损
     r2 = book.market_make(opp, size)
-    pnl = book.realized_pnl  # 归零锁利额
-    return pnl
+    return book.realized_pnl  # 归零锁利额
 
-def run_grid(mm_min_spread, adverse, size=100, n=800):
+def run_grid(mm_min_spread, adverse, size=100, n=400):
     rigor = dict(rigor_params_from_config())
     rigor["adverse_frac"] = adverse
     rigor["depth_frac"] = 0.01
+    book = get_book(rigor)
     pnls = []
     for _ in range(n):
-        v = trial(rigor, mm_min_spread, size)
+        v = trial(rigor, mm_min_spread, size, book)
         if v is not None:
             pnls.append(v)
     if not pnls:
@@ -101,25 +107,28 @@ def run_grid(mm_min_spread, adverse, size=100, n=800):
 
 def main():
     import traceback
-    try:
-        results = {}
-        print("mm_min_spread | adverse | n | EV($/round) | win% | pnl_min | pnl_max")
-        for mm in [0.004, 0.012, 0.02, 0.025, 0.03, 0.04, 0.05]:
-            for adv in [0.10, 0.20, 0.30]:
-                r = run_grid(mm, adv)
-                if r is None:
-                    print("%-14.3f | %.2f |  (no trades)" % (mm, adv))
-                    continue
-                results.setdefault(str(mm), {})[str(adv)] = r
-                print("%-14.3f | %.2f | %d | %.4f | %.1f%% | %.3f | %.3f"
-                      % (mm, adv, r["n"], r["ev"], r["win"]*100,
-                         r["pnl_min"], r["pnl_max"]))
-        # 持久化供报告生成
-        with open(os.path.join(_HERE, "mm_sweep_results.json"), "w", encoding="utf-8") as f:
-            json.dump(results, f, ensure_ascii=False, indent=2)
-        print("\nSaved mm_sweep_results.json")
-    except Exception:
-        traceback.print_exc()
+    results = {}
+    print("mm_min_spread | adverse | n | EV($/round) | win% | pnl_min | pnl_max")
+    grid = [(mm, adv) for mm in [0.004, 0.008, 0.01, 0.012, 0.015, 0.02, 0.03]
+            for adv in [0.05, 0.10, 0.15, 0.20, 0.30]]
+    for mm, adv in grid:
+        try:
+            r = run_grid(mm, adv)
+        except Exception as e:
+            print("%-14.3f | %.2f | ERROR %r" % (mm, adv, e))
+            traceback.print_exc()
+            continue
+        if r is None:
+            print("%-14.3f | %.2f |  (no trades)" % (mm, adv))
+            continue
+        results.setdefault(str(mm), {})[str(adv)] = r
+        print("%-14.3f | %.2f | %d | %.4f | %.1f%% | %.3f | %.3f"
+              % (mm, adv, r["n"], r["ev"], r["win"]*100,
+                 r["pnl_min"], r["pnl_max"]))
+        sys.stdout.flush()
+    with open(os.path.join(_HERE, "mm_sweep_results.json"), "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+    print("\nSaved mm_sweep_results.json")
 
 if __name__ == "__main__":
     main()

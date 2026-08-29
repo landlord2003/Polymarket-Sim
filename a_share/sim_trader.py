@@ -142,15 +142,24 @@ def run_once(params, book_path, run_id, logf, verbose=False, rigor=None,
             if live_exec is not None:
                 ev = opp.get("event_id") or opp.get("question", "")
                 key = "%s:pure:%s" % (run_id, ev)
+                # 真实 Dutch Book 必须按每个结果 token 分别下单（非合成单）
                 if not breaker.dedupe(key)[0]:
-                    lr = breaker.with_retry(lambda: live_exec.submit(
-                        ev, "buy", float(opp.get("sum_ask_raw", 0.0) or 0.5),
-                        opp.get("size_hint", params["default_size"]), key,
-                        opp.get("liquidity", 0)))
-                    breaker.remember(key, lr.to_dict())
-                    _log_trade(logf, run_id, "live_pure", opp,
-                               {"ok": lr.ok, "msg": lr.msg, "dry": lr.dry,
-                                "cash": live_exec.usdc_balance()})
+                    subs = opp.get("submarkets", []) or [
+                        {"id": ev, "ask": opp.get("sum_ask_raw", 0.5)}]
+                    for s in subs:
+                        sid = s.get("id") or ev
+                        skey = "%s:%s" % (key, sid)
+                        if breaker.dedupe(skey)[0]:
+                            continue
+                        lr = breaker.with_retry(
+                            lambda sid=sid: live_exec.submit(
+                                sid, "buy", float(s.get("ask", 0.5)),
+                                opp.get("size_hint", params["default_size"]),
+                                skey, opp.get("liquidity", 0)))
+                        breaker.remember(skey, lr.to_dict())
+                        _log_trade(logf, run_id, "live_pure", opp,
+                                   {"ok": lr.ok, "msg": lr.msg, "dry": lr.dry,
+                                    "token": sid, "cash": live_exec.usdc_balance()})
     for opp in scanned["marketmaking"][:params["mm_max_per_run"]]:
         size = opp.get("size_hint", params["default_size"])
         # 深度可行性预过滤：成交额超过流动性深度上限则跳过（避免必亏的薄簿单）

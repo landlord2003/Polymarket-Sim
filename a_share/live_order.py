@@ -12,7 +12,9 @@
   签名订单并 POST。缺失依赖时显式抛 RuntimeError，绝不静默绕过。
 
 真实部署（国外）时：pip install py-clob-client eth-account，设置环境变量
-POLY_PK(钱包私钥) / CLOB_API_KEY / CLOB_API_SECRET / CLOB_PASSPHRASE，LIVE=1 DRY_RUN=0。
+POLY_PK(钱包私钥，用于派生 L2 API 凭证) 与可选 POLY_FUNDER(邮件/代理钱包的资金地址)，LIVE=1 DRY_RUN=0。
+（注：py-clob-client 已归档，官方建议迁移到统一 Python SDK py-sdk；本层接口保持
+create_order/post_order 形态，迁移时仅需替换导入与签名构造。详见 LIVE_FIRST_RUN_SOP.md）
 """
 from __future__ import annotations
 
@@ -217,17 +219,19 @@ class ClobExecutor(OrderExecutor):
             raise RuntimeError(
                 "真实下单需要 py_clob_client（pip install py-clob-client），"
                 "或设 DRY_RUN=1 使用影子账本") from e
-        key = os.environ.get("CLOB_API_KEY", "")
-        if not key:
-            raise RuntimeError("真实模式需要 CLOB_API_KEY 环境变量")
+        # 用钱包私钥初始化；L2 API 凭证运行时派生（无需手动配置 apiKey/secret/passphrase）
         self._clob = ClobClient(
-            host=self.host,
+            self.host,
             key=self.wallet._pk,
             chain_id=137,
-            creds={"apiKey": key,
-                   "apiSecret": os.environ.get("CLOB_API_SECRET", ""),
-                   "passphrase": os.environ.get("CLOB_PASSPHRASE", "")},
+            signature_type=1,                          # 1=email/Magic 钱包；EOA/MetaMask 用 0
+            funder=os.environ.get("POLY_FUNDER", ""),  # 代理/邮件钱包的资金地址(可选)
         )
+        try:
+            self._clob.set_api_creds(self._clob.create_or_derive_api_creds())
+        except Exception as e:
+            raise RuntimeError(
+                "创建 L2 API 凭证失败（私钥无效或签名失败）：%s" % e) from e
 
     def is_dry_run(self):
         return self.dry_run
@@ -237,16 +241,18 @@ class ClobExecutor(OrderExecutor):
         if self.dry_run:
             return self._dry.submit(market_id, side, price, size,
                                     idempotency_key, liquidity)
-        order = self._clob.create_order(
-            maker=maker_side(side),
-            fee_rate_bps=int(self.fee_rate * 10000),
-            price=round(price, 4),
-            size=size,
+        from py_clob_client.clob_types import OrderArgs, OrderType
+        from py_clob_client.order_builder.constants import BUY, SELL
+        order = OrderArgs(
             token_id=market_id,
+            price=round(price, 4),
+            size=float(size),
+            side=BUY if side == "buy" else SELL,
+            fee_rate_bps=int(self.fee_rate * 10000),
         )
-        signed = self._clob.sign_order(order)
-        resp = self._clob.post_order(signed)
-        return OrderResult(True, order_id=resp.get("orderID"),
+        signed = self._clob.create_order(order)
+        resp = self._clob.post_order(signed, OrderType.GTC)
+        return OrderResult(True, order_id=resp.get("orderID") or resp.get("id"),
                            filled=size, avg_fill=price,
                            msg="CLOB POST ok", raw=resp)
 
