@@ -141,25 +141,50 @@ def scan_poly_event_arb(quotes, top_n=10, min_profit=_MIN_EVENT_PROFIT):
     return out[:top_n]
 
 
+_DRAW_WORDS = ("draw", "draws", "drawn", "tie", "ties", "tied", "level",
+             "push", "no winner", "regulation tie", "stalemate")
+_WIN_WORDS = ("win", "wins", "won", "winner", "winners", "beat", "beats",
+              "beaten", "defeat", "defeats", "defeated", "victory",
+              "victories", "to win", "to beat")
+_CATCHALL_ASCII = ("other", "others", "none of the above", "none of these",
+                   "any other", "anyone else", "someone else", "anyone other",
+                   "rest of the field", "the field", "all other", "all others",
+                   "remaining", "else", "another candidate", "other candidate",
+                   "other candidates", "any other candidate")
+_CATCHALL_CJK = ("其它", "其他", "以上都不是", "以上均不", "以上皆非", "否则",
+                 "其它选项", "其它候选人", "其他候选人", "别的", "剩余", "其余",
+                 "其它情况", "其他情况")
+
+
+def _match_partition_word(title_low, word):
+    """单词边界匹配：英文避免 winter/twin/withdraw/another 误命中；中文子串。"""
+    if word.isascii():
+        return bool(re.search(r"" + re.escape(word) + r"", title_low))
+    return word in title_low
+
+
 def _is_complete_partition(titles):
     """判定一组二元盘标题是否构成互斥且完备的真实划分（结构性 Dutch Book）。
 
-    真划分（无需人工确认）：
-      1) 体育三合：含 draw/tie 且 >=2 个 win/beat -> 胜/负/平，互斥且完备
-      2) 含 catch-all：Other / None of the above / 以上都不是 / 其它 / 否则 -> 兜底完备
-    其它（多价位独立盘、触达事件、无 catch-all 的有限枚举）-> 非完备，需人工确认。
+    真划分（无需人工确认，自动执行）：
+      1) 体育三合：含 draw/tie/level 等平局词 且 >=2 个 win/beat/victory 等胜方词
+         -> 胜/负/平，互斥且完备
+      2) 含 catch-all：Other / None of the above / 以上都不是 / 其它 / 否则 /
+         rest of the field / anyone else / 其余 / 剩余 等兜底词 -> 完备
+    其它（多价位独立盘、触达事件、无 catch-all 的有限枚举）-> 非完备，留门控。
     """
     low = [t.lower() for t in titles]
-    has_draw = any(("draw" in t) or ("tie" in t) for t in low)
-    nwin = sum(1 for t in low if ("win" in t) or ("beat" in t) or ("defeat" in t))
-    has_other = any(any(w in t for w in
-                    ("other", "none of the above", "以上都不是",
-                     "以上均不", "其它", "否则")) for t in low)
+    has_draw = any(_match_partition_word(t, _DRAW_WORDS) for t in low)
+    nwin = sum(1 for t in low if _match_partition_word(t, _WIN_WORDS))
+    has_other = any(_match_partition_word(t, w)
+                    for t in low
+                    for w in (_CATCHALL_ASCII + _CATCHALL_CJK))
     if has_draw and nwin >= 2:
         return True, "complete_3way_sports", "体育三合(胜/平/负)互斥且完备"
     if has_other:
-        return True, "complete_catchall", "含 catch-all(Other/其它)兜底，完备"
+        return True, "complete_catchall", "含 catch-all(Other/其它/其余)兜底，完备"
     return False, "incomplete_combo", "非真实划分(缺平局/catch-all 或为独立盘)"
+
 
 
 def scan_poly_pure_arb(quotes, top_n=20, fee_rate=0.01, buffer=0.002,

@@ -20,7 +20,7 @@
 
 ## 三、关键认知修正（避免假利润）
 1. **单二元市场内不存在 `yes_ask+no_ask<1` 的瞬时套利**：YES/NO 严格互补，`yes_ask+no_ask = 1+spread ≥ 1` 恒成立。
-2. **真实无风险套利 = 同事件多结果完备集 Dutch Book**（买齐 A/B/C 所有结果 ask，若 sum<1 则到期必兑付 $1）。其中**真·完整划分**（体育三合含 draw/tie 且≥2 win/beat，或含 catch-all Other/其它/以上都不是/否则）的互斥+完备由市场结构**结构性保证、可自动验证**；其余拼凑为**假信号**。
+2. **真实无风险套利 = 同事件多结果完备集 Dutch Book**（买齐 A/B/C 所有结果 ask，若 sum<1 则到期必兑付 $1）。其中**真·完整划分**（体育三合含 draw/tie/level 等平局词且≥2 个 win/beat/victory 等胜方词，或含 catch-all：Other/None of the above/以上都不是/其它/否则/rest of the field/anyone else/其余/剩余 等兜底词）的互斥+完备由市场结构**结构性保证、可自动验证**；其余拼凑为**假信号**。
 3. **纯套利执行按"划分类型"分流**：真·完整划分 → `need_confirm=False`（结构性成立，自动执行）；其余独立二元盘拼凑（不互斥/不完备）→ `need_confirm=True` 门控、由审核角色每轮研判（详见七-D）。
 
 ## 四、实盘化严谨度建模（Task #66 · 已接入）
@@ -112,7 +112,7 @@ _审计员签署：real-auditor(独立审计员) ｜ 2026-08-29 11:41_
 
 **1) 候选清单生成（`a_share/sim_review.py`）**
 - `python a_share/sim_review.py` → 拉实时行情 → `scan_poly_pure_arb` → 逐事件生成**人工可核对清单**，写入 `a_share/sim_logs/pure_arb_review_YYYYMMDD.md`（总览表 + 候选明细含每个子结果 ask/id）+ `.json`。
-- 现由 `arbitrage._is_complete_partition` 结构性判定（#79）：体育三合（含 draw/tie 且≥2 win/beat）或含 catch-all（Other/其它/以上都不是/否则）→ 标记 `complete_partition=True`、`need_confirm=False`、附 `partition_kind`；其余拼凑 → `complete_partition=False`、`need_confirm=True`。候选清单按此标注，**真划分直接列为"自动放行"、假组合列为"待审核"**。
+- 现由 `arbitrage._is_complete_partition` 结构性判定（#79，并已硬化词表+单词边界匹配）：体育三合（含 draw/tie/level 等平局词且≥2 个 win/beat/victory 等胜方词）或含 catch-all（Other/None of the above/以上都不是/其它/否则/rest of the field/anyone else/其余/剩余 等兜底词）→ 标记 `complete_partition=True`、`need_confirm=False`、附 `partition_kind`；其余拼凑 → `complete_partition=False`、`need_confirm=True`。候选清单按此标注，**真划分直接列为"自动放行"、假组合列为"待审核"**。
 
 **2) 人工确认 → 写白名单（`a_share/sim_logs/approved_pure_sets.json`）**
 - 你逐组核对"结果互斥且覆盖所有可能（买齐 ask 后 sum<1，到期必兑付 $1）"。
