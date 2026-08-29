@@ -117,7 +117,8 @@ resp   = client.post_order(signed, OrderType.GTC)
 
 ### 🔍 下单前校验清单（每次翻转 DRY_RUN=0 前逐条过）
 
-- [ ] **token_id 正确**：是**结果代币 id**（Gamma `outcomes[].id`，66 位 hex），不是 `event_id`、不是市场 slug
+- [ ] **token_id 正确**：是**结果代币 id**（Gamma `clobTokenIds[]`，**十进制大整数、最长 78 位**，如 `4273801713597926244...`），不是 `event_id`、不是市场 slug。
+  > ⚠️ 修订：Polymarket 的 `clobTokenId` 是**十进制大整数**（非 0x 十六进制）。订单构造校验按 `^\d{40,90}$` 判定；SOP 此前写的"66 位 hex"为笔误，以本句为准。
 - [ ] **price 合法**：`0.01 ≤ price ≤ 0.99`，符合该 token 的 `tickSize`（如 0.001/0.01），≤2 位小数
 - [ ] **size > 0**：份数为正；小数需交易所支持
 - [ ] **side 正确**：`BUY`/`SELL`（或 `YES`/`NO` 视客户端）；本项目已统一为 BUY/SELL

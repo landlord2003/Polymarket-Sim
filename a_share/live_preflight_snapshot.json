@@ -1,0 +1,63 @@
+{
+  "captured_at": "2026-08-30T01:10:00+08:00",
+  "source": "gamma-api.polymarket.com/markets (WebFetch server-side egress 真实抓取, 非实时流)",
+  "compliance_filter": "已剔除政治/地缘类(如 'Will Pete Hegseth win the 2028 US Presidential Election?')，仅保留 sports/economy 中性类",
+  "markets": [
+    {
+      "question": "LoL: Top Esports vs LGD Gaming (BO5) - LPL Playoffs",
+      "id": "3810035",
+      "slug": "lol-tes-lgd-2026-08-29",
+      "clobTokenIds": ["42738017135979262444378578631954169478732852656424670096583837898523646170521", "74686986245374141247552998723675023565970181212132643001130235566876581420189"],
+      "outcomePrices": ["0.0005", "0.9995"],
+      "bestBid": null,
+      "bestAsk": 0.001,
+      "liquidity": 1736928.02375,
+      "tickSize": 0.001,
+      "minOrderSize": 5,
+      "feeRate": 0.05,
+      "negRisk": false
+    },
+    {
+      "question": "Counter-Strike: FUT Esports vs Lynn Vision (BO3) - BLAST Open Porto Group B",
+      "id": "3939577",
+      "slug": "cs2-fut-lvg-2026-08-29",
+      "clobTokenIds": ["76503812196456926561000613306091315769940098473354033477480244767348428869503", "92464470385128697304615396421182258936079262716372083729139041404820509453395"],
+      "outcomePrices": ["0.9995", "0.0005"],
+      "bestBid": 0.999,
+      "bestAsk": 1.0,
+      "liquidity": 1146384.07182,
+      "tickSize": 0.001,
+      "minOrderSize": 5,
+      "feeRate": 0.05,
+      "negRisk": false
+    },
+    {
+      "question": "Will there be no change in Fed interest rates after the September 2026 meeting?",
+      "id": "2252244",
+      "slug": "will-there-be-no-change-in-fed-interest-rates-after-the-september-2026-meeting-615",
+      "clobTokenIds": ["5615282760875985231868508008056959876238536896643315063916840237042205273721", "97050921740416192996389806693742575608111328819185493163189880975611314813724"],
+      "outcomePrices": ["0.545", "0.455"],
+      "bestBid": 0.54,
+      "bestAsk": 0.55,
+      "liquidity": 560751.2269,
+      "tickSize": 0.01,
+      "minOrderSize": 5,
+      "feeRate": 0.05,
+      "negRisk": true
+    },
+    {
+      "question": "Counter-Strike: Legacy vs Team Falcons (BO3) - BLAST Open Porto Group B",
+      "id": "3939588",
+      "slug": "cs2-lgc-fal2-2026-08-29",
+      "clobTokenIds": ["24912831513958032186114451443772416709047759376356141455915424818733234096329", "38974009331647574307486964154380741223296752486424181282661660530688322351734"],
+      "outcomePrices": ["0.325", "0.675"],
+      "bestBid": 0.32,
+      "bestAsk": 0.33,
+      "liquidity": 174024.8476,
+      "tickSize": 0.01,
+      "minOrderSize": 5,
+      "feeRate": 0.05,
+      "negRisk": false
+    }
+  ]
+}
