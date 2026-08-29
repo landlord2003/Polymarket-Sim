@@ -159,7 +159,7 @@ _CATCHALL_CJK = ("其它", "其他", "以上都不是", "以上均不", "以上�
 def _match_partition_word(title_low, word):
     """单词边界匹配：英文避免 winter/twin/withdraw/another 误命中；中文子串。"""
     if word.isascii():
-        return bool(re.search(r"" + re.escape(word) + r"", title_low))
+        return bool(re.search(r"\b" + re.escape(word) + r"\b", title_low))
     return word in title_low
 
 
@@ -174,8 +174,8 @@ def _is_complete_partition(titles):
     其它（多价位独立盘、触达事件、无 catch-all 的有限枚举）-> 非完备，留门控。
     """
     low = [t.lower() for t in titles]
-    has_draw = any(_match_partition_word(t, _DRAW_WORDS) for t in low)
-    nwin = sum(1 for t in low if _match_partition_word(t, _WIN_WORDS))
+    has_draw = any(_match_partition_word(t, w) for t in low for w in _DRAW_WORDS)
+    nwin = sum(1 for t in low if any(_match_partition_word(t, w) for w in _WIN_WORDS))
     has_other = any(_match_partition_word(t, w)
                     for t in low
                     for w in (_CATCHALL_ASCII + _CATCHALL_CJK))
