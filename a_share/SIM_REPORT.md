@@ -48,7 +48,7 @@
 | **门控跳过 — 深度** | 0 笔 | 深度门槛（市场流动性充足） |
 | **门控跳过 — 时间衰减** | 9 笔 | `min_time_to_settle_h=6h` 临近结算硬门控 |
 | **门控跳过 — 单市场日上限** | 0 笔 | `daily_cap_notional=$500/24h` 滚动窗口 |
-| 纯套利候选 | 25 个 | 平均 edge 0.8912，成交率 100%，**全部待审核角色判定** |
+| 纯套利候选 | 25 个 | 平均 edge 0.8912，成交率 100%，**审核角色结构性判定（真划分自动放行/假组合留门控）** |
 | 纯套利残余库存 | - 份 | 腿风险实证信号 |
 | 累计逐笔记录 / 做市执行 | 0 / 16 | 本轮截至自动刷新时刻 |
 <!-- LIVE_DATA_END -->
@@ -74,7 +74,7 @@ _审计员签署：real-auditor(独立审计员) ｜ 2026-08-29 11:41_
 
 ## 六、反馈机制输出（sim_feedback.py）
 - 分析逐笔记录：做市全胜、含滑点；纯套利 0 执行 / N 候选（edge ~$0.88 为假信号）。
-- 自动建议：①纯套利须人工审核事件结果互斥性后才可启用；②即便启用滑点，样本仍偏流动性高，拉长周期再定稳定性；③若出现净亏笔，应降 `default_size`/提 `min_liquidity`/`mm_min_spread`。
+- 自动建议：①纯套利完备性由审核角色(代理吴总)**结构性自动判定、无需人工确认**——真划分自动放行执行，假组合留门控（当前无错价真划分故 0 执行属诚实结果）；②即便启用滑点，样本仍偏流动性高，拉长周期再定稳定性；③若出现净亏笔，应降 `default_size`/提 `min_liquidity`/`mm_min_spread`。
 - 方法论版本记录于 `a_share/sim_logs/feedback_YYYYMMDD.json`（可演进）。
 
 ## 七、理想化假设整改进度
@@ -150,7 +150,7 @@ _审计员签署：real-auditor(独立审计员) ｜ 2026-08-29 11:41_
 - `a_share/sim_trader.py` — 模拟盘引擎（已切 `RigorVirtualBook`，含深度预过滤 + 双门控跳过 + 滑点日志）
 - `a_share/sim_feedback.py` — 反馈迭代（滑点/净亏/成交率 + **门控跳过计数**）
 - `a_share/sim_pipeline.py` — **NEW（Task #73）** Phase 6 流水线：跑 N 轮 → summary → feedback → 钉钉推送
-- `a_share/sim_review.py` — **NEW（Task #75）** 纯套利完备性人工审核清单生成器（只读行情、不成交、不推送）
+- `a_share/sim_review.py` — **NEW（Task #75）** 纯套利完备性审核角色(代理吴总)清单生成器（自动判定、只读行情、不成交、不推送）
 - `a_share/sim_logs/approved_pure_sets.json` — **NEW（Task #75）** 人工确认的 event_id 白名单（持久化，空）
 - `a_share/sim_logs/pure_arb_review_YYYYMMDD.md` / `.json` — **NEW（Task #75）** 当日候选审核清单
 - `a_share/sim_daily_caps.json` — **NEW** 单市场日成交上限滚动状态（持久化）

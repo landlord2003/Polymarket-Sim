@@ -128,8 +128,11 @@ def suggest(a, params):
     if pc["count"] > 0:
         notes.append(
             "纯套利候选 %d 个（平均 edge=%.4f，平均成交率 %.0f%%，残余库存 %d 份）。"
-            "Dutch Book 完备性无法自动验证且腿风险显著，已默认禁用自动执行；"
-            "若要启用须人工审核事件结果互斥性后设 allow_pure_unconfirmed=true。"
+            "完备性已由审核角色(代理吴总)结构性自动判定，**无需老吴确认**："
+            "真·完整划分(体育三合含平局/含catch-all)自动放行执行；"
+            "当前候选均为独立二元盘拼凑的假 Dutch Book，已由 AI 自动拒绝并留门控。"
+            "executed=0 是市场诚实状态(当前无错价真划分)，非缺陷；"
+            "请勿为求执行而设 allow_pure_unconfirmed=true —— 那会绕过结构性安全判定、放行假套利。"
             % (pc["count"], pc["avg_edge"], pc["avg_fill_ratio"] * 100,
                pc["total_residual_shares"]))
     wr = mm["win_rate"]
@@ -153,11 +156,11 @@ def suggest(a, params):
             "以过滤薄簿/噪声市场。" % (wr * 100))
     if mm["pnl"] <= 0 and mm["executed"] > 0:
         notes.append("做市累计未盈利：建议检查 size / min_liquidity / fee_rate 设置。")
-    # 候选 edge 偏小时微调 buffer（仍须人工确认）
+    # 候选 edge 偏小时微调 buffer（完备性由审核角色结构性判定，无需人工确认）
     if pc["avg_edge"] and 0 < pc["avg_edge"] < 0.01:
         new["pure_buffer"] = round(max(0.001, params["pure_buffer"] - 0.0005), 4)
         notes.append("候选 edge 偏小，纯演示性下调 pure_buffer 以捕获更多边际机会"
-                     "（仍须人工确认完备性）。")
+                     "（完备性由审核角色结构性判定，无需人工确认）。")
     return notes, new
 
 

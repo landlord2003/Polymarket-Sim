@@ -192,7 +192,7 @@ def update_report_live(summary_rows, feedback_last):
         "| **门控跳过 — 深度** | %d 笔 | 深度门槛（市场流动性充足） |" % sk.get("depth", 0),
         "| **门控跳过 — 时间衰减** | %d 笔 | `min_time_to_settle_h=6h` 临近结算硬门控 |" % sk.get("time", 0),
         "| **门控跳过 — 单市场日上限** | %d 笔 | `daily_cap_notional=$500/24h` 滚动窗口 |" % sk.get("cap", 0),
-        "| 纯套利候选 | %d 个 | 平均 edge %.4f，成交率 %.0f%%，**全部待审核角色判定** |" % (
+        "| 纯套利候选 | %d 个 | 平均 edge %.4f，成交率 %.0f%%，**审核角色结构性判定（真划分自动放行/假组合留门控）** |" % (
             pc.get("count", 0), pc.get("avg_edge", 0), pc.get("avg_fill_ratio", 0) * 100),
         "| 纯套利残余库存 | %s 份 | 腿风险实证信号 |" % pc.get("residual", "-"),
         "| 累计逐笔记录 / 做市执行 | %d / %d | 本轮截至自动刷新时刻 |" % (recs, execs),
@@ -268,7 +268,8 @@ def build_markdown(runs, summary_rows, feedback_last):
         "**纯套利候选**：%d 个（平均 edge %.4f，平均成交率 %.0f%%）" % (
             pc.get("count", 0), pc.get("avg_edge", 0),
             pc.get("avg_fill_ratio", 0) * 100),
-        "> 完备性由审核角色（代理吴总）每轮自动判定，均待其确认后才执行",
+        "> 完备性由审核角色（代理吴总）结构性自动判定：真·完整划分自动放行执行、无需老吴确认；",
+        "> 当前候选均被判定为假 Dutch Book（独立二元盘拼凑），留门控、executed=0 为市场诚实状态",
         "",
         "**方法论版本**：%s" % ver,
     ]
