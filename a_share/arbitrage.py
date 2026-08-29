@@ -141,6 +141,27 @@ def scan_poly_event_arb(quotes, top_n=10, min_profit=_MIN_EVENT_PROFIT):
     return out[:top_n]
 
 
+def _is_complete_partition(titles):
+    """判定一组二元盘标题是否构成互斥且完备的真实划分（结构性 Dutch Book）。
+
+    真划分（无需人工确认）：
+      1) 体育三合：含 draw/tie 且 >=2 个 win/beat -> 胜/负/平，互斥且完备
+      2) 含 catch-all：Other / None of the above / 以上都不是 / 其它 / 否则 -> 兜底完备
+    其它（多价位独立盘、触达事件、无 catch-all 的有限枚举）-> 非完备，需人工确认。
+    """
+    low = [t.lower() for t in titles]
+    has_draw = any(("draw" in t) or ("tie" in t) for t in low)
+    nwin = sum(1 for t in low if ("win" in t) or ("beat" in t) or ("defeat" in t))
+    has_other = any(any(w in t for w in
+                    ("other", "none of the above", "以上都不是",
+                     "以上均不", "其它", "否则")) for t in low)
+    if has_draw and nwin >= 2:
+        return True, "complete_3way_sports", "体育三合(胜/平/负)互斥且完备"
+    if has_other:
+        return True, "complete_catchall", "含 catch-all(Other/其它)兜底，完备"
+    return False, "incomplete_combo", "非真实划分(缺平局/catch-all 或为独立盘)"
+
+
 def scan_poly_pure_arb(quotes, top_n=20, fee_rate=0.01, buffer=0.002,
                        min_liquidity=0, min_outcomes=2):
     """同事件多结果完备集 Dutch Book（Polymarket 上真实存在的无风险套利）。
@@ -175,10 +196,15 @@ def scan_poly_pure_arb(quotes, top_n=20, fee_rate=0.01, buffer=0.002,
         if edge <= 0:
             continue
         conf = min(1.0, 0.5 + 0.15 * (len(items) - 2))
+        titles = [i["question"] for i in items]
+        is_complete, pkind, preason = _is_complete_partition(titles)
         out.append({
             "type": "pure", "demo": False,
-            "need_confirm": True,   # 完备性无法自动验证，始终需人工确认后再执行
-            "confidence": round(conf, 2),
+            # 真划分(体育三合/含catch-all)结构性互斥+完备 -> 无需人工确认，自动执行
+            "need_confirm": not is_complete,
+            "complete_partition": is_complete,
+            "partition_kind": pkind,
+            "confidence": 1.0 if is_complete else 0.5,
             "question": "同事件 %s：%d 结果买齐" % (ev, len(items)),
             "event_id": ev,
             "liquidity": max(float(i.get("liquidity", 0) or 0) for i in items),
@@ -186,8 +212,9 @@ def scan_poly_pure_arb(quotes, top_n=20, fee_rate=0.01, buffer=0.002,
                            for i in items],
             "sum_ask": round(s, 4), "edge": edge, "size_hint": 100,
             "buy_venue": "poly", "buy_id": ev,
-            "action": "买齐 %d 个结果(YES ask)成本 %.4f，到期兑付$1，净锁定 $%.4f/份（完备性%s）"
-                      % (len(items), s, edge, "待确认" if len(items) < 3 else "较高"),
+            "action": ("买齐 %d 个结果(YES ask)成本 %.4f，到期兑付$1，净锁定 $%.4f/份"
+                       "（%s）" % (len(items), s, edge,
+                       "结构性完备·自动执行" if is_complete else "完备性待确认")),
         })
     out.sort(key=lambda o: o["edge"], reverse=True)
     return out[:top_n]

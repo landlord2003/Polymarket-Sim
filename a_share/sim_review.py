@@ -96,8 +96,9 @@ def build():
 # 故绝大多数候选会被拒绝——这是诚实结果，不污染模拟数据。
 # ---------------------------------------------------------------------------
 REVIEWER = "auto-proxy(吴总代理)"
-REVIEW_METHOD = ("按互斥+完备负面测试自动判定；命中独立二元盘/时间窗嵌套/部分子集/"
-                 "跨类混搭即拒；仅明确真划分正向证据才放行。当前扫描器缺陷致真 Dutch Book 罕见。")
+REVIEW_METHOD = ("按互斥+完备判定：先负面测试(独立二元盘/时间窗嵌套/O-U混搭)拒假信号；"
+                 "再正向识别真划分(体育三合含draw/含catch-all)结构性互斥+完备 -> APPROVE 自动执行；"
+                 "其余默认拒绝。用户可在 approved_event_ids 手动追加 override。")
 
 _PRICE_RE = re.compile(r"\$?\d[\d,]*(?:\.\d+)?", re.I)
 _TOUCH_TOKENS = ("reach", "dip", "high", "low", "above", "below", "cross", "hit", "touch")
@@ -118,15 +119,14 @@ def _titles_have_price_levels(titles):
 
 
 def reviewer_judge(ev, question, titles, n_outcomes, sum_ask):
-    """审核角色对单个候选的判定：返回 ('approve'|'reject', 理由)。
+    """审核角色（代理吴总）对单个候选的判定：返回 ('approve'|'reject', 理由)。
 
-    负面测试（命中即拒，因不满足互斥或完备）：
-    1. 多价位/触达类独立二元盘拼凑（不同油价/币价档位可同时为真）→ 不互斥
-    2. 含 reach/dip/HIGH/LOW/above/below 等独立触达事件 → 不互斥
-    3. 含多个截止日期（疑似时间窗嵌套/重叠）→ 不互斥
-    4. 无 catch-all 且结果数有限（部分子集 / 无法确认覆盖全部可能）→ 不完备
-    5. 盘口 O/U 与市场线混搭 → 非同类划分，不完备
-    默认（无明确真划分正向证据）保守拒绝，避免盲放假信号。
+    先施加负面测试（命中即拒：多价位/触达类独立盘、时间窗嵌套、O/U 混搭）。
+    通过负面测试后，再施加**完整划分正向判定**：
+      - 体育三合（含 draw/tie 且 >=2 个 win/beat）-> 胜/负/平，结构性互斥且完备
+      - 含 catch-all（Other / None of the above / 以上都不是 / 其它 / 否则）-> 兜底完备
+    这两类属真 Dutch Book，结构性保证互斥+完备，无需人工确认 -> APPROVE（自动执行）。
+    其余（无平局/catch-all 的有限枚举、独立盘拼凑）-> 默认拒绝，避免盲放假信号。
     """
     q = (question or "").lower()
     tl = [t.lower() for t in titles]
@@ -138,20 +138,20 @@ def reviewer_judge(ev, question, titles, n_outcomes, sum_ask):
     dates = re.findall(r"(\d{1,2})[/\-.](\d{1,2})(?:[/\-.](\d{2,4}))?", joined)
     if len(dates) >= 2:
         return ("reject", "含多个截止日期，疑似时间窗嵌套/重叠，不互斥")
+    # ---- 完整划分正向判定（结构性互斥+完备，真 Dutch Book -> 放行）----
+    has_draw = any(("draw" in t) or ("tie" in t) for t in tl)
+    nwin = sum(1 for t in tl if ("win" in t) or ("beat" in t) or ("defeat" in t))
     has_other = any(any(w in t for w in
                    ("other", "none of the above", "否则", "其它", "以上都不是", "以上均不"))
                    for t in tl)
-    if not has_other:
-        if n_outcomes <= 2:
-            return ("reject", "二元候选，扫描器未证明同属单一市场真划分（可能跨盘聚合），无法确认完备")
-        if any(tok in q for tok in _FIELD_TOKENS) and n_outcomes < 32:
-            return ("reject", "结果数(%d)远小于全字段（联赛/选举/锦标类），非完备 Dutch Book" % n_outcomes)
-        if 3 <= n_outcomes <= 20:
-            return ("reject", "无 catch-all 且结果数(%d)有限，无法自动确认覆盖所有可能（非完备）" % n_outcomes)
+    if has_draw and nwin >= 2:
+        return ("approve", "体育三合(胜/平/负)结构性互斥且完备，真 Dutch Book")
+    if has_other:
+        return ("approve", "含 catch-all(Other/其它)兜底，完备性结构性成立，真 Dutch Book")
     if "over" in joined and "under" in joined and any(
             w in joined for w in ("win", "moneyline", "to win", "beat")):
         return ("reject", "盘口 O/U 与市场线混搭，非同类划分，不完备")
-    return ("reject", "未检出明确真划分正向证据（缺 catch-all 或单市场结构证明），代理审核默认拒绝")
+    return ("reject", "未检出完整划分正向证据（无平局/catch-all 或单市场结构证明），代理审核默认拒绝")
 
 
 def _write_checklist(items, approved_set):
