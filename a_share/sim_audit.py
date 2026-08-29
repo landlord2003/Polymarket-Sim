@@ -289,31 +289,42 @@ def audit_candidates():
                          "events_with_ge3_binary": ev_ge3,
                          "binary_quotes_total": len(quotes)}
 
-    # 根因：fetch_poly_quotes 仅收二元市场（len(outcomes)!=2 跳过）→ 真 N 结果单市场被排除
-    out["root_cause"] = ("fetch_poly_quotes 仅保留二元市场（outcomes 长度≠2 直接跳过）；"
-                         "Polymarket 上真正的 N 结果完备划分是'单一市场含 N 个 outcome'，"
-                         "被二元过滤器完全排除。扫描器只能按 event_id 聚合独立二元盘 → "
-                         "sum(ask)<1 多为假 Dutch Book（事件下各二元盘彼此独立，可同时为真）。")
+    # 根因（#79 修复后说明）：Polymarket 把单一事件拆成 N 个独立二元盘挂在同 event_id 下；
+    # 真 Dutch Book = 这组二元盘构成"完整划分"（体育三合含 draw/tie 且>=2 win/beat，或含
+    # catch-all Other/其它/以上都不是/否则）→ 结构性互斥+完备。扫描器 #79 已新增
+    # _is_complete_partition 识别该结构，命中即 need_confirm=False（自动执行）；其余独立二元盘
+    # 拼凑（多价位/多日期/缺平局与 catch-all）sum(ask)<1 多为假 Dutch Book，继续 need_confirm=True。
+    out["root_cause"] = ("Polymarket 单一事件拆为 N 个独立二元盘挂同 event_id；真 Dutch Book 须"
+                         "构成完整划分（含平局或 catch-all）结构性互斥+完备。#79 已让扫描器"
+                         "识别真划分自动放行、假组合继续门控；当前实盘多为假组合（无错价真划分）。")
 
-    # 逐候选证据：子市场 market id 是否互异（证明是独立二元盘）
+    # 逐候选证据：优先用 #79 的 complete_partition（结构性判定）分类，
+    # 再辅以子市场 market id 互异性作为数据级佐证
     for c in cands[:20]:
         sm = c.get("submarkets", [])
         ids = [s.get("id") for s in sm]
         distinct = len(set(ids))
-        same_market = (distinct == 1 and len(sm) > 1)
-        if same_market:
-            verdict = ("同一单市场内 %d 结果（market id 相同）→ 可能是真划分，"
-                       "需进一步核验 outcomes 是否互斥完备" % len(sm))
-            status = "NEEDS-VERIFY"
+        is_complete = c.get("complete_partition", False)
+        if is_complete:
+            verdict = ("真·完整划分（%s）：结构性互斥+完备，无需人工确认 → 自动执行（APPROVE）"
+                       % c.get("partition_kind"))
+            status = "APPROVE-AUTO"
         else:
-            verdict = ("%d 个**独立二元盘**（market id 互不相同）同属 event_id=%s，"
-                       "但彼此独立（如油价/币价可同时触及多个档位）→ 不互斥 → 非 Dutch Book"
-                       % (len(sm), c.get("event_id")))
-            status = "REJECT-EVIDENCE"
+            same_market = (distinct == 1 and len(sm) > 1)
+            if same_market:
+                verdict = ("同一单市场内 %d 结果（market id 相同）→ 需进一步核验 outcomes 是否互斥完备"
+                           % len(sm))
+                status = "NEEDS-VERIFY"
+            else:
+                verdict = ("%d 个**独立二元盘**（market id 互不相同）同属 event_id=%s，"
+                           "彼此独立（如油价/币价可同时触及多个档位）→ 不互斥 → 假 Dutch Book"
+                           % (len(sm), c.get("event_id")))
+                status = "REJECT-EVIDENCE"
         out["per_candidate"].append({
             "event_id": c.get("event_id"), "n": len(sm),
             "distinct_market_ids": distinct, "sum_ask": c.get("sum_ask"),
-            "edge": c.get("edge"), "verdict": verdict, "status": status})
+            "edge": c.get("edge"), "complete_partition": is_complete,
+            "verdict": verdict, "status": status})
 
     # 抽样拉取至多 6 个候选的首个市场详情，证明其为独立二元盘（具体证据）
     probed = 0
@@ -361,10 +372,12 @@ def build_report(checks, cand, files_used):
     summary = getattr(build_report, "_summary", {})
 
     if cand.get("available"):
+        n_appr = sum(1 for p in cand["per_candidate"] if p["status"] == "APPROVE-AUTO")
         n_rej = sum(1 for p in cand["per_candidate"] if p["status"] == "REJECT-EVIDENCE")
         n_need = sum(1 for p in cand["per_candidate"] if p["status"] == "NEEDS-VERIFY")
-        cand_verdict = ("%d 个候选经数据核验：%d 个为独立二元盘拼凑（REJECT），%d 个同市场需进一步核验"
-                        % (cand["n_candidates"], n_rej, n_need))
+        cand_verdict = ("%d 个候选：%d 个真·完整划分（自动放行, APPROVE）｜ %d 个独立二元盘拼凑"
+                        "（REJECT 留门控）｜ %d 个同市场待核验"
+                        % (cand["n_candidates"], n_appr, n_rej, n_need))
     else:
         cand_verdict = "候选核验不可用（%s）" % cand.get("error", "未知")
 
@@ -403,7 +416,7 @@ def build_report(checks, cand, files_used):
     for p in cand.get("per_candidate", []):
         lines.append("| %s | %d | %d | %.4f | $%.4f | %s |" % (
             p["event_id"], p["n"], p["distinct_market_ids"],
-            p["sum_ask"], p["edge"], p["verdict"][:60]))
+            p["sum_ask"], p["edge"], p["verdict"][:72]))
     lines += [
         "",
         "**抽样市场详情（证明独立二元盘）**：",
@@ -419,8 +432,8 @@ def build_report(checks, cand, files_used):
         "## 审计员签署",
         "",
         "截至 %s，系统账目诚实（P&L 勾稽%s，无虚假纯套利利润入账）；100%% 胜率为模型结构性"
-        "构造（非风险信号）；纯套利候选经数据核验全部为跨市场独立二元盘拼凑（假 Dutch Book），"
-        "与审核角色全拒一致。系统处于受控模拟状态。" % (
+        "构造（非风险信号）；纯套利候选经数据核验：真·完整划分（结构性互斥+完备）已自动放行，"
+        "其余独立二元盘拼凑（假 Dutch Book）留门控，与审核角色判定一致。系统处于受控模拟状态。" % (
             now, "通过" if n_fail == 0 else "存在 %d 项 FAIL" % n_fail),
         "",
         "_审计文件（本地，gitignored）：%s / %s_" % (md_path, json_path),
@@ -443,8 +456,14 @@ def refresh_report_audit(now, checks, cand, summary):
     n_fail = sum(1 for c in checks if c["status"] == "FAIL")
     integ_ok = "PASS" if n_fail == 0 else "FAIL(%d)" % n_fail
     if cand.get("available"):
-        cand_line = ("%d 候选全经数据核验为独立二元盘拼凑（假 Dutch Book），与审核角色全拒一致"
-                     % cand["n_candidates"])
+        n_appr = sum(1 for p in cand.get("per_candidate", []) if p.get("status") == "APPROVE-AUTO")
+        n_rej = sum(1 for p in cand.get("per_candidate", []) if p.get("status") == "REJECT-EVIDENCE")
+        if n_appr:
+            cand_line = ("%d 候选：%d 个真·完整划分（结构性互斥+完备，自动放行）｜ %d 个独立二元盘拼凑（假 Dutch Book，留门控）"
+                         % (cand["n_candidates"], n_appr, n_rej))
+        else:
+            cand_line = ("%d 候选经数据核验全为独立二元盘拼凑（假 Dutch Book，留门控），"
+                         "当前实盘无错价真划分" % cand["n_candidates"])
     else:
         cand_line = "候选核验不可用（%s）" % cand.get("error", "")
     line_integ = "| 账目诚实性（P&L 勾稽 / 无虚记 / 无双计） | **%s** |" % integ_ok
