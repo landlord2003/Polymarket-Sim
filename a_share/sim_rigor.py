@@ -35,6 +35,9 @@ DEFAULT_RIGOR = {
     # ---- 单市场日成交上限 ----
     "daily_cap_notional": 500.0,   # 单市场每 daily_cap_window_h 小时内累计成交额上限(USD)
     "daily_cap_window_h": 24.0,    # 日成交窗口（滚动）
+    # ---- 库存风险约束（消除净多暴露 / 系统性方向风险） ----
+    "max_global_inv_notional": 1500.0,  # 全局净库存名义上限(USD)，超则拒新开仓
+    "stop_loss_frac": 0.05,             # 单市场未实现亏损超该比例(相对成本)则强制平仓
 }
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -263,7 +266,26 @@ class RigorVirtualBook(VirtualBook):
         extra = time_decay_penalty(ttm, self.rigor) if ttm is not None else 0.0
         with self.lock:
             inv = int(self.inventory.get(mkt, 0))
+            mid = (bid + ask) / 2.0
             side = "sell" if inv > 0 else "buy"
+            # 全局库存名义上限：超则拒新开仓（防系统性净多暴露）
+            cap = float(self.rigor.get("max_global_inv_notional", 0) or 0)
+            if cap > 0:
+                glob_inv = sum(abs(v) * abs(self.avg_cost.get(mk, 0.0))
+                               for mk, v in self.inventory.items())
+                if side == "buy" and glob_inv + size * bid > cap:
+                    return {"ok": False,
+                            "msg": "全局库存名义超上限 $%.0f，拒开仓" % cap}
+            # 止损：未实现亏损超阈值强制平仓（以 mid 平仓，忽略 adverse 折扣）
+            sl_frac = float(self.rigor.get("stop_loss_frac", 0) or 0)
+            stop_loss_hit = False
+            if inv != 0 and sl_frac > 0:
+                cost = float(self.avg_cost.get(mkt, mid))
+                if cost > 0:
+                    if inv > 0 and (mid - cost) / cost < -sl_frac:
+                        stop_loss_hit = True
+                    if inv < 0 and (cost - mid) / cost < -sl_frac:
+                        stop_loss_hit = True
             if side == "buy" and inv + size > max_skew:
                 return {"ok": False,
                         "msg": "库存偏斜上限(%d)：该市场净多 %d" % (max_skew, inv)}
@@ -274,7 +296,8 @@ class RigorVirtualBook(VirtualBook):
             pid = "RMM%d" % self._seq
             ts = time.time()
             if side == "buy":
-                avg_fill, _, slip, tiers = model_fill("buy", bid, size, liq,
+                build_base = mid if stop_loss_hit else bid
+                avg_fill, _, slip, tiers = model_fill("buy", build_base, size, liq,
                                                       self.rigor)
                 fee = leg_fee(avg_fill, size, self.fee_rate)
                 self.cash -= avg_fill * size + fee
@@ -295,7 +318,7 @@ class RigorVirtualBook(VirtualBook):
                 msg = ("建多仓(滑点%.4f/单位,%d档): 买@%.4f×%d，净库存%d（未锁利）"
                        % (slip, tiers, avg_fill, size, self.inventory[mkt]))
             else:
-                hedge_base = ask - (adverse + extra) * spread
+                hedge_base = mid if stop_loss_hit else ask - (adverse + extra) * spread
                 avg_fill, _, slip, tiers = model_fill("sell", hedge_base, size,
                                                       liq, self.rigor)
                 fee = leg_fee(avg_fill, size, self.fee_rate)
@@ -387,6 +410,20 @@ class RigorVirtualBook(VirtualBook):
                 "pnl": pnl, "cash": round(self.cash, 2), "pid": pid,
                 "fill_ratio": fill_ratio, "residual": residual,
             }
+
+    # ---------- 库存盯市（成本基准权益） ----------
+    def equity_at_cost(self):
+        """真实权益 = 现金 + 未平仓库存按成本基准计价。
+        纠正'账本现金下降=亏损'的账面假象：库存是净多持仓，非已实现的损失。"""
+        with self.lock:
+            inv_val = sum(v * abs(self.avg_cost.get(mk, 0.0))
+                          for mk, v in self.inventory.items() if v != 0)
+            return round(self.cash + inv_val, 2)
+
+    def inventory_notional(self):
+        with self.lock:
+            return round(sum(abs(v) * abs(self.avg_cost.get(mk, 0.0))
+                              for mk, v in self.inventory.items()), 2)
 
 
 if __name__ == "__main__":

@@ -32,11 +32,18 @@ from sim_rigor import (                     # noqa: E402
     depth_feasible, estimate_pure_fill, time_gate_ok,
 )
 
+# 真实下单层（DRY_RUN 默认；LIVE=1 且依赖齐备时接入 CTC）
+try:
+    from live_order import build_executor, Reconcile, CircuitBreaker
+    _HAVE_LIVE = True
+except Exception:  # pragma: no cover
+    _HAVE_LIVE = False
+
 DEFAULT_PARAMS = {
     "fee_rate": 0.01,
     "pure_buffer": 0.002,        # 纯套利额外安全垫（防盘口抖动吃掉利润）
     "min_liquidity": 2000.0,     # 流动性门槛（防滑点/薄簿拒单）
-    "mm_min_spread": 0.004,
+    "mm_min_spread": 0.02,     # 抬到 0.02：蒙特卡洛显示胜率~99%、EV+$1.3/轮（含摩擦）
     "pure_max_per_run": 5,       # 每轮最多执行的纯套利笔数
     "allow_pure_unconfirmed": False,  # 纯套利需完备性确认，默认不自动执行(防假套利)
     "mm_max_per_run": 5,
@@ -87,7 +94,8 @@ def _log_trade(f, run_id, kind, opp, res, extra=None):
     f.flush()
 
 
-def run_once(params, book_path, run_id, logf, verbose=False, rigor=None):
+def run_once(params, book_path, run_id, logf, verbose=False, rigor=None,
+             live_exec=None, breaker=None, reconcile=None):
     if rigor is None:
         rigor = rigor_params_from_config()
     book = RigorVirtualBook(book_path, rigor=rigor)
@@ -131,6 +139,18 @@ def run_once(params, book_path, run_id, logf, verbose=False, rigor=None):
             executed += 1
             if verbose:
                 print("  [PURE] %s" % res.get("msg"))
+            if live_exec is not None:
+                ev = opp.get("event_id") or opp.get("question", "")
+                key = "%s:pure:%s" % (run_id, ev)
+                if not breaker.dedupe(key)[0]:
+                    lr = breaker.with_retry(lambda: live_exec.submit(
+                        ev, "buy", float(opp.get("sum_ask_raw", 0.0) or 0.5),
+                        opp.get("size_hint", params["default_size"]), key,
+                        opp.get("liquidity", 0)))
+                    breaker.remember(key, lr.to_dict())
+                    _log_trade(logf, run_id, "live_pure", opp,
+                               {"ok": lr.ok, "msg": lr.msg, "dry": lr.dry,
+                                "cash": live_exec.usdc_balance()})
     for opp in scanned["marketmaking"][:params["mm_max_per_run"]]:
         size = opp.get("size_hint", params["default_size"])
         # 深度可行性预过滤：成交额超过流动性深度上限则跳过（避免必亏的薄簿单）
@@ -169,7 +189,32 @@ def run_once(params, book_path, run_id, logf, verbose=False, rigor=None):
             executed += 1
             if verbose:
                 print("  [MM]   %s" % res.get("msg"))
+            if live_exec is not None:
+                side = res.get("side")
+                price = opp.get("buy_ask") if side == "buy" else opp.get("sell_bid")
+                key = "%s:%s:%s" % (run_id, mkt, side)
+                dup, _ = breaker.dedupe(key)
+                if dup:
+                    _log_trade(logf, run_id, "live_dup", opp,
+                               {"ok": True, "msg": "幂等去重跳过"})
+                else:
+                    ok_funds, fmsg = breaker.funds_ok(live_exec.usdc_balance())
+                    if not ok_funds:
+                        _log_trade(logf, run_id, "live_halt", opp,
+                                   {"ok": False, "msg": fmsg})
+                    else:
+                        lr = breaker.with_retry(lambda: live_exec.submit(
+                            mkt, side, price, size, key,
+                            opp.get("liquidity", 0)))
+                        breaker.remember(key, lr.to_dict())
+                        _log_trade(logf, run_id, "live_mm", opp,
+                                   {"ok": lr.ok, "msg": lr.msg, "dry": lr.dry,
+                                    "cash": live_exec.usdc_balance()})
     view = book.view()
+    view["equity_at_cost"] = book.equity_at_cost()
+    view["inventory_notional"] = book.inventory_notional()
+    if live_exec is not None and reconcile is not None:
+        view["reconcile"] = reconcile.daily(book.inventory, live_exec)
     return {
         "ok": True, "run_id": run_id, "quotes": len(quotes),
         "scanned": {"pure": n_pure, "mm": n_mm, "event": n_ev},
@@ -188,6 +233,15 @@ def main():
     if a.params:
         params.update(json.loads(a.params))
     rigor = rigor_params_from_config()
+    # 真实下单层装配：LIVE=1 且依赖可用时接入；DRY_RUN 默认(影子账本, 不动真钱)
+    live_exec = breaker = reconcile = None
+    if os.environ.get("LIVE") == "1" and _HAVE_LIVE:
+        dry = os.environ.get("DRY_RUN", "1") == "1"
+        live_exec = build_executor(live=True, dry_run=dry)
+        breaker = CircuitBreaker()
+        reconcile = Reconcile()
+        print("[LIVE] executor=%s dry_run=%s"
+              % (type(live_exec).__name__, live_exec.is_dry_run()))
     log_path = os.path.join(LOG_DIR, "trades_%s.jsonl"
                             % time.strftime("%Y%m%d"))
     summary_rows = []
@@ -197,7 +251,8 @@ def main():
             if a.verbose:
                 print("=== RUN %d (%s) ===" % (i, run_id))
             r = run_once(params, a.book, run_id, logf, verbose=a.verbose,
-                         rigor=rigor)
+                         rigor=rigor, live_exec=live_exec, breaker=breaker,
+                         reconcile=reconcile)
             summary_rows.append(r)
             if not a.verbose:
                 v = r.get("view", {})
