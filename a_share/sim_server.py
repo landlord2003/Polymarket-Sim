@@ -165,6 +165,15 @@ def load_persistence():
     realized_total = RUN_META.get("realized_total")
     if realized_total is None:
         realized_total = sum(t.get("pnl", 0.0) for t in TRADES if t.get("side") == "sell")
+    # 恢复全程挂单成交统计（不持久化的话，重启后成交率会从 0 重新累积、报告失真）
+    FILL_ATTEMPTS[0] = int(RUN_META.get("fill_attempts") or 0)
+    FILL_HITS[0] = int(RUN_META.get("fill_hits") or 0)
+    with LOCK:
+        STATE["fill"] = {
+            "base": FILL_BASE, "gamma": FILL_GAMMA, "on": APPLY_FILL,
+            "attempts": FILL_ATTEMPTS[0], "hits": FILL_HITS[0],
+            "rate": round(FILL_HITS[0] / FILL_ATTEMPTS[0] * 100, 1) if FILL_ATTEMPTS[0] else 0.0,
+        }
     realized_total = float(realized_total)
     # 历史最高权益（跨重启不丢，用于正确计算回撤）
     peak_equity = RUN_META.get("peak_equity")
@@ -217,8 +226,11 @@ def save_equity_sample(round_n, equity):
         pass
 
 def update_run_meta_round(round_n, realized_total=None, equity=None, peak_equity=None):
-    """每轮更新检查点：轮次 + 全量累计锁利 + 历史峰值权益（均不依赖 TRADES 样本，重启不丢）。"""
+    """每轮更新检查点：轮次 + 全量累计锁利 + 历史峰值权益 + 挂单成交计数
+    （均不依赖内存样本，重启不丢）。"""
     RUN_META["last_round"] = round_n
+    RUN_META["fill_attempts"] = FILL_ATTEMPTS[0]
+    RUN_META["fill_hits"] = FILL_HITS[0]
     if realized_total is not None:
         RUN_META["realized_total"] = round(float(realized_total), 2)
     if equity is not None:
