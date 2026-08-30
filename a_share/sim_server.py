@@ -241,41 +241,64 @@ HTML = r"""<!DOCTYPE html>
 <style>
 :root{--bg:#0f1420;--panel:#192033;--ink:#e6ecf5;--mut:#9aa7bd;--red:#ff5b6e;--grn:#39d98a;--blue:#5aa9ff;--line:#2a3450;--amber:#e8c98a}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
-header{padding:16px 22px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+body{margin:0;background:radial-gradient(1200px 600px at 85% -10%,#16203a 0%,var(--bg) 60%);color:var(--ink);font:14px/1.5 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;min-height:100vh}
+/* 顶部滚动行情条 */
+.ticker{overflow:hidden;white-space:nowrap;background:#0a0f1a;border-bottom:1px solid var(--line);padding:7px 0;position:relative}
+.ticker .run{display:inline-block;padding-left:100%;animation:marquee 45s linear infinite}
+.ticker .run span{display:inline-block;padding:0 28px;font-size:13px;color:var(--mut)}
+.ticker .run b{color:var(--ink);font-weight:600}
+.ticker .run .up{color:var(--grn)}.ticker .run .dn{color:var(--red)}
+@keyframes marquee{to{transform:translateX(-100%)}}
+header{padding:16px 22px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:14px;flex-wrap:wrap;background:linear-gradient(90deg,#141c30,#101627)}
 header h1{margin:0;font-size:19px}
-.dot{width:10px;height:10px;border-radius:50%;background:var(--grn);box-shadow:0 0 8px var(--grn);animation:pulse 1.4s infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
-.badge{font-size:12px;padding:3px 10px;border-radius:20px;background:#1f2940;color:var(--mut);border:1px solid var(--line)}
-.banner{background:#16261c;border:1px solid #2c5a3c;color:#a8e6c0;padding:8px 14px;margin:12px 22px 0;border-radius:8px;font-size:12.5px}
+.gtitle{background:linear-gradient(90deg,#5aa9ff,#39d98a,#5aa9ff);background-size:200% auto;-webkit-background-clip:text;background-clip:text;color:transparent;animation:slide 5s linear infinite;font-weight:800}
+@keyframes slide{to{background-position:200% center}}
+.beat{width:10px;height:10px;border-radius:50%;background:var(--grn);box-shadow:0 0 10px var(--grn);animation:beat 1.1s infinite;flex:none}
+.beat.hot{background:var(--amber);box-shadow:0 0 13px var(--amber);animation:beat .45s infinite}
+@keyframes beat{0%,100%{transform:scale(1);opacity:1}30%{transform:scale(1.55);opacity:.55}}
+.badge{font-size:12px;padding:3px 10px;border-radius:20px;background:#1f2940;color:var(--mut);border:1px solid var(--line);transition:all .3s}
+.banner{background:linear-gradient(90deg,#16261c,#13251b);border:1px solid #2c5a3c;color:#a8e6c0;padding:8px 14px;margin:12px 22px 0;border-radius:8px;font-size:12.5px}
 .wrap{padding:14px 22px;max-width:1240px;margin:0 auto}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin:12px 0}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:13px 16px}
-.card .k{color:var(--mut);font-size:12px}.card .v{font-size:21px;font-weight:700;margin-top:4px}
+.card{background:linear-gradient(160deg,var(--panel),#141b2c);border:1px solid var(--line);border-radius:12px;padding:13px 16px;transition:transform .25s,box-shadow .25s,border-color .25s}
+.card:hover{transform:translateY(-3px);box-shadow:0 8px 22px rgba(90,169,255,.18);border-color:#34466e}
+.card .k{color:var(--mut);font-size:12px}.card .v{font-size:21px;font-weight:700;margin-top:4px;font-variant-numeric:tabular-nums;transition:color .4s}
 .v.g{color:var(--grn)}.v.r{color:var(--red)}.v.b{color:var(--blue)}
 .tabs{display:flex;gap:8px;margin:14px 0 4px}
-.tab{background:#1f2940;border:1px solid var(--line);color:var(--mut);padding:7px 14px;border-radius:8px;cursor:pointer;font-size:13px}
-.tab.on{background:#2c3a5e;color:#fff;border-color:#3a4d7a}
+.tab{background:#1f2940;border:1px solid var(--line);color:var(--mut);padding:8px 15px;border-radius:8px;cursor:pointer;font-size:13px;transition:all .2s}
+.tab:hover{color:var(--ink)}
+.tab.on{background:linear-gradient(90deg,#2c3a5e,#34487a);color:#fff;border-color:#3a4d7a;box-shadow:0 0 14px rgba(90,169,255,.25)}
 .grid{display:grid;grid-template-columns:1.3fr 1fr;gap:16px}
 @media(max-width:880px){.grid{grid-template-columns:1fr}}
-.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:16px}
+.panel{background:linear-gradient(160deg,var(--panel),#141b2c);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:16px;animation:fade .35s ease}
+@keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 .panel h2{margin:0 0 10px;font-size:15px}
 canvas{width:100%;height:240px;background:#0b1018;border:1px solid var(--line);border-radius:8px;display:block}
 .scroll{max-height:420px;overflow:auto}
 table{border-collapse:collapse;width:100%;font-size:12.5px}
 th,td{border:1px solid var(--line);padding:5px 8px;text-align:center}
-th{background:#1f2940;color:var(--mut);position:sticky;top:0}
+th{background:#1f2940;color:var(--mut);position:sticky;top:0;z-index:1}
 td.l{text-align:left}.buy{color:var(--grn)}.sell{color:var(--red)}
+/* 新成交行动画 */
+@keyframes flashG{0%{background:rgba(57,217,138,.40)}100%{background:transparent}}
+@keyframes flashR{0%{background:rgba(255,91,110,.34)}100%{background:transparent}}
+tr.row-new.flash-up td{animation:flashG 1.2s ease-out}
+tr.row-new.flash-down td{animation:flashR 1.2s ease-out}
+.latest{display:flex;align-items:center;gap:10px;background:#0b1018;border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin-bottom:12px;font-size:13px}
+.latest .up{color:var(--grn);font-weight:700}.latest .down{color:var(--red);font-weight:700}
 .note{color:var(--mut);font-size:12px;margin-top:8px}
 select{background:#1f2940;color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:5px 8px;font-size:13px}
 .tag{font-size:11px;padding:1px 7px;border-radius:10px;background:#27324d;color:var(--mut)}
 </style></head>
 <body>
+<div class="ticker"><div class="run" id="tick">正在加载真实 Polymarket 盘口…</div></div>
 <header>
-  <span class="dot"></span><h1>Polymarket 实时模拟交易监视器 v3</h1>
+  <span class="beat" id="beat"></span>
+  <h1 class="gtitle">Polymarket 实时模拟交易监视器 v3</h1>
   <span class="badge" id="rnd">round 0</span>
   <span class="badge" id="live">真实盘口: 0</span>
-  <span class="badge">引擎: RigorVirtualBook.market_make（真实定价+走簿滑点）</span>
+  <span class="badge" id="status">● 连接中…</span>
+  <span class="badge">引擎: RigorVirtualBook.market_make</span>
 </header>
 <div class="banner">✅ 行情来自<b>真实 Polymarket 盘口</b>（urllib 直连 Gamma，每 ~90s 刷新，已合规过滤政治/地缘/军事等敏感类）。每个真实市场由<b>验证过的做市引擎</b>在真实盘口上<b>同轮双边建平</b>（买@YES买价+adverse·spread，卖@YES卖价−adverse·spread，库存归零），纯捕获价差、零库存漂移风险。全程 <b>DRY_RUN 影子账本、零真钱</b>——演示真实行情下的策略表现，不等同于实盘结论。</div>
 <div class="wrap">
@@ -295,6 +318,7 @@ select{background:#1f2940;color:var(--ink);border:1px solid var(--line);border-r
   </div>
 
   <div class="panel" id="p-sim" style="display:none">
+    <div class="latest"><span class="beat" id="beat2"></span><span style="color:var(--mut)">最新成交：</span><span id="latest-txt">等待第一笔…</span></div>
     <div class="grid">
       <div><h2>盯市权益曲线 (实时)</h2><canvas id="cv" width="640" height="240"></canvas>
         <div class="note">equity = 现金 + 未平仓库存 × last_mid（含未实现盈亏）</div></div>
@@ -316,35 +340,89 @@ select{background:#1f2940;color:var(--ink);border:1px solid var(--line);border-r
 </div>
 <script>
 function fmt(n){return (n==null)?'-':Number(n).toLocaleString('en-US',{maximumFractionDigits:2})}
+function money(n){return '$'+Number(n).toLocaleString('en-US',{maximumFractionDigits:2})}
+function smoney(n){return (n>=0?'+$':'-$')+Number(Math.abs(n)).toLocaleString('en-US',{maximumFractionDigits:2})}
+// 数字滚动动画
+function tween(el,to,render){
+  const from=el._cur!=null?el._cur:to; el._cur=to;
+  const dur=550,t0=performance.now();
+  if(el._raf)cancelAnimationFrame(el._raf);
+  function step(now){const k=Math.min(1,(now-t0)/dur),e=1-Math.pow(1-k,3),v=from+(to-from)*e;
+    el.textContent=render(v); if(k<1)el._raf=requestAnimationFrame(step);}
+  el._raf=requestAnimationFrame(step);
+}
+function setMoney(id,val,signed){
+  const el=document.getElementById(id); if(!el)return;
+  el.className='v '+(val>0?'g':val<0?'r':'b');
+  tween(el,val, signed?smoney:money);
+}
+function setNum(id,val){
+  const el=document.getElementById(id); if(!el)return;
+  el.className='v b'; tween(el,val,v=>Number(v).toLocaleString('en-US',{maximumFractionDigits:0}));
+}
+// 卡片骨架（只建一次，后续只更新数值，保证滚动动画连续）
+document.getElementById('cards').innerHTML=
+  ['<div class="card"><div class="k">轮次</div><div class="v b" id="c-round">0</div></div>',
+   '<div class="card"><div class="k">现金</div><div class="v b" id="c-cash">$0</div></div>',
+   '<div class="card"><div class="k">累计锁利</div><div class="v b" id="c-real">$0</div></div>',
+   '<div class="card"><div class="k">本轮锁利</div><div class="v b" id="c-rpnl">$0</div></div>',
+   '<div class="card"><div class="k">盯市权益</div><div class="v b" id="c-eq">$0</div></div>',
+   '<div class="card"><div class="k">真实盘口</div><div class="v b" id="c-live">0</div></div>',
+   '<div class="card"><div class="k">做市市场</div><div class="v b" id="c-mm">0</div></div>'].join('');
+let curTab='live', seen=new Set(), prevRound=0;
+function flashBeat(id){const b=document.getElementById(id); if(!b)return; b.classList.add('hot'); setTimeout(()=>b.classList.remove('hot'),650);}
 function tickState(){
   fetch('/api/state').then(r=>r.json()).then(s=>{
     document.getElementById('rnd').textContent='round '+s.round;
-    document.getElementById('live').textContent='真实盘口: '+s.live_count+' | 做市: '+s.mm_count;
-    const eq=s.equity, pnl=eq-10000;
-    const cards=[
-      {k:'轮次',v:s.round,b:''},
-      {k:'现金',v:'$'+fmt(s.cash),b:''},
-      {k:'累计锁利',v:(s.realized>=0?'+$':'-$')+fmt(Math.abs(s.realized)),b:s.realized>=0?'g':'r'},
-      {k:'本轮锁利',v:(s.round_pnl>=0?'+$':'-$')+fmt(Math.abs(s.round_pnl)),b:s.round_pnl>=0?'g':'r'},
-      {k:'盯市权益',v:'$'+fmt(eq),b:pnl>=0?'g':'r'},
-      {k:'真实盘口',v:s.live_count,b:'b'},
-      {k:'做市市场',v:s.mm_count,b:'b'},
-    ];
-    document.getElementById('cards').innerHTML=cards.map(c=>`<div class="card"><div class="k">${c.k}</div><div class="v ${c.b}">${c.v}</div></div>`).join('');
+    document.getElementById('live').textContent='真实盘口 '+s.live_count+' · 做市 '+s.mm_count;
+    const st=document.getElementById('status');
+    if(s.round!==prevRound){prevRound=s.round; st.textContent='● 撮合中 · round '+s.round; flashBeat('beat');}
+    else st.textContent='● 实时运行 · round '+s.round;
+    const eq=s.equity;
+    setNum('c-round',s.round); setMoney('c-cash',s.cash,false);
+    setMoney('c-real',s.realized,true); setMoney('c-rpnl',s.round_pnl,true);
+    setMoney('c-eq',eq,false); setNum('c-live',s.live_count); setNum('c-mm',s.mm_count);
     document.getElementById('ninv').textContent=(s.round_pnl>=0?'+$':'-$')+fmt(Math.abs(s.round_pnl));
     document.getElementById('invn').textContent=(s.realized>=0?'+$':'-$')+fmt(Math.abs(s.realized));
+    // 权益曲线（渐变填充 + 末端发光点）
     const cv=document.getElementById('cv'),ctx=cv.getContext('2d'),W=cv.width,H=cv.height;ctx.clearRect(0,0,W,H);
     const ec=s.equity_curve;
     if(ec.length>1){
-      const mn=Math.min.apply(null,ec),mx=Math.max.apply(null,ec),pad=(mx-mn)*0.15||1,lo=mn-pad,hi=mx+pad;
+      const mn=Math.min.apply(null,ec),mx=Math.max.apply(null,ec),pad=(mx-mn)*0.18||1,lo=mn-pad,hi=mx+pad;
       ctx.strokeStyle='#2a3450';ctx.beginPath();ctx.moveTo(0,H/2);ctx.lineTo(W,H/2);ctx.stroke();
-      ctx.strokeStyle='#39d98a';ctx.lineWidth=2;ctx.beginPath();
-      ec.forEach((v,i)=>{const x=i/(ec.length-1)*W,y=H-((v-lo)/(hi-lo))*H;i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();
+      const X=i=>i/(ec.length-1)*W, Y=v=>H-((v-lo)/(hi-lo))*H;
+      ctx.beginPath();ctx.moveTo(0,Y(ec[0]));
+      ec.forEach((v,i)=>ctx.lineTo(X(i),Y(v)));
+      const grad=ctx.createLinearGradient(0,0,0,H);
+      grad.addColorStop(0,'rgba(57,217,138,.30)');grad.addColorStop(1,'rgba(57,217,138,0)');
+      ctx.lineTo(W,H);ctx.lineTo(0,H);ctx.closePath();ctx.fillStyle=grad;ctx.fill();
+      ctx.strokeStyle=eq>=10000?'#39d98a':'#ff5b6e';ctx.lineWidth=2.2;ctx.beginPath();
+      ec.forEach((v,i)=>{i?ctx.lineTo(X(i),Y(v)):ctx.moveTo(X(i),Y(v));});ctx.stroke();
+      const lx=X(ec.length-1),ly=Y(ec[ec.length-1]);
+      ctx.beginPath();ctx.arc(lx,ly,6,0,7);ctx.fillStyle=eq>=10000?'#39d98a':'#ff5b6e';ctx.shadowColor=ctx.fillStyle;ctx.shadowBlur=12;ctx.fill();ctx.shadowBlur=0;
       ctx.fillStyle='#9aa7bd';ctx.font='11px sans-serif';ctx.fillText('$'+fmt(hi),4,12);ctx.fillText('$'+fmt(lo),4,H-4);
     }
     if(curTab==='sim'){
       const t2=document.getElementById('trd').querySelector('tbody');
-      t2.innerHTML=s.positions.map(t=>`<tr><td>${t.ts}</td><td class="l">${t.mkt}</td><td class="${t.side=='buy'?'buy':'sell'}">${(t.side||'').toUpperCase()}</td><td>${t.entry!=null?Number(t.entry).toFixed(4):'-'}</td><td>${t.size}</td><td>${t.pnl!=null?'$'+fmt(t.pnl):'-'}</td><td>${t.slip!=null?Number(t.slip).toFixed(4):'-'}</td><td>$${fmt(t.cash_after)}</td></tr>`).join('');
+      let fresh=0;
+      const rows=s.positions.map(t=>{
+        const key=t.ts+'|'+t.mkt+'|'+t.side+'|'+t.entry;
+        const isNew=!seen.has(key); if(isNew){seen.add(key);fresh++;}
+        if(seen.size>400)seen.clear();
+        const cls=(t.side==='buy'?'flash-up':'flash-down');
+        return `<tr class="${isNew?'row-new '+cls:cls}"><td>${t.ts}</td><td class="l">${t.mkt}</td><td class="${t.side==='buy'?'buy':'sell'}">${(t.side||'').toUpperCase()}</td><td>${t.entry!=null?Number(t.entry).toFixed(4):'-'}</td><td>${t.size}</td><td>${t.pnl!=null?'$'+fmt(t.pnl):'-'}</td><td>${t.slip!=null?Number(t.slip).toFixed(4):'-'}</td><td>$${fmt(t.cash_after)}</td></tr>`;
+      }).join('');
+      t2.innerHTML=rows;
+      if(fresh>0){
+        flashBeat('beat2');
+        const t=s.positions[0];
+        if(t){
+          const up=t.pnl!=null && t.pnl>0;
+          document.getElementById('latest-txt').innerHTML=
+            `<b class="${t.side==='buy'?'buy':'sell'}">${t.side.toUpperCase()}</b> ${t.mkt} @${Number(t.entry).toFixed(4)} `+
+            (t.pnl!=null?`· 锁利 <span class="${up?'up':'down'}">$${fmt(t.pnl)}</span>`:'· 建仓');
+        }
+      }
     }
     if(curTab==='quote'){
       const qt=document.getElementById('qtab').querySelector('tbody');
@@ -358,6 +436,11 @@ function tickLive(){
   if(curTab!=='live') return;
   fetch('/api/markets').then(r=>r.json()).then(d=>{
     liveCache=d; renderLive();
+    const items=d.markets.slice(0,60).map(m=>{
+      const up=Number(m.yes_ask)>=Number(m.yes_bid);
+      return `<span><b>${m.question.slice(0,42)}</b> YES <span class="${up?'up':'dn'}">${Number(m.yes_bid).toFixed(3)}/${Number(m.yes_ask).toFixed(3)}</span> · 量 $${fmt(m.liquidity)}</span>`;
+    }).join('');
+    document.getElementById('tick').innerHTML=items+items;
   }).catch(()=>{});
 }
 function renderLive(){
@@ -367,7 +450,6 @@ function renderLive(){
   const tb=document.getElementById('mkt').querySelector('tbody');
   tb.innerHTML=rows.map(m=>`<tr><td class="l">${m.question}</td><td><span class="tag">${m.tag}</span></td><td class="buy">${Number(m.yes_bid).toFixed(4)}</td><td class="sell">${Number(m.yes_ask).toFixed(4)}</td><td class="buy">${Number(m.no_bid).toFixed(4)}</td><td class="sell">${Number(m.no_ask).toFixed(4)}</td><td>$${fmt(m.liquidity)}</td></tr>`).join('');
 }
-let curTab='live';
 document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
   curTab=t.dataset.t;
   document.querySelectorAll('.tab').forEach(x=>x.classList.remove('on'));
