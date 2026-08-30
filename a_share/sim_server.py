@@ -40,6 +40,7 @@ STATE = {
     "cash": 10000.0,
     "realized": 0.0,
     "equity": 10000.0,
+    "round_pnl": 0.0,
     "inv_notional": 0.0,
     "n_markets": 0,
     "live_count": 0,
