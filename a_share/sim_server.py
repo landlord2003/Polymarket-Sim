@@ -19,6 +19,8 @@ import os
 import sys
 import threading
 import time
+import collections
+import datetime as _dt
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
@@ -50,7 +52,249 @@ STATE = {
     "quotes": {},
     "positions": [],
     "equity_curve": [],
+    "peak_equity": 10000.0,
 }
+
+# ============ 持久化（统计中心 / 跨重启累计） ============
+# 今日(2026-08-30)起成立一条干净的「运行起点」，之后每笔成交 + 每轮权益落盘，
+# 重启不丢，统计中心可跨重启累计。
+DATA_DIR = os.path.join(_HERE, "data")
+TRADE_MEM = 5000                             # 统计中心内存样本容量（最近 N 笔）
+TRADE_FILE_MAX_MB = 60                       # trades.jsonl 超过此大小则轮转归档
+TRADE_ROTATE_KEEP = 50000                    # 轮转时保留最近 N 笔
+TRADES = collections.deque(maxlen=TRADE_MEM) # 服务器侧成交记录(带类别)，供统计中心
+RUN_META = {"run_start": None, "initial_equity": 10000.0, "version": 1, "last_round": 0}
+
+def _now_iso():
+    return _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def load_persistence():
+    """启动即加载：初始化今日运行(若首次)，并从磁盘重建累计成交/权益曲线，使重启不丢数据。"""
+    global TRADES, RUN_META
+    os.makedirs(DATA_DIR, exist_ok=True)
+    meta_path = os.path.join(DATA_DIR, "run_meta.json")
+    # 显式重置：SIM_RESET=1 时清空历史，从今天重新建立干净起点（默认不启用，防误删）
+    if os.environ.get("SIM_RESET") == "1":
+        for _f in ("run_meta.json", "trades.jsonl", "equity.jsonl"):
+            _p = os.path.join(DATA_DIR, _f)
+            if os.path.exists(_p):
+                try:
+                    os.remove(_p)
+                except Exception:
+                    pass
+        RUN_META.clear()
+        RUN_META.update({"run_start": None, "initial_equity": 10000.0,
+                         "version": 1, "last_round": 0})
+        print("[persistence] SIM_RESET=1 -> 已清空历史，重建干净起点")
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                RUN_META.update(json.load(f))
+        except Exception:
+            pass
+    if not RUN_META.get("run_start"):
+        RUN_META["run_start"] = _now_iso()
+        RUN_META["initial_equity"] = 10000.0
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(RUN_META, f, ensure_ascii=False, indent=2)
+    # 重建成交记录
+    tpath = os.path.join(DATA_DIR, "trades.jsonl")
+    rotate_trades_if_needed(tpath)
+    if os.path.exists(tpath):
+        try:
+            with open(tpath, "r", encoding="utf-8") as f:
+                # 只保留最近 TRADE_MEM 笔进入内存（deque maxlen 自动截尾）
+                for line in collections.deque(f, TRADE_MEM):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        TRADES.append(json.loads(line))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    # 重建权益曲线 + 轮次/现金/累计锁利
+    epath = os.path.join(DATA_DIR, "equity.jsonl")
+    last_round = RUN_META.get("last_round", 0) or 0
+    eq_list = []
+    if os.path.exists(epath):
+        try:
+            with open(epath, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        o = json.loads(line)
+                        eq_list.append(o.get("equity", 10000.0))
+                        last_round = max(last_round, int(o.get("round", 0)))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    # realized_total 优先取检查点（全量，跨重启不丢）；无检查点时才从样本重算（兼容旧数据）
+    realized_total = RUN_META.get("realized_total")
+    if realized_total is None:
+        realized_total = sum(t.get("pnl", 0.0) for t in TRADES if t.get("side") == "sell")
+    realized_total = float(realized_total)
+    # 历史最高权益（跨重启不丢，用于正确计算回撤）
+    peak_equity = RUN_META.get("peak_equity")
+    peak_equity = float(peak_equity) if peak_equity is not None else RUN_META["initial_equity"]
+    peak_equity = max(peak_equity, max(eq_list) if eq_list else peak_equity)
+    with LOCK:
+        STATE["round"] = last_round
+        STATE["realized"] = round(realized_total, 2)
+        STATE["cash"] = round(RUN_META["initial_equity"] + realized_total, 2)
+        STATE["equity"] = STATE["cash"]
+        STATE["peak_equity"] = round(peak_equity, 2)
+        STATE["equity_curve"] = eq_list[-600:] or [STATE["cash"]]
+    book.cash = STATE["cash"]
+    book.realized_pnl = realized_total
+    print("[persistence] run_start=%s 累计成交=%d 轮次=%d 权益=%.2f" % (
+        RUN_META["run_start"], len(TRADES), last_round, STATE["cash"]))
+
+def rotate_trades_if_needed(tpath):
+    """trades.jsonl 超过阈值时归档旧文件，只保留最近 TRADE_ROTATE_KEEP 笔，防止无限膨胀。"""
+    try:
+        if not os.path.exists(tpath):
+            return
+        if os.path.getsize(tpath) < TRADE_FILE_MAX_MB * 1024 * 1024:
+            return
+        with open(tpath, "r", encoding="utf-8") as f:
+            tail = list(collections.deque(f, TRADE_ROTATE_KEEP))
+        stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        arc = os.path.join(DATA_DIR, "trades_archive_%s.jsonl" % stamp)
+        os.replace(tpath, arc)
+        with open(tpath, "w", encoding="utf-8") as f:
+            f.writelines(tail)
+        print("[persistence] trades.jsonl 轮转归档 -> %s（保留最近 %d 笔）"
+              % (os.path.basename(arc), len(tail)))
+    except Exception:
+        pass
+
+def save_trade(rec):
+    try:
+        with open(os.path.join(DATA_DIR, "trades.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+def save_equity_sample(round_n, equity):
+    try:
+        with open(os.path.join(DATA_DIR, "equity.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps({"round": round_n, "equity": round(equity, 2),
+                                "ts": _now_iso()}, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+def update_run_meta_round(round_n, realized_total=None, equity=None, peak_equity=None):
+    """每轮更新检查点：轮次 + 全量累计锁利 + 历史峰值权益（均不依赖 TRADES 样本，重启不丢）。"""
+    RUN_META["last_round"] = round_n
+    if realized_total is not None:
+        RUN_META["realized_total"] = round(float(realized_total), 2)
+    if equity is not None:
+        RUN_META["last_equity"] = round(float(equity), 2)
+    if peak_equity is not None:
+        RUN_META["peak_equity"] = round(float(peak_equity), 2)
+    try:
+        with open(os.path.join(DATA_DIR, "run_meta.json"), "w", encoding="utf-8") as f:
+            json.dump(RUN_META, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def compute_stats():
+    """统计中心：从落盘成交流水中聚合关键指标。"""
+    trades = list(TRADES)
+    buys = [t for t in trades if t.get("side") == "buy"]
+    sells = [t for t in trades if t.get("side") == "sell"]
+    win = [t for t in sells if (t.get("pnl") or 0) > 0]
+    # 全量累计锁利来自检查点（跨重启不丢）；TRADES 只是最近样本，用于分布类统计
+    realized = STATE["realized"]
+    sample_n = len(trades)
+    # 全量口径优先（检查点），缺失时回退到最近样本
+    total_n = int(RUN_META.get("trades_total") or 0) or len(trades)
+    sells_n = int(RUN_META.get("sells_total") or 0) or len(sells)
+    wins_n = int(RUN_META.get("wins_total") or 0) or len(win)
+    equity_now = STATE["equity"]
+    eq = STATE["equity_curve"] or [equity_now]
+    # 历史峰值（跨重启不丢）+ 当前曲线峰值，取大者
+    peak = max(float(STATE.get("peak_equity") or 0.0), float(max(eq)), float(equity_now))
+    # 标准最大回撤：沿曲线跟踪 running peak，只统计 peak 之后的跌幅
+    run_peak = float(eq[0]); mdd = 0.0
+    for v in eq:
+        v = float(v)
+        if v > run_peak:
+            run_peak = v
+        d = (run_peak - v) / run_peak * 100.0 if run_peak > 0 else 0.0
+        if d > mdd:
+            mdd = d
+    # 当前回撤（相对历史最高权益）
+    dd = (peak - float(equity_now)) / peak * 100.0 if peak > 0 else 0.0
+    tags = {}
+    for t in trades:
+        tg = t.get("tag", "other")
+        d = tags.setdefault(tg, {"n": 0, "pnl": 0.0, "win": 0})
+        d["n"] += 1
+        p = t.get("pnl") or 0
+        d["pnl"] += p
+        if t.get("side") == "sell" and p > 0:
+            d["win"] += 1
+    # 全量口径优先（检查点累计），缺失时回退到最近样本
+    full_tags = RUN_META.get("tag_pnl")
+    tags_out = {k: {"n": v.get("n", 0), "pnl": round(v.get("pnl", 0.0), 2),
+                    "win": v.get("win", 0)} for k, v in full_tags.items()} if full_tags else \
+               {k: {"n": v["n"], "pnl": round(v["pnl"], 2), "win": v["win"]} for k, v in tags.items()}
+    days = {}
+    for t in trades:
+        ts = t.get("ts")
+        try:
+            day = _dt.datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d")
+        except Exception:
+            day = str(ts)[:10]
+        if day:
+            days[day] = round(days.get(day, 0.0) + (t.get("pnl") or 0), 2)
+    full_days = RUN_META.get("daily_pnl")
+    days_out = {k: round(v, 2) for k, v in full_days.items()} if full_days else days
+    mkt_pnl = {}
+    for t in trades:
+        mk = t.get("mkt", "-")
+        mkt_pnl[mk] = mkt_pnl.get(mk, 0) + (t.get("pnl") or 0)
+    full_mkt = RUN_META.get("mkt_pnl")
+    mkt_out = full_mkt if full_mkt else mkt_pnl
+    best = max(mkt_out.items(), key=lambda kv: kv[1]) if mkt_out else ("-", 0)
+    worst = min(mkt_out.items(), key=lambda kv: kv[1]) if mkt_out else ("-", 0)
+    best_t = max(trades, key=lambda t: (t.get("pnl") or 0)) if trades else None
+    worst_t = min(trades, key=lambda t: (t.get("pnl") or 0)) if trades else None
+    run_start = RUN_META.get("run_start")
+    try:
+        sd = _dt.datetime.strptime(run_start, "%Y-%m-%d %H:%M:%S") if run_start else None
+        dur_min = (_dt.datetime.now() - sd).total_seconds() / 60.0 if sd else 0.0
+    except Exception:
+        dur_min = 0.0
+    rate = total_n / dur_min if dur_min > 0.05 else 0.0
+    return {
+        "run_start": run_start,
+        "initial_equity": RUN_META.get("initial_equity"),
+        "round": STATE["round"],
+        "equity_now": round(equity_now, 2),
+        "realized": round(realized, 2),
+        "peak": round(peak, 2),
+        "drawdown_pct": round(dd, 2), "max_drawdown_pct": round(mdd, 2),
+        "peak_profit": round(peak - float(RUN_META.get("initial_equity") or 10000.0), 2),
+        "trades_total": total_n, "buys": max(total_n - sells_n, 0), "sells": sells_n,
+        "win": wins_n, "win_rate": round(wins_n / sells_n * 100, 1) if sells_n else 0.0,
+        "per_tag": tags_out,
+        "per_day": days_out,
+        "best_market": [best[0], round(best[1], 2)],
+        "worst_market": [worst[0], round(worst[1], 2)],
+        "best_trade": (best_t and {"mkt": best_t.get("mkt"), "pnl": best_t.get("pnl"), "side": best_t.get("side")}) or None,
+        "worst_trade": (worst_t and {"mkt": worst_t.get("mkt"), "pnl": worst_t.get("pnl"), "side": worst_t.get("side")}) or None,
+        "duration_min": round(dur_min, 1), "trade_rate": round(rate, 2),
+        "trades_per_hour": round(total_n / (dur_min / 60.0), 1) if dur_min > 0.05 else 0.0,
+        "avg_pnl": round(sum((t.get("pnl") or 0) for t in sells) / len(sells), 4) if sells else 0.0,
+        "sample_n": sample_n,
+    }
 
 # ============ 真实行情池（urllib 直连 Gamma） ============
 MARKETS_LIVE = None   # fetch_poly_quotes 返回的实时二元盘口列表
@@ -75,9 +319,27 @@ BLOCK_EXTRA = ["iran", "invade", "invasion", "russia", "ukraine", "israel",
                "palestine", "china", "ccp", "communist",
                # 中东航运咽喉（涉伊朗/胡塞冲突，地缘敏感）
                "hormuz", "mandeb", "bab el-mandeb", "red sea", "yemen",
-               "houthis", "houthi", "suez", "gulf", "opec"]
-def is_blocked(q):
-    return P._is_blocked(q, None) or any(k in (q or "").lower() for k in BLOCK_EXTRA)
+               "houthis", "houthi", "suez", "gulf", "opec",
+               # 其他地缘/国家主体（非体育语境下屏蔽）
+               "syria", "north korea", "korea", "lebanon", "hezbollah",
+               "afghanistan", "iraq", "venezuela", "cuba", "belarus"]
+# 体育赛事专用：只屏蔽真正的政治/军事/选举词，放行国家名（如 New Zealand vs. Syria）
+BLOCK_SPORTS = ["invade", "invasion", "geopolit", "nuclear", "sanction",
+                "election", "president", "putin", "trump", "biden", "kremlin",
+                "nato", "missile", "military", "army", "gaza", "palestine",
+                "ccp", "communist", "war ", "world war", " houthis", "houthi"]
+def is_blocked(q, tag=None):
+    """合规红线过滤。体育赛事里的国家名不算政治敏感（如 New Zealand vs. Syria），
+    因此对 sports 类别只套用「真正政治/军事」词表，避免误杀。"""
+    if P._is_blocked(q, None):
+        return True
+    ql = (q or "").lower()
+    if tag is None:
+        tag = classify(q)
+    # 对抗赛句式（A vs B / O/U 大小球）视为体育赛事，其中的国家名不敏感
+    is_match = (" vs " in ql) or (" vs. " in ql) or (" o/u " in ql) or (" over/under" in ql)
+    words = BLOCK_SPORTS if (tag == "sports" or is_match) else BLOCK_EXTRA
+    return any(k in ql for k in words)
 
 
 def select_mm(rows):
@@ -138,6 +400,9 @@ def step():
     skew = float(book.rigor.get("inventory_skew", 0.0))
     quotes = {}
     round_pnl = 0.0
+    round_trades = 0
+    round_sells = 0
+    round_wins = 0
     for tok in MM_SET:
         m = by_tok.get(tok)
         if not m:
@@ -161,18 +426,52 @@ def step():
         }
         # 同轮双边建平：先买建仓、再卖平仓，库存归零，纯捕获价差（零漂移风险）。
         # 这正是离线四维扫描正 EV 的真实对应——同轮盘口不变，锁利 = spread·(1-2·adverse)·size − fee。
-        try:
-            r1 = book.market_make(opp, size)
-            if r1.get("ok") and isinstance(r1.get("pnl"), (int, float)):
-                round_pnl += r1["pnl"]
-        except Exception:
-            pass
-        try:
-            r2 = book.market_make(opp, size)
-            if r2.get("ok") and isinstance(r2.get("pnl"), (int, float)):
-                round_pnl += r2["pnl"]
-        except Exception:
-            pass
+        tag = classify(qtext)
+        for _leg in (0, 1):
+            try:
+                r = book.market_make(opp, size)
+            except Exception:
+                r = {}
+            if r.get("ok") and isinstance(r.get("pnl"), (int, float)):
+                round_pnl += r["pnl"]
+                e = book.positions[-1] if book.positions else None
+                if e:
+                    rec = {
+                        "ts": round(e.get("ts", time.time()), 1),
+                        "round": STATE["round"] + 1,
+                        "mkt": (e.get("question") or e.get("mkt") or "-")[:40],
+                        "tag": tag,
+                        "side": e.get("side", ""),
+                        "entry": e.get("entry"),
+                        "size": e.get("size"),
+                        "pnl": e.get("pnl"),
+                        "slip": e.get("slip"),
+                        "cash_after": e.get("cash_after"),
+                        "q": qtext[:60],
+                    }
+                    TRADES.append(rec)
+                    save_trade(rec)
+                    round_trades += 1
+                    if rec.get("side") == "sell":
+                        round_sells += 1
+                        if float(rec.get("pnl") or 0.0) > 0:
+                            round_wins += 1
+                    # 按类别累计（全量，跨重启不丢；TRADES 只是最近样本）
+                    tp = RUN_META.setdefault("tag_pnl", {})
+                    g = tp.setdefault(tag, {"n": 0, "pnl": 0.0, "win": 0, "sells": 0})
+                    g["n"] += 1
+                    if rec.get("side") == "sell":
+                        # 只累计平仓腿，与 realized 同口径（保证「分类之和 = 累计锁利」）
+                        # 注意：累加原始值不做逐笔 round，避免 6000+ 笔的舍入误差累积
+                        g["pnl"] = g["pnl"] + float(rec.get("pnl") or 0.0)
+                        g["sells"] += 1
+                        if float(rec.get("pnl") or 0.0) > 0:
+                            g["win"] += 1
+                    # 按市场累计（全量，与 realized 同口径）
+                    if rec.get("side") == "sell":
+                        mp_ = RUN_META.setdefault("mkt_pnl", {})
+                        mk_ = rec["mkt"]
+                        mp_[mk_] = mp_.get(mk_, 0.0) + float(rec.get("pnl") or 0.0)
         # 展示用：我们计算出的双边报价（与引擎同公式）
         off = skew * spread
         buy_base = yb + adverse * spread
@@ -185,38 +484,48 @@ def step():
             "inv": 0, "liq": round(float(m.get("liquidity") or 0), 0),
         }
     # 快照到 STATE
+    prev_realized = STATE["realized"]
     with LOCK:
         STATE["round"] += 1
         STATE["cash"] = round(book.cash, 2)
         STATE["realized"] = round(book.realized_pnl, 2)
         STATE["equity"] = round(book.cash, 2)   # 库存恒0，盯市权益=现金
         STATE["round_pnl"] = round(round_pnl, 2)
+        # 历史峰值权益（跨重启不丢）
+        if STATE["equity"] > STATE.get("peak_equity", 0):
+            STATE["peak_equity"] = round(STATE["equity"], 2)
         STATE["n_markets"] = 0
         STATE["inv_notional"] = 0.0
         STATE["quotes"] = quotes
         STATE["live_count"] = len(MARKETS_LIVE) if MARKETS_LIVE else 0
         STATE["mm_count"] = len(MM_SET)
         STATE["last_refresh"] = time.time()
-        # 最近成交（取引擎 positions 末尾，新->旧）
+        # 最近成交（取服务器侧 TRADES 末尾，新->旧；带类别，供统计中心）
         pos = []
-        for e in book.positions[-40:][::-1]:
+        for e in list(TRADES)[-40:][::-1]:
             pos.append({
-                "ts": round(e.get("ts", time.time()), 1),
-                "mkt": (e.get("question") or e.get("mkt") or "-")[:26],
-                "side": e.get("side", ""),
-                "entry": e.get("entry"),
-                "size": e.get("size"),
-                "pnl": e.get("pnl"),
-                "slip": e.get("slip"),
-                "cash_after": e.get("cash_after"),
+                "ts": e.get("ts"), "mkt": e.get("mkt"), "side": e.get("side"),
+                "entry": e.get("entry"), "size": e.get("size"), "pnl": e.get("pnl"),
+                "slip": e.get("slip"), "cash_after": e.get("cash_after"), "tag": e.get("tag"),
             })
         STATE["positions"] = pos
         # 限制引擎 positions 内存增长
-        if len(book.positions) > 2000:
-            book.positions = book.positions.__class__(list(book.positions)[-2000:])
+        if len(book.positions) > 4000:
+            book.positions = book.positions.__class__(list(book.positions)[-4000:])
         STATE["equity_curve"].append(round(STATE["equity"], 2))
         if len(STATE["equity_curve"]) > 600:
             STATE["equity_curve"].pop(0)
+        # 按日累计（全量，跨重启不丢；用 realized 增量，保证「按日之和 = 累计锁利」）
+        _day = _dt.datetime.now().strftime("%Y-%m-%d")
+        _dp = RUN_META.setdefault("daily_pnl", {})
+        # 同样累加原值，不逐轮 round，避免舍入误差累积
+        _dp[_day] = _dp.get(_day, 0.0) + (STATE["realized"] - prev_realized)
+        RUN_META["trades_total"] = RUN_META.get("trades_total", 0) + round_trades
+        RUN_META["sells_total"] = RUN_META.get("sells_total", 0) + round_sells
+        RUN_META["wins_total"] = RUN_META.get("wins_total", 0) + round_wins
+        save_equity_sample(STATE["round"], STATE["equity"])
+        update_run_meta_round(STATE["round"], STATE["realized"], STATE["equity"],
+                              STATE.get("peak_equity"))
 
 
 def loop():
@@ -237,112 +546,172 @@ def loop():
 HTML = r"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Polymarket 实时模拟交易监视器 v3（真实盘口）</title>
+<title>Polymarket 实时模拟交易大屏（真实盘口）</title>
 <style>
-:root{--bg:#0f1420;--panel:#192033;--ink:#e6ecf5;--mut:#9aa7bd;--red:#ff5b6e;--grn:#39d98a;--blue:#5aa9ff;--line:#2a3450;--amber:#e8c98a}
+:root{
+  --bg:#070a0f;--bg2:#0b1018;--panel:#111824;--panel2:#0d141e;
+  --ink:#dfe7f2;--mut:#7e8aa0;--line:#1c2738;
+  --up:#ff5b6e;     /* 涨 / 盈利（中国习惯：红） */
+  --dn:#2ee6a6;     /* 跌 / 亏损（中国习惯：绿） */
+  --acc:#46b0ff;--amber:#f3b54a;--gold:#e8c98a;
+}
 *{box-sizing:border-box}
-body{margin:0;background:radial-gradient(1200px 600px at 85% -10%,#16203a 0%,var(--bg) 60%);color:var(--ink);font:14px/1.5 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;min-height:100vh}
-/* 顶部滚动行情条 */
-.ticker{overflow:hidden;white-space:nowrap;background:#0a0f1a;border-bottom:1px solid var(--line);padding:7px 0;position:relative}
-.ticker .run{display:inline-block;padding-left:100%;animation:marquee 45s linear infinite}
-.ticker .run span{display:inline-block;padding:0 28px;font-size:13px;color:var(--mut)}
+body{margin:0;background:
+  radial-gradient(1100px 520px at 88% -8%,#0f1b2e 0%,transparent 60%),
+  radial-gradient(900px 500px at 0% 110%,#0c1622 0%,transparent 55%),
+  var(--bg);
+  color:var(--ink);font:14px/1.5 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;min-height:100vh}
+/* 顶部滚动行情条（放慢 + 悬停暂停） */
+.ticker{overflow:hidden;white-space:nowrap;background:#060a10;border-bottom:1px solid var(--line);padding:8px 0;position:relative;cursor:default}
+.ticker .run{display:inline-block;padding-left:100%;animation:marquee 72s linear infinite}
+.ticker:hover .run{animation-play-state:paused}
+.ticker .run span{display:inline-block;padding:0 30px;font-size:13px;color:var(--mut)}
 .ticker .run b{color:var(--ink);font-weight:600}
-.ticker .run .up{color:var(--grn)}.ticker .run .dn{color:var(--red)}
+.ticker .run .yb{color:var(--up);font-weight:600}.ticker .run .ya{color:var(--dn);font-weight:600}
 @keyframes marquee{to{transform:translateX(-100%)}}
-header{padding:16px 22px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:14px;flex-wrap:wrap;background:linear-gradient(90deg,#141c30,#101627)}
+header{padding:15px 22px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+  background:linear-gradient(90deg,#0d1622,#0a0f18)}
 header h1{margin:0;font-size:19px}
-.gtitle{background:linear-gradient(90deg,#5aa9ff,#39d98a,#5aa9ff);background-size:200% auto;-webkit-background-clip:text;background-clip:text;color:transparent;animation:slide 5s linear infinite;font-weight:800}
+.gtitle{background:linear-gradient(90deg,#46b0ff,#2ee6a6,#46b0ff);background-size:200% auto;-webkit-background-clip:text;background-clip:text;color:transparent;animation:slide 6s linear infinite;font-weight:800;letter-spacing:.5px}
 @keyframes slide{to{background-position:200% center}}
-.beat{width:10px;height:10px;border-radius:50%;background:var(--grn);box-shadow:0 0 10px var(--grn);animation:beat 1.1s infinite;flex:none}
-.beat.hot{background:var(--amber);box-shadow:0 0 13px var(--amber);animation:beat .45s infinite}
-@keyframes beat{0%,100%{transform:scale(1);opacity:1}30%{transform:scale(1.55);opacity:.55}}
-.badge{font-size:12px;padding:3px 10px;border-radius:20px;background:#1f2940;color:var(--mut);border:1px solid var(--line);transition:all .3s}
-.banner{background:linear-gradient(90deg,#16261c,#13251b);border:1px solid #2c5a3c;color:#a8e6c0;padding:8px 14px;margin:12px 22px 0;border-radius:8px;font-size:12.5px}
-.wrap{padding:14px 22px;max-width:1240px;margin:0 auto}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin:12px 0}
-.card{background:linear-gradient(160deg,var(--panel),#141b2c);border:1px solid var(--line);border-radius:12px;padding:13px 16px;transition:transform .25s,box-shadow .25s,border-color .25s}
-.card:hover{transform:translateY(-3px);box-shadow:0 8px 22px rgba(90,169,255,.18);border-color:#34466e}
+.beat{width:10px;height:10px;border-radius:50%;background:var(--dn);box-shadow:0 0 10px var(--dn);animation:beat 1.2s infinite;flex:none}
+.beat.hot{background:var(--amber);box-shadow:0 0 14px var(--amber);animation:beat .42s infinite}
+@keyframes beat{0%,100%{transform:scale(1);opacity:1}30%{transform:scale(1.6);opacity:.5}}
+.badge{font-size:12px;padding:3px 10px;border-radius:20px;background:#101a28;color:var(--mut);border:1px solid var(--line);transition:all .3s}
+.badge.live{background:#0e2419;color:#7fe9bd;border-color:#1c503a}
+.sndbtn{cursor:pointer;font-size:14px;background:#101a28;border:1px solid var(--line);border-radius:8px;padding:4px 10px;color:var(--mut);transition:all .2s}
+.sndbtn:hover{color:var(--ink);border-color:var(--acc)}
+.banner{background:linear-gradient(90deg,#0e1b14,#0c1813);border:1px solid #1d3a2a;color:#9fe3c4;padding:8px 14px;margin:12px 22px 0;border-radius:8px;font-size:12.5px}
+.wrap{padding:14px 22px;max-width:1480px;margin:0 auto}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:12px;margin:12px 0}
+.card{background:linear-gradient(160deg,var(--panel),#0c131d);border:1px solid var(--line);border-radius:12px;padding:13px 16px;transition:transform .25s,box-shadow .25s,border-color .25s}
+.card:hover{transform:translateY(-3px);box-shadow:0 8px 22px rgba(70,176,255,.16);border-color:#2a3c57}
 .card .k{color:var(--mut);font-size:12px}.card .v{font-size:21px;font-weight:700;margin-top:4px;font-variant-numeric:tabular-nums;transition:color .4s}
-.v.g{color:var(--grn)}.v.r{color:var(--red)}.v.b{color:var(--blue)}
-.tabs{display:flex;gap:8px;margin:14px 0 4px}
-.tab{background:#1f2940;border:1px solid var(--line);color:var(--mut);padding:8px 15px;border-radius:8px;cursor:pointer;font-size:13px;transition:all .2s}
-.tab:hover{color:var(--ink)}
-.tab.on{background:linear-gradient(90deg,#2c3a5e,#34487a);color:#fff;border-color:#3a4d7a;box-shadow:0 0 14px rgba(90,169,255,.25)}
-.grid{display:grid;grid-template-columns:1.3fr 1fr;gap:16px}
-@media(max-width:880px){.grid{grid-template-columns:1fr}}
-.panel{background:linear-gradient(160deg,var(--panel),#141b2c);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:16px;animation:fade .35s ease}
+.v.up{color:var(--up)}.v.dn{color:var(--dn)}.v.b{color:var(--acc)}
+.big{display:grid;grid-template-columns:1.05fr 1.35fr 0.95fr;gap:14px;align-items:start}
+@media(max-width:1200px){.big{grid-template-columns:1fr}}
+.panel{background:linear-gradient(160deg,var(--panel),#0c131d);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:14px;animation:fade .35s ease}
 @keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
-.panel h2{margin:0 0 10px;font-size:15px}
-canvas{width:100%;height:240px;background:#0b1018;border:1px solid var(--line);border-radius:8px;display:block}
-.scroll{max-height:420px;overflow:auto}
+.panel h2{margin:0 0 10px;font-size:14.5px;color:#cdd8e8;display:flex;align-items:center;gap:8px}
+.panel h2 .sub{color:var(--mut);font-size:11.5px;font-weight:400}
+canvas{width:100%;height:260px;background:#070b11;border:1px solid var(--line);border-radius:8px;display:block}
+.scroll{max-height:520px;overflow:auto}
 table{border-collapse:collapse;width:100%;font-size:12.5px}
 th,td{border:1px solid var(--line);padding:5px 8px;text-align:center}
-th{background:#1f2940;color:var(--mut);position:sticky;top:0;z-index:1}
-td.l{text-align:left}.buy{color:var(--grn)}.sell{color:var(--red)}
-/* 新成交行动画 */
-@keyframes flashG{0%{background:rgba(57,217,138,.40)}100%{background:transparent}}
-@keyframes flashR{0%{background:rgba(255,91,110,.34)}100%{background:transparent}}
-tr.row-new.flash-up td{animation:flashG 1.2s ease-out}
-tr.row-new.flash-down td{animation:flashR 1.2s ease-out}
-.latest{display:flex;align-items:center;gap:10px;background:#0b1018;border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin-bottom:12px;font-size:13px}
-.latest .up{color:var(--grn);font-weight:700}.latest .down{color:var(--red);font-weight:700}
-.note{color:var(--mut);font-size:12px;margin-top:8px}
-select{background:#1f2940;color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:5px 8px;font-size:13px}
-.tag{font-size:11px;padding:1px 7px;border-radius:10px;background:#27324d;color:var(--mut)}
+th{background:#101a28;color:var(--mut);position:sticky;top:0;z-index:1}
+td.l{text-align:left}.buy{color:var(--up)}.sell{color:var(--dn)}
+@keyframes flashUp{0%{background:rgba(255,91,110,.36)}100%{background:transparent}}
+@keyframes flashDn{0%{background:rgba(46,230,166,.30)}100%{background:transparent}}
+tr.row-new.flash-up td{animation:flashUp 1.2s ease-out}
+tr.row-new.flash-dn td{animation:flashDn 1.2s ease-out}
+.latest{display:flex;align-items:center;gap:10px;background:#070b11;border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin-bottom:12px;font-size:13px}
+.latest .up{color:var(--up);font-weight:700}.latest .dn{color:var(--dn);font-weight:700}
+.note{color:var(--mut);font-size:12px;margin-top:8px;line-height:1.5}
+select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:5px 8px;font-size:13px}
+.tag{font-size:11px;padding:1px 7px;border-radius:10px;background:#172231;color:var(--mut)}
+.up{color:var(--up)}.dn{color:var(--dn)}
+/* 统计中心 */
+.statbox{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.stat{background:#0a121c;border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.stat .k{color:var(--mut);font-size:11.5px}.stat .v{font-size:16px;font-weight:700;margin-top:3px;font-variant-numeric:tabular-nums}
+.sc-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:760px){.sc-grid{grid-template-columns:1fr}}
 </style></head>
 <body>
 <div class="ticker"><div class="run" id="tick">正在加载真实 Polymarket 盘口…</div></div>
 <header>
   <span class="beat" id="beat"></span>
-  <h1 class="gtitle">Polymarket 实时模拟交易监视器 v3</h1>
+  <h1 class="gtitle">Polymarket 实时模拟交易大屏</h1>
+  <span class="badge live" id="status">● 连接中…</span>
   <span class="badge" id="rnd">round 0</span>
-  <span class="badge" id="live">真实盘口: 0</span>
-  <span class="badge" id="status">● 连接中…</span>
+  <span class="badge" id="live">真实盘口 0 · 做市 0</span>
+  <span class="sndbtn" id="snd" title="成交音效开关（默认关）">🔇 音效</span>
   <span class="badge">引擎: RigorVirtualBook.market_make</span>
 </header>
-<div class="banner">✅ 行情来自<b>真实 Polymarket 盘口</b>（urllib 直连 Gamma，每 ~90s 刷新，已合规过滤政治/地缘/军事等敏感类）。每个真实市场由<b>验证过的做市引擎</b>在真实盘口上<b>同轮双边建平</b>（买@YES买价+adverse·spread，卖@YES卖价−adverse·spread，库存归零），纯捕获价差、零库存漂移风险。全程 <b>DRY_RUN 影子账本、零真钱</b>——演示真实行情下的策略表现，不等同于实盘结论。</div>
+<div class="banner">✅ 行情来自<b>真实 Polymarket 盘口</b>（urllib 直连 Gamma，每 ~90s 刷新，已合规过滤政治/地缘/军事/中东航运咽喉等敏感类）。每个真实市场由<b>验证过的做市引擎</b>在真实盘口上<b>同轮双边建平</b>（库存归零，纯捕获价差，零漂移风险）。全程 <b>DRY_RUN 影子账本、零真钱</b>——演示真实行情下的策略表现，<b>不等同于实盘结论</b>。配色按中国习惯：<b style="color:var(--up)">红=涨/盈利</b>，<b style="color:var(--dn)">绿=跌/亏损</b>。数据自 <b id="run-start">—</b> 起落盘累计。</div>
 <div class="wrap">
   <div class="cards" id="cards"></div>
-  <div class="tabs">
-    <div class="tab on" data-t="live">📡 Polymarket 真实行情</div>
-    <div class="tab" data-t="sim">🤖 模拟交易实时</div>
-    <div class="tab" data-t="quote">📊 盘口 + 我们报价</div>
-  </div>
 
-  <div class="panel" id="p-live">
-    <h2>Polymarket 真实行情榜（实时拉取）
-      <select id="cat" style="float:right"><option value="all">全部类别</option><option value="crypto">crypto</option><option value="economy">economy</option><option value="finance">finance</option><option value="sports">sports</option><option value="tech">tech</option><option value="science">science</option><option value="entertainment">entertainment</option><option value="other">other</option></select>
-    </h2>
-    <div class="scroll"><table id="mkt"><thead><tr><th>市场(问题)</th><th>类别</th><th>YES 买</th><th>YES 卖</th><th>NO 买</th><th>NO 卖</th><th>流动性</th></tr></thead><tbody></tbody></table></div>
-    <div class="note">YES = 结果代币隐含概率；买/卖为 Gamma 真实最优买卖盘口；流动性为该市场 USDC 深度。点其他 tab 看模拟成交。</div>
-  </div>
+  <div class="big">
+    <!-- 左：真实行情榜 -->
+    <div class="panel">
+      <h2>📡 Polymarket 真实行情
+        <select id="cat" style="margin-left:auto"><option value="all">全部类别</option><option value="crypto">crypto</option><option value="economy">economy</option><option value="finance">finance</option><option value="sports">sports</option><option value="tech">tech</option><option value="science">science</option><option value="entertainment">entertainment</option><option value="other">other</option></select>
+      </h2>
+      <div class="scroll" style="max-height:560px"><table id="mkt"><thead><tr><th>市场(问题)</th><th>类别</th><th>YES 买</th><th>YES 卖</th><th>NO 买</th><th>NO 卖</th><th>流动性</th></tr></thead><tbody></tbody></table></div>
+      <div class="note">YES=结果代币隐含概率；买/卖为 Gamma 真实最优买卖盘口；<b style="color:var(--up)">买价红</b>、<b style="color:var(--dn)">卖价绿</b>；流动性为该市场 USDC 深度。</div>
+    </div>
 
-  <div class="panel" id="p-sim" style="display:none">
-    <div class="latest"><span class="beat" id="beat2"></span><span style="color:var(--mut)">最新成交：</span><span id="latest-txt">等待第一笔…</span></div>
-    <div class="grid">
-      <div><h2>盯市权益曲线 (实时)</h2><canvas id="cv" width="640" height="240"></canvas>
-        <div class="note">equity = 现金 + 未平仓库存 × last_mid（含未实现盈亏）</div></div>
-      <div><h2>本轮锁利 / 累计锁利</h2>
-        <div class="card" style="margin-bottom:10px"><div class="k">本轮锁利</div><div class="v b" id="ninv">$0</div></div>
-        <div class="card"><div class="k">累计锁利</div><div class="v" id="invn">$0</div></div>
+    <!-- 中：K线 + 实时成交 -->
+    <div>
+      <div class="panel">
+        <h2>📈 账户权益 K 线（真实成交累计）<span class="sub">红涨绿跌 · 每根=8 轮聚合</span></h2>
+        <canvas id="kc" width="680" height="260"></canvas>
+        <div class="note" id="kc-note">equity = 现金（库存恒 0）；K 线由逐轮权益聚合，涨红跌绿。</div>
+      </div>
+      <div class="panel">
+        <div class="latest"><span class="beat" id="beat2"></span><span style="color:var(--mut)">最新成交：</span><span id="latest-txt">等待第一笔…</span></div>
+        <h2>🤖 实时成交（过程与结果）</h2>
+        <div class="scroll" style="max-height:340px"><table id="trd"><thead><tr><th>时间</th><th>市场</th><th>类别</th><th>方向</th><th>成交价</th><th>量</th><th>本笔锁利</th><th>滑点</th><th>现金</th></tr></thead><tbody></tbody></table></div>
+        <div class="note">BUY=建仓（锁利 0），SELL=平仓（显示本笔锁利）；每笔在真实盘口价位成交。新成交行红/绿闪光。</div>
       </div>
     </div>
-    <h2>最近成交 (实时)</h2>
-    <div class="scroll"><table id="trd"><thead><tr><th>时间</th><th>市场</th><th>方向</th><th>成交价</th><th>量</th><th>本笔锁利</th><th>滑点</th><th>现金</th></tr></thead><tbody></tbody></table></div>
-    <div class="note">方向 BUY=建仓，SELL=对冲/平仓；仅平仓轮次有「本笔锁利」。每笔在真实盘口价位成交。</div>
+
+    <!-- 右：本轮/累计 + 统计中心摘要 -->
+    <div>
+      <div class="panel">
+        <h2>💰 本轮 / 累计锁利</h2>
+        <div class="cards" style="grid-template-columns:1fr 1fr;margin:0">
+          <div class="card"><div class="k">本轮锁利</div><div class="v b" id="ninv">$0</div></div>
+          <div class="card"><div class="k">累计锁利</div><div class="v" id="invn">$0</div></div>
+        </div>
+        <div class="note">累计锁利 = 全部平仓笔锁利之和（落盘累计，重启不丢）。</div>
+      </div>
+      <div class="panel">
+        <h2>📊 统计中心（实时）</h2>
+        <div class="statbox">
+          <div class="stat"><div class="k">运行时长</div><div class="v" id="st-dur">—</div></div>
+          <div class="stat"><div class="k">轮次</div><div class="v" id="st-round">0</div></div>
+          <div class="stat"><div class="k">总成交</div><div class="v" id="st-tot">0</div></div>
+          <div class="stat"><div class="k">胜率(平仓)</div><div class="v" id="st-win">0%</div></div>
+          <div class="stat"><div class="k">成交频率</div><div class="v" id="st-rate">0</div></div>
+          <div class="stat"><div class="k">累计锁利</div><div class="v" id="st-real">$0</div></div>
+          <div class="stat"><div class="k">峰值盈利</div><div class="v" id="st-pk">$0</div></div>
+          <div class="stat"><div class="k">权益峰值</div><div class="v" id="st-peak">$0</div></div>
+          <div class="stat"><div class="k">当前回撤</div><div class="v" id="st-dd">0%</div></div>
+          <div class="stat"><div class="k">历史最大回撤</div><div class="v" id="st-mdd">0%</div></div>
+        </div>
+        <div class="note" id="st-note">—</div>
+      </div>
+    </div>
   </div>
 
-  <div class="panel" id="p-quote" style="display:none">
-    <h2>真实盘口 + 我们的双边报价（本轮做市标的）</h2>
-    <div class="scroll"><table id="qtab"><thead><tr><th>市场(问题)</th><th>真实 mid</th><th>YES 买</th><th>YES 卖</th><th>我们买</th><th>我们卖</th><th>库存</th><th>流动性</th></tr></thead><tbody></tbody></table></div>
-    <div class="note">绿=我们买价(yes_bid+adverse·spread)，红=我们卖价(yes_ask−adverse·spread)，含库存偏置；库存≠0 时双边推离 mid 抑制追单、鼓励平仓。</div>
+  <!-- 底部：统计中心详情 -->
+  <div class="panel">
+    <h2>📑 统计中心 · 明细</h2>
+    <div class="sc-grid">
+      <div>
+        <div style="color:var(--mut);font-size:12.5px;margin-bottom:6px">按类别盈亏</div>
+        <table id="ptag"><thead><tr><th>类别</th><th>笔数</th><th>锁利</th><th>胜笔</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div>
+        <div style="color:var(--mut);font-size:12.5px;margin-bottom:6px">按日盈亏</div>
+        <table id="pday"><thead><tr><th>日期</th><th>锁利</th></tr></thead><tbody></tbody></table>
+        <div class="note" style="margin-top:10px">
+          最佳市场：<span id="st-best" class="up">—</span><br/>
+          最差市场：<span id="st-worst" class="dn">—</span><br/>
+          运行起点：<span id="st-run" style="color:var(--gold)">—</span>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 <script>
 function fmt(n){return (n==null)?'-':Number(n).toLocaleString('en-US',{maximumFractionDigits:2})}
 function money(n){return '$'+Number(n).toLocaleString('en-US',{maximumFractionDigits:2})}
 function smoney(n){return (n>=0?'+$':'-$')+Number(Math.abs(n)).toLocaleString('en-US',{maximumFractionDigits:2})}
-// 数字滚动动画
+function sgn(v){return (v>=0?'+$':'-$')+Number(Math.abs(v)).toFixed(2)}
+function col(v){return v>=0?'up':'dn'}
 function tween(el,to,render){
   const from=el._cur!=null?el._cur:to; el._cur=to;
   const dur=550,t0=performance.now();
@@ -353,14 +722,10 @@ function tween(el,to,render){
 }
 function setMoney(id,val,signed){
   const el=document.getElementById(id); if(!el)return;
-  el.className='v '+(val>0?'g':val<0?'r':'b');
+  el.className='v '+(val>0?'up':val<0?'dn':'b');
   tween(el,val, signed?smoney:money);
 }
-function setNum(id,val){
-  const el=document.getElementById(id); if(!el)return;
-  el.className='v b'; tween(el,val,v=>Number(v).toLocaleString('en-US',{maximumFractionDigits:0}));
-}
-// 卡片骨架（只建一次，后续只更新数值，保证滚动动画连续）
+function setNum(id,val){const el=document.getElementById(id); if(!el)return; el.className='v b'; tween(el,val,v=>Number(v).toLocaleString('en-US',{maximumFractionDigits:0}));}
 document.getElementById('cards').innerHTML=
   ['<div class="card"><div class="k">轮次</div><div class="v b" id="c-round">0</div></div>',
    '<div class="card"><div class="k">现金</div><div class="v b" id="c-cash">$0</div></div>',
@@ -369,8 +734,79 @@ document.getElementById('cards').innerHTML=
    '<div class="card"><div class="k">盯市权益</div><div class="v b" id="c-eq">$0</div></div>',
    '<div class="card"><div class="k">真实盘口</div><div class="v b" id="c-live">0</div></div>',
    '<div class="card"><div class="k">做市市场</div><div class="v b" id="c-mm">0</div></div>'].join('');
-let curTab='live', seen=new Set(), prevRound=0;
+let seen=new Set(), prevRound=0;
 function flashBeat(id){const b=document.getElementById(id); if(!b)return; b.classList.add('hot'); setTimeout(()=>b.classList.remove('hot'),650);}
+let audioCtx=null, soundOn=false;
+function toggleSound(){
+  soundOn=!soundOn; const b=document.getElementById('snd');
+  b.textContent=soundOn?'🔊 音效':'🔇 音效';
+  if(soundOn && !audioCtx){try{audioCtx=new (window.AudioContext||window.webkitAudioContext)();}catch(e){audioCtx=null;}}
+  if(audioCtx && audioCtx.state==='suspended') audioCtx.resume();
+}
+function beep(freq,dur,type,gain){
+  if(!soundOn||!audioCtx) return;
+  const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+  o.type=type||'sine'; o.frequency.value=freq; g.gain.value=gain||0.05;
+  o.connect(g); g.connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime+dur);
+}
+document.getElementById('snd').onclick=toggleSound;
+function drawCandles(curve){
+  const cv=document.getElementById('kc'),ctx=cv.getContext('2d'),W=cv.width,H=cv.height;
+  ctx.clearRect(0,0,W,H);
+  if(!curve||curve.length<2) return;
+  const K=Math.max(1,Math.floor(curve.length/64));
+  const candles=[];
+  for(let i=0;i<curve.length;i+=K){
+    const seg=curve.slice(i,i+K); if(!seg.length) continue;
+    candles.push({o:seg[0],h:Math.max.apply(null,seg),l:Math.min.apply(null,seg),c:seg[seg.length-1]});
+  }
+  let mn=Infinity,mx=-Infinity;
+  candles.forEach(c=>{mn=Math.min(mn,c.h,c.l);mx=Math.max(mx,c.h,c.l);});
+  const pad=(mx-mn)*0.12||1; mn-=pad; mx+=pad;
+  const X=i=>i/(candles.length-1)*W, Y=v=>H-((v-mn)/(mx-mn))*H;
+  ctx.strokeStyle='#16202e'; ctx.lineWidth=1;
+  for(let g=0;g<=4;g++){const y=g/4*H; ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+  const cw=Math.max(2, W/candles.length*0.6);
+  candles.forEach((c,i)=>{
+    const x=X(i), up=c.c>=c.o, color=up?'#ff5b6e':'#2ee6a6';
+    ctx.strokeStyle=color; ctx.fillStyle=color;
+    ctx.beginPath();ctx.moveTo(x,Y(c.h));ctx.lineTo(x,Y(c.l));ctx.stroke();
+    const yo=Y(c.o), yc=Y(c.c), top=Math.min(yo,yc), bh=Math.max(1,Math.abs(yc-yo));
+    ctx.globalAlpha=0.85; ctx.fillRect(x-cw/2,top,cw,bh); ctx.globalAlpha=1;
+  });
+  const last=candles[candles.length-1], lx=X(candles.length-1), ly=Y(last.c);
+  ctx.beginPath();ctx.arc(lx,ly,4,0,7);ctx.fillStyle=last.c>=last.o?'#ff5b6e':'#2ee6a6';
+  ctx.shadowColor=ctx.fillStyle;ctx.shadowBlur=10;ctx.fill();ctx.shadowBlur=0;
+  ctx.fillStyle='#7e8aa0';ctx.font='11px sans-serif';
+  ctx.fillText('$'+mx.toFixed(0),4,12);ctx.fillText('$'+mn.toFixed(0),4,H-4);
+}
+function renderStats(st){
+  if(!st||st.error) return;
+  document.getElementById('st-run').textContent=st.run_start||'-';
+  document.getElementById('run-start').textContent=st.run_start||'-';
+  document.getElementById('st-dur').textContent=st.duration_min+' 分';
+  document.getElementById('st-round').textContent=st.round;
+  document.getElementById('st-tot').textContent=st.trades_total;
+  document.getElementById('st-win').textContent=st.win_rate+'% ('+st.win+'/'+st.sells+')';
+  document.getElementById('st-rate').textContent=st.trades_per_hour+' 笔/时';
+  document.getElementById('st-peak').textContent='$'+st.peak;
+  document.getElementById('st-dd').textContent=st.drawdown_pct+'%';
+  const pk=document.getElementById('st-pk'); pk.className='v '+col(st.peak_profit); pk.textContent=sgn(st.peak_profit);
+  document.getElementById('st-mdd').textContent=st.max_drawdown_pct+'%';
+  document.getElementById('st-note').textContent=
+    '统计口径：自 '+st.run_start+' 起全量累计（落盘持久化，重启不丢）。'
+    +'总成交 '+st.trades_total+' 笔，其中平仓 '+st.sells+' 笔、盈利 '+st.win+' 笔，单笔均值 $'+st.avg_pnl+'。'
+    +'分类/按日/按市场三项之和均等于累计锁利 $'+st.realized+'（口径一致可交叉核对）。'
+    +'注：成交频率高源于模拟引擎每轮对 20 个市场双边撮合，非真实成交能力。';
+  const rc=document.getElementById('st-real'); rc.className='v '+col(st.realized); rc.textContent=sgn(st.realized);
+  const tags=Object.keys(st.per_tag).sort((a,b)=>st.per_tag[b].pnl-st.per_tag[a].pnl);
+  document.getElementById('ptag').querySelector('tbody').innerHTML=tags.map(t=>{const d=st.per_tag[t];
+    return `<tr><td>${t}</td><td>${d.n}</td><td class="${col(d.pnl)}">${sgn(d.pnl)}</td><td>${d.win}</td></tr>`;}).join('');
+  const days=Object.keys(st.per_day);
+  document.getElementById('pday').querySelector('tbody').innerHTML=days.map(d=>`<tr><td>${d}</td><td class="${col(st.per_day[d])}">${sgn(st.per_day[d])}</td></tr>`).join('');
+  document.getElementById('st-best').textContent=st.best_market[0].slice(0,26)+'  '+sgn(st.best_market[1]);
+  document.getElementById('st-worst').textContent=st.worst_market[0].slice(0,26)+'  '+sgn(st.worst_market[1]);
+}
 function tickState(){
   fetch('/api/state').then(r=>r.json()).then(s=>{
     document.getElementById('rnd').textContent='round '+s.round;
@@ -384,83 +820,58 @@ function tickState(){
     setMoney('c-eq',eq,false); setNum('c-live',s.live_count); setNum('c-mm',s.mm_count);
     document.getElementById('ninv').textContent=(s.round_pnl>=0?'+$':'-$')+fmt(Math.abs(s.round_pnl));
     document.getElementById('invn').textContent=(s.realized>=0?'+$':'-$')+fmt(Math.abs(s.realized));
-    // 权益曲线（渐变填充 + 末端发光点）
-    const cv=document.getElementById('cv'),ctx=cv.getContext('2d'),W=cv.width,H=cv.height;ctx.clearRect(0,0,W,H);
-    const ec=s.equity_curve;
-    if(ec.length>1){
-      const mn=Math.min.apply(null,ec),mx=Math.max.apply(null,ec),pad=(mx-mn)*0.18||1,lo=mn-pad,hi=mx+pad;
-      ctx.strokeStyle='#2a3450';ctx.beginPath();ctx.moveTo(0,H/2);ctx.lineTo(W,H/2);ctx.stroke();
-      const X=i=>i/(ec.length-1)*W, Y=v=>H-((v-lo)/(hi-lo))*H;
-      ctx.beginPath();ctx.moveTo(0,Y(ec[0]));
-      ec.forEach((v,i)=>ctx.lineTo(X(i),Y(v)));
-      const grad=ctx.createLinearGradient(0,0,0,H);
-      grad.addColorStop(0,'rgba(57,217,138,.30)');grad.addColorStop(1,'rgba(57,217,138,0)');
-      ctx.lineTo(W,H);ctx.lineTo(0,H);ctx.closePath();ctx.fillStyle=grad;ctx.fill();
-      ctx.strokeStyle=eq>=10000?'#39d98a':'#ff5b6e';ctx.lineWidth=2.2;ctx.beginPath();
-      ec.forEach((v,i)=>{i?ctx.lineTo(X(i),Y(v)):ctx.moveTo(X(i),Y(v));});ctx.stroke();
-      const lx=X(ec.length-1),ly=Y(ec[ec.length-1]);
-      ctx.beginPath();ctx.arc(lx,ly,6,0,7);ctx.fillStyle=eq>=10000?'#39d98a':'#ff5b6e';ctx.shadowColor=ctx.fillStyle;ctx.shadowBlur=12;ctx.fill();ctx.shadowBlur=0;
-      ctx.fillStyle='#9aa7bd';ctx.font='11px sans-serif';ctx.fillText('$'+fmt(hi),4,12);ctx.fillText('$'+fmt(lo),4,H-4);
-    }
-    if(curTab==='sim'){
-      const t2=document.getElementById('trd').querySelector('tbody');
-      let fresh=0;
-      const rows=s.positions.map(t=>{
-        const key=t.ts+'|'+t.mkt+'|'+t.side+'|'+t.entry;
-        const isNew=!seen.has(key); if(isNew){seen.add(key);fresh++;}
-        if(seen.size>400)seen.clear();
-        const cls=(t.side==='buy'?'flash-up':'flash-down');
-        return `<tr class="${isNew?'row-new '+cls:cls}"><td>${t.ts}</td><td class="l">${t.mkt}</td><td class="${t.side==='buy'?'buy':'sell'}">${(t.side||'').toUpperCase()}</td><td>${t.entry!=null?Number(t.entry).toFixed(4):'-'}</td><td>${t.size}</td><td>${t.pnl!=null?'$'+fmt(t.pnl):'-'}</td><td>${t.slip!=null?Number(t.slip).toFixed(4):'-'}</td><td>$${fmt(t.cash_after)}</td></tr>`;
-      }).join('');
-      t2.innerHTML=rows;
-      if(fresh>0){
-        flashBeat('beat2');
-        const t=s.positions[0];
-        if(t){
-          const up=t.pnl!=null && t.pnl>0;
-          document.getElementById('latest-txt').innerHTML=
-            `<b class="${t.side==='buy'?'buy':'sell'}">${t.side.toUpperCase()}</b> ${t.mkt} @${Number(t.entry).toFixed(4)} `+
-            (t.pnl!=null?`· 锁利 <span class="${up?'up':'down'}">$${fmt(t.pnl)}</span>`:'· 建仓');
-        }
+    drawCandles(s.equity_curve);
+    const t2=document.getElementById('trd').querySelector('tbody');
+    let fresh=0, freshTrade=null;
+    const rows=s.positions.map(t=>{
+      const key=t.ts+'|'+t.mkt+'|'+t.side+'|'+t.entry;
+      const isNew=!seen.has(key); if(isNew){seen.add(key);fresh++; if(!freshTrade)freshTrade=t;}
+      if(seen.size>400)seen.clear();
+      const cls=(t.side==='buy'?'flash-up':'flash-dn');
+      return `<tr class="${isNew?'row-new '+cls:cls}"><td>${t.ts}</td><td class="l">${t.mkt}</td><td>${t.tag||'-'}</td>`+
+        `<td class="${t.side==='buy'?'buy':'sell'}">${(t.side||'').toUpperCase()}</td>`+
+        `<td>${t.entry!=null?Number(t.entry).toFixed(4):'-'}</td><td>${t.size}</td>`+
+        `<td class="${col((t.pnl||0))}">${t.pnl!=null?'$'+fmt(t.pnl):'-'}</td>`+
+        `<td>${t.slip!=null?Number(t.slip).toFixed(4):'-'}</td><td>$${fmt(t.cash_after)}</td></tr>`;
+    }).join('');
+    t2.innerHTML=rows;
+    if(fresh>0){
+      flashBeat('beat2');
+      const t=freshTrade||s.positions[0];
+      if(t){
+        const up=t.pnl!=null && t.pnl>0;
+        document.getElementById('latest-txt').innerHTML=
+          `<b class="${t.side==='buy'?'buy':'sell'}">${t.side.toUpperCase()}</b> ${t.mkt} @${Number(t.entry).toFixed(4)} `+
+          (t.pnl!=null?`· 锁利 <span class="${up?'up':'dn'}">$${fmt(t.pnl)}</span>`:'· 建仓');
+        if(t.side==='buy') beep(500,0.05,'sine',0.04);
+        else if(up){ beep(740,0.07,'triangle',0.05); setTimeout(()=>beep(980,0.07,'triangle',0.045),70); }
+        else beep(300,0.12,'sawtooth',0.03);
       }
     }
-    if(curTab==='quote'){
-      const qt=document.getElementById('qtab').querySelector('tbody');
-      qt.innerHTML=Object.keys(s.quotes).map(k=>{const q=s.quotes[k];
-        return `<tr><td class="l">${q.question}</td><td>${q.mid.toFixed(4)}</td><td>${q.yes_bid.toFixed(4)}</td><td>${q.yes_ask.toFixed(4)}</td><td class="buy">${q.our_buy.toFixed(4)}</td><td class="sell">${q.our_sell.toFixed(4)}</td><td>${q.inv}</td><td>$${fmt(q.liq)}</td></tr>`;}).join('');
-    }
   }).catch(()=>{});
+  fetch('/api/stats').then(r=>r.json()).then(renderStats).catch(()=>{});
 }
 let liveCache=null;
 function tickLive(){
-  if(curTab!=='live') return;
   fetch('/api/markets').then(r=>r.json()).then(d=>{
     liveCache=d; renderLive();
-    const items=d.markets.slice(0,60).map(m=>{
-      const up=Number(m.yes_ask)>=Number(m.yes_bid);
-      return `<span><b>${m.question.slice(0,42)}</b> YES <span class="${up?'up':'dn'}">${Number(m.yes_bid).toFixed(3)}/${Number(m.yes_ask).toFixed(3)}</span> · 量 $${fmt(m.liquidity)}</span>`;
-    }).join('');
+    const items=d.markets.slice(0,60).map(m=>
+      `<span><b>${m.question.slice(0,42)}</b> YES <span class="yb">${Number(m.yes_bid).toFixed(3)}</span>/<span class="ya">${Number(m.yes_ask).toFixed(3)}</span> · 量 $${fmt(m.liquidity)}</span>`).join('');
     document.getElementById('tick').innerHTML=items+items;
   }).catch(()=>{});
 }
 function renderLive(){
   if(!liveCache) return;
   const cat=document.getElementById('cat').value;
-  const rows=liveCache.markets.filter(m=>cat==='all'||m.tag===cat).slice(0,120);
-  const tb=document.getElementById('mkt').querySelector('tbody');
-  tb.innerHTML=rows.map(m=>`<tr><td class="l">${m.question}</td><td><span class="tag">${m.tag}</span></td><td class="buy">${Number(m.yes_bid).toFixed(4)}</td><td class="sell">${Number(m.yes_ask).toFixed(4)}</td><td class="buy">${Number(m.no_bid).toFixed(4)}</td><td class="sell">${Number(m.no_ask).toFixed(4)}</td><td>$${fmt(m.liquidity)}</td></tr>`).join('');
+  const rows=liveCache.markets.filter(m=>cat==='all'||m.tag===cat).slice(0,150);
+  document.getElementById('mkt').querySelector('tbody').innerHTML=rows.map(m=>
+    `<tr><td class="l">${m.question}</td><td><span class="tag">${m.tag}</span></td>`+
+    `<td class="buy">${Number(m.yes_bid).toFixed(4)}</td><td class="sell">${Number(m.yes_ask).toFixed(4)}</td>`+
+    `<td class="buy">${Number(m.no_bid).toFixed(4)}</td><td class="sell">${Number(m.no_ask).toFixed(4)}</td>`+
+    `<td>$${fmt(m.liquidity)}</td></tr>`).join('');
 }
-document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
-  curTab=t.dataset.t;
-  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('on'));
-  t.classList.add('on');
-  document.getElementById('p-live').style.display=curTab==='live'?'block':'none';
-  document.getElementById('p-sim').style.display=curTab==='sim'?'block':'none';
-  document.getElementById('p-quote').style.display=curTab==='quote'?'block':'none';
-  if(curTab==='live') tickLive();
-});
 document.getElementById('cat').onchange=renderLive;
-setInterval(tickState,2000); setInterval(tickLive,30000);
+setInterval(tickState,2000); setInterval(tickLive,15000);
 tickState(); tickLive();
 </script></body></html>"""
 
@@ -509,6 +920,17 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif u.path == "/api/stats":
+            try:
+                stats = compute_stats()
+            except Exception as ex:
+                stats = {"error": str(ex)}
+            body = json.dumps(stats, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         elif u.path in ("/", "/index.html"):
             body = HTML.encode("utf-8")
             self.send_response(200)
@@ -525,6 +947,7 @@ class H(BaseHTTPRequestHandler):
 
 
 def main():
+    load_persistence()
     t = threading.Thread(target=loop, daemon=True)
     t.start()
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), H)
