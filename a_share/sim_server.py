@@ -676,9 +676,9 @@ body{margin:0;background:
   color:var(--ink);font:14px/1.5 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;min-height:100vh}
 /* 顶部滚动行情条（放慢 + 悬停暂停） */
 .ticker{overflow:hidden;white-space:nowrap;background:#060a10;border-bottom:1px solid var(--line);padding:8px 0;position:relative;cursor:default}
-.ticker .run{display:inline-block;padding-left:100%;animation:marquee 72s linear infinite}
+.ticker .run{display:inline-block;padding-left:100%;animation:marquee 210s linear infinite}
 .ticker:hover .run{animation-play-state:paused}
-.ticker .run span{display:inline-block;padding:0 30px;font-size:13px;color:var(--mut)}
+.ticker .run span{display:inline-block;padding:0 46px;font-size:13px;color:var(--mut);letter-spacing:.2px}
 .ticker .run b{color:var(--ink);font-weight:600}
 .ticker .run .yb{color:var(--up);font-weight:600}.ticker .run .ya{color:var(--dn);font-weight:600}
 @keyframes marquee{to{transform:translateX(-100%)}}
@@ -695,14 +695,20 @@ header h1{margin:0;font-size:19px}
 .sndbtn{cursor:pointer;font-size:14px;background:#101a28;border:1px solid var(--line);border-radius:8px;padding:4px 10px;color:var(--mut);transition:all .2s}
 .sndbtn:hover{color:var(--ink);border-color:var(--acc)}
 .banner{background:linear-gradient(90deg,#0e1b14,#0c1813);border:1px solid #1d3a2a;color:#9fe3c4;padding:8px 14px;margin:12px 22px 0;border-radius:8px;font-size:12.5px}
-.wrap{padding:14px 22px;max-width:1480px;margin:0 auto}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:12px;margin:12px 0}
+.wrap{padding:14px 22px;max-width:1720px;margin:0 auto}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:12px 0}
 .card{background:linear-gradient(160deg,var(--panel),#0c131d);border:1px solid var(--line);border-radius:12px;padding:13px 16px;transition:transform .25s,box-shadow .25s,border-color .25s}
 .card:hover{transform:translateY(-3px);box-shadow:0 8px 22px rgba(70,176,255,.16);border-color:#2a3c57}
 .card .k{color:var(--mut);font-size:12px}.card .v{font-size:21px;font-weight:700;margin-top:4px;font-variant-numeric:tabular-nums;transition:color .4s}
 .v.up{color:var(--up)}.v.dn{color:var(--dn)}.v.b{color:var(--acc)}
-.big{display:grid;grid-template-columns:1.05fr 1.35fr 0.95fr;gap:14px;align-items:start}
-@media(max-width:1200px){.big{grid-template-columns:1fr}}
+/* 主区三列：等宽 + 等高（每列内部纵向弹性铺满，面板对齐） */
+.big{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:stretch}
+.big>.col{display:flex;flex-direction:column;gap:14px;min-width:0}
+.big>.col>.panel{flex:1 1 0;display:flex;flex-direction:column;margin-bottom:0;min-height:0}
+.big>.col>.panel>.scroll{flex:1 1 auto;min-height:0}
+/* 自适应断点：三列 -> 两列 -> 单列 */
+@media(max-width:1420px){.big{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:920px){.big{grid-template-columns:1fr}}
 .panel{background:linear-gradient(160deg,var(--panel),#0c131d);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:14px;animation:fade .35s ease}
 @keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 .panel h2{margin:0 0 10px;font-size:14.5px;color:#cdd8e8;display:flex;align-items:center;gap:8px}
@@ -727,8 +733,14 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
 .statbox{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
 .stat{background:#0a121c;border:1px solid var(--line);border-radius:10px;padding:10px 12px}
 .stat .k{color:var(--mut);font-size:11.5px}.stat .v{font-size:16px;font-weight:700;margin-top:3px;font-variant-numeric:tabular-nums}
-.sc-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-@media(max-width:760px){.sc-grid{grid-template-columns:1fr}}
+/* 统计明细：三列对称 -> 两列 -> 单列 */
+.sc-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+@media(max-width:1000px){.sc-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:700px){.sc-grid{grid-template-columns:1fr}}
+.sc-grid>div{min-width:0}
+.kv{display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px dashed var(--line);font-size:12.5px}
+.kv:last-child{border-bottom:none}
+.kv .k{color:var(--mut)}.kv .v{font-variant-numeric:tabular-nums}
 </style></head>
 <body>
 <div class="ticker"><div class="run" id="tick">正在加载真实 Polymarket 盘口…</div></div>
@@ -751,17 +763,19 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
   <div class="cards" id="cards"></div>
 
   <div class="big">
-    <!-- 左：真实行情榜 -->
+    <!-- 列 1：真实行情榜 -->
+    <div class="col">
     <div class="panel">
       <h2>📡 Polymarket 真实行情
         <select id="cat" style="margin-left:auto"><option value="all">全部类别</option><option value="crypto">crypto</option><option value="economy">economy</option><option value="finance">finance</option><option value="sports">sports</option><option value="tech">tech</option><option value="science">science</option><option value="entertainment">entertainment</option><option value="other">other</option></select>
       </h2>
-      <div class="scroll" style="max-height:560px"><table id="mkt"><thead><tr><th>市场(问题)</th><th>类别</th><th>YES 买</th><th>YES 卖</th><th>NO 买</th><th>NO 卖</th><th>流动性</th></tr></thead><tbody></tbody></table></div>
+      <div class="scroll"><table id="mkt"><thead><tr><th>市场(问题)</th><th>类别</th><th>YES 买</th><th>YES 卖</th><th>NO 买</th><th>NO 卖</th><th>流动性</th></tr></thead><tbody></tbody></table></div>
       <div class="note">YES=结果代币隐含概率；买/卖为 Gamma 真实最优买卖盘口；<b style="color:var(--up)">买价红</b>、<b style="color:var(--dn)">卖价绿</b>；流动性为该市场 USDC 深度。</div>
     </div>
+    </div>
 
-    <!-- 中：K线 + 实时成交 -->
-    <div>
+    <!-- 列 2：K线 + 实时成交 -->
+    <div class="col">
       <div class="panel">
         <h2>📈 账户权益 K 线（真实成交累计）<span class="sub">红涨绿跌 · 每根=8 轮聚合</span></h2>
         <canvas id="kc" width="680" height="260"></canvas>
@@ -770,13 +784,13 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
       <div class="panel">
         <div class="latest"><span class="beat" id="beat2"></span><span style="color:var(--mut)">最新成交：</span><span id="latest-txt">等待第一笔…</span></div>
         <h2>🤖 实时成交（过程与结果）</h2>
-        <div class="scroll" style="max-height:340px"><table id="trd"><thead><tr><th>时间</th><th>市场</th><th>类别</th><th>方向</th><th>成交价</th><th>量</th><th>本笔锁利</th><th>滑点</th><th>现金</th></tr></thead><tbody></tbody></table></div>
+        <div class="scroll"><table id="trd"><thead><tr><th>时间</th><th>市场</th><th>类别</th><th>方向</th><th>成交价</th><th>量</th><th>本笔锁利</th><th>滑点</th><th>现金</th></tr></thead><tbody></tbody></table></div>
         <div class="note">BUY=建仓（锁利 0），SELL=平仓（显示本笔锁利）；每笔在真实盘口价位成交。新成交行红/绿闪光。</div>
       </div>
     </div>
 
-    <!-- 右：本轮/累计 + 统计中心摘要 -->
-    <div>
+    <!-- 列 3：本轮/累计 + 统计中心摘要 -->
+    <div class="col">
       <div class="panel">
         <h2>💰 本轮 / 累计锁利</h2>
         <div class="cards" style="grid-template-columns:1fr 1fr;margin:0">
@@ -804,7 +818,7 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
     </div>
   </div>
 
-  <!-- 底部：统计中心详情 -->
+  <!-- 底部：统计中心详情（三列对称） -->
   <div class="panel">
     <h2>📑 统计中心 · 明细</h2>
     <div class="sc-grid">
@@ -815,11 +829,14 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
       <div>
         <div style="color:var(--mut);font-size:12.5px;margin-bottom:6px">按日盈亏</div>
         <table id="pday"><thead><tr><th>日期</th><th>锁利</th></tr></thead><tbody></tbody></table>
-        <div class="note" style="margin-top:10px">
-          最佳市场：<span id="st-best" class="up">—</span><br/>
-          最差市场：<span id="st-worst" class="dn">—</span><br/>
-          运行起点：<span id="st-run" style="color:var(--gold)">—</span>
-        </div>
+      </div>
+      <div>
+        <div style="color:var(--mut);font-size:12.5px;margin-bottom:6px">极值</div>
+        <div class="kv"><span class="k">最佳市场</span><span class="v up" id="st-best">—</span></div>
+        <div class="kv"><span class="k">最差市场</span><span class="v dn" id="st-worst">—</span></div>
+        <div class="kv"><span class="k">最佳单笔</span><span class="v up" id="st-bt">—</span></div>
+        <div class="kv"><span class="k">最差单笔</span><span class="v dn" id="st-wt">—</span></div>
+        <div class="kv"><span class="k">运行起点</span><span class="v" id="st-run" style="color:var(--gold)">—</span></div>
       </div>
     </div>
   </div>
@@ -925,8 +942,12 @@ function renderStats(st){
     return `<tr><td>${t}</td><td>${d.n}</td><td class="${col(d.pnl)}">${sgn(d.pnl)}</td><td>${d.win}</td></tr>`;}).join('');
   const days=Object.keys(st.per_day);
   document.getElementById('pday').querySelector('tbody').innerHTML=days.map(d=>`<tr><td>${d}</td><td class="${col(st.per_day[d])}">${sgn(st.per_day[d])}</td></tr>`).join('');
-  document.getElementById('st-best').textContent=st.best_market[0].slice(0,26)+'  '+sgn(st.best_market[1]);
-  document.getElementById('st-worst').textContent=st.worst_market[0].slice(0,26)+'  '+sgn(st.worst_market[1]);
+  document.getElementById('st-best').textContent=st.best_market[0].slice(0,22)+'  '+sgn(st.best_market[1]);
+  document.getElementById('st-worst').textContent=st.worst_market[0].slice(0,22)+'  '+sgn(st.worst_market[1]);
+  if(st.best_trade) document.getElementById('st-bt').textContent=
+    sgn(st.best_trade.pnl)+'  ('+String(st.best_trade.mkt).slice(0,18)+')';
+  if(st.worst_trade) document.getElementById('st-wt').textContent=
+    sgn(st.worst_trade.pnl)+'  ('+String(st.worst_trade.mkt).slice(0,18)+')';
 }
 function tickState(){
   fetch('/api/state').then(r=>r.json()).then(s=>{
@@ -985,8 +1006,8 @@ let liveCache=null;
 function tickLive(){
   fetch('/api/markets').then(r=>r.json()).then(d=>{
     liveCache=d; renderLive();
-    const items=d.markets.slice(0,60).map(m=>
-      `<span><b>${m.question.slice(0,42)}</b> YES <span class="yb">${Number(m.yes_bid).toFixed(3)}</span>/<span class="ya">${Number(m.yes_ask).toFixed(3)}</span> · 量 $${fmt(m.liquidity)}</span>`).join('');
+    const items=d.markets.slice(0,32).map(m=>
+      `<span><b>${m.question.slice(0,40)}</b> YES <span class="yb">${Number(m.yes_bid).toFixed(3)}</span>/<span class="ya">${Number(m.yes_ask).toFixed(3)}</span> · 量 $${fmt(m.liquidity)}</span>`).join('');
     document.getElementById('tick').innerHTML=items+items;
   }).catch(()=>{});
 }
