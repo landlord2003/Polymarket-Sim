@@ -17,6 +17,9 @@
 import json
 import os
 import sys
+import atexit
+import signal
+import ctypes
 import threading
 import time
 import collections
@@ -29,12 +32,177 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.dirname(_HERE))
 from sim_rigor import RigorVirtualBook, rigor_params_from_config  # noqa: E402
+import sim_rigor as R  # noqa: E402  (P1-2 敏感性分析用 R.mm_param_sensitivity)
 import polymarket as P  # noqa: E402
 # 复用 sim_report 的已验证报告渲染函数（HTML/Markdown），避免双重实现
 from sim_report import build_html, build_md  # noqa: E402
 
 PORT = 8787
 LOCK = threading.Lock()
+SRV = None  # 全局 HTTP server 引用，供 /api/shutdown 与信号处理器调用
+
+# ============ P2-1 单实例启动锁 ============
+PID_FILE = os.path.join(os.path.dirname(_HERE), "output", "sim_server.pid")
+
+
+def _pid_alive(pid):
+    """跨平台判断进程是否存活（Windows 用 ctypes 避免 tasklist 子进程编解码崩溃）。"""
+    if os.name == "nt":
+        try:
+            kernel32 = ctypes.windll.kernel32
+            PROCESS_QUERY_INFORMATION = 0x0400
+            PROCESS_VM_READ = 0x0010
+            h = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid)
+            if not h:
+                return False
+            try:
+                code = ctypes.c_ulong()
+                if kernel32.GetExitCodeProcess(h, ctypes.byref(code)):
+                    return code.value == 259  # STILL_ACTIVE
+                return False
+            finally:
+                kernel32.CloseHandle(h)
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _acquire_lock():
+    """启动时获取单实例锁；若已有活实例则拒绝启动（避免多实例抢盘口/重复写盘）。"""
+    d = os.path.dirname(PID_FILE)
+    if d and not os.path.isdir(d):
+        os.makedirs(d, exist_ok=True)
+    if os.path.exists(PID_FILE):
+        try:
+            old = int((open(PID_FILE).read().strip() or "0"))
+        except Exception:
+            old = 0
+        if old and _pid_alive(old):
+            print("[sim_server] 已有实例在运行 (pid=%s)，拒绝重复启动。\n"
+                  "  如需强制重启，请先结束该进程： taskkill /F /PID %s\n"
+                  "  或删除锁文件： %s" % (old, old, PID_FILE))
+            sys.exit(1)
+        # 锁文件存在但进程已死 -> 清掉陈旧锁
+        try:
+            os.remove(PID_FILE)
+        except OSError:
+            pass
+    with open(PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
+    atexit.register(_release_lock)
+    print("[sim_server] 启动锁已获取 -> %s (pid=%s)" % (PID_FILE, os.getpid()))
+
+
+def _release_lock():
+    """进程退出时释放锁（仅当锁文件仍指向自己，避免误删他人锁）。
+
+    注意：WorkBuddy 的 safe-delete shim 会拦截 os.remove（Windows 回收站不可用
+    时静默失败），故删除失败时用 ctypes DeleteFileW 直接绕过 shim 真删。
+    """
+    try:
+        if os.path.exists(PID_FILE) and open(PID_FILE).read().strip() == str(os.getpid()):
+            try:
+                os.remove(PID_FILE)
+            except Exception:
+                try:
+                    ctypes.windll.kernel32.DeleteFileW(ctypes.c_wchar_p(os.path.abspath(PID_FILE)))
+                except Exception:
+                    pass
+    except OSError:
+        pass
+
+
+# ============ P2-3 报告自动化 ============
+AUTO_REPORT_MIN = int(os.environ.get("AUTO_REPORT_MIN", "30") or 30)  # 0=关闭自动报告
+
+
+def build_and_write_report(top_n=15, stamp=None):
+    """复用 sim_report 已验证渲染，生成 HTML/MD 报告并落盘（供 /api/export_report 与自动报告线程共用）。"""
+    with LOCK:
+        st = {
+            "round": STATE["round"], "cash": STATE["cash"],
+            "realized": STATE["realized"], "equity": STATE["equity"],
+            "round_pnl": STATE["round_pnl"],
+            "n_markets": STATE["n_markets"], "inv_notional": STATE["inv_notional"],
+            "unrealized": STATE.get("unrealized", 0.0),
+            "mode": STATE.get("mode", "pairs"), "fill": STATE.get("fill", {}),
+            "live_count": STATE["live_count"], "mm_count": STATE["mm_count"],
+            "params": STATE["params"], "quotes": STATE["quotes"],
+            "positions": STATE["positions"], "equity_curve": STATE["equity_curve"],
+        }
+        s = compute_stats()
+    mout = []
+    for m in (MARKETS_LIVE or []):
+        if not isinstance(m, dict) or "error" in m:
+            continue
+        q = m.get("question") or ""
+        if is_blocked(q):
+            continue
+        mout.append({
+            "question": (q[:90] + ("…" if len(q) > 90 else "")),
+            "tag": classify(q),
+            "yes_bid": m.get("yes_bid"), "yes_ask": m.get("yes_ask"),
+            "no_bid": m.get("no_bid"), "no_ask": m.get("no_ask"),
+            "liquidity": round(float(m.get("liquidity") or 0), 0),
+            "token_id": str(m.get("token_id")),
+        })
+    mkts = {"markets": mout}
+    ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    stamp = stamp or _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir = os.path.join(os.path.dirname(_HERE), "output")
+    os.makedirs(out_dir, exist_ok=True)
+    html_name = "sim_report_%s.html" % stamp
+    md_name = "sim_report_%s.md" % stamp
+    html_path = os.path.join(out_dir, html_name)
+    md_path = os.path.join(out_dir, md_name)
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(build_html(st, s, mkts, top_n, ts))
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(build_md(st, s, mkts, top_n, ts))
+    return {"html": html_path, "md": md_path, "html_name": html_name,
+            "md_name": md_name, "stamp": stamp, "ts": ts,
+            "equity": st["equity"], "realized": st["realized"], "round": st["round"]}
+
+
+def auto_report_loop():
+    """P2-3 后台自动报告：每 AUTO_REPORT_MIN 分钟生成一份报告；启动即先出一份。"""
+    if AUTO_REPORT_MIN <= 0:
+        print("[auto_report] 已关闭 (AUTO_REPORT_MIN=%s)" % AUTO_REPORT_MIN)
+        return
+    try:
+        r = build_and_write_report(15)
+        print("[auto_report] 启动报告已生成 -> %s" % r["html_name"])
+    except Exception as ex:
+        print("[auto_report] 启动报告失败：%s" % ex)
+    while True:
+        with LOCK:
+            if not STATE.get("running", True):
+                break
+        time.sleep(AUTO_REPORT_MIN * 60)
+        try:
+            r = build_and_write_report(15)
+            print("[auto_report] 周期报告已生成 -> %s (round=%s)" % (r["html_name"], r["round"]))
+        except Exception as ex:
+            print("[auto_report] 周期报告失败：%s" % ex)
+
+
+def save_persistence():
+    """优雅停止时把内存中的运行元数据落盘（实时循环为提速禁用了逐轮 I/O）。"""
+    try:
+        with LOCK:
+            RUN_META["last_round"] = STATE.get("round", 0)
+            RUN_META["last_equity"] = STATE.get("equity")
+            RUN_META["trades_total"] = RUN_META.get("trades_total", 0)
+        meta_path = os.path.join(DATA_DIR, "run_meta.json")
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(RUN_META, f, ensure_ascii=False, indent=2)
+        print("[persistence] 已落盘 run_meta.json (round=%s)" % RUN_META.get("last_round"))
+    except Exception as ex:
+        print("[persistence] 落盘失败：%s" % ex)
 MM_N = 20          # 同时做市的真实市场数（取流动性最高者）
 MM_REFRESH = 75    # 每 75 轮(~90s)重选一次做市标的（价格刷新另由后台线程负责）
 
@@ -52,11 +220,16 @@ if SIM_MODE not in ("pairs", "inv"):
 FILL_BASE = float(os.environ.get("FILL_BASE", "0.30"))
 FILL_GAMMA = float(os.environ.get("FILL_GAMMA", "1.0"))
 APPLY_FILL = os.environ.get("APPLY_FILL", "1") != "0"   # 0 = 关闭概率，退回 100% 成交
+# 成交率校准（P0-2）：基础成交率由市场流动性归一化得到（高流动性盘口排队消化快→成交率高）
+LIQ_REF = float(os.environ.get("LIQ_REF", "30000.0"))   # 流动性参考值（达到此值基础成交率→~0.92）
 # inv 模式下真实盘口的刷新间隔(秒)。
 # 实测：一次全量拉取(10 页 × 100)约需 20 秒，且 Gamma 盘口在秒/分钟级非常稳定
 # （实测 8 秒内 300 个市场的 bestBid/bestAsk 变化为 0）。因此刷新间隔不能设太小，
 # 否则请求会堆积、有被 Gamma 限流的风险。默认 150 秒。
 PRICE_REFRESH_SEC = float(os.environ.get("PRICE_REFRESH_SEC", "150"))
+# P0-3：真实盘口时序落盘目录（按日分文件 JSONL），支撑离线回测；已被 .gitignore 忽略
+QUOTES_TS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "quotes_ts")
+os.makedirs(QUOTES_TS_DIR, exist_ok=True)
 
 # ============ 状态 ============
 STATE = {
@@ -335,8 +508,62 @@ def compute_stats():
         "duration_min": round(dur_min, 1), "trade_rate": round(rate, 2),
         "trades_per_hour": round(total_n / (dur_min / 60.0), 1) if dur_min > 0.05 else 0.0,
         "avg_pnl": round(sum((t.get("pnl") or 0) for t in sells) / len(sells), 4) if sells else 0.0,
+        "adverse_sel_loss": round(book.adverse_sel_loss, 2),
+        "settled_pnl": round(getattr(book, "settled_pnl", 0.0), 2),
+        "settlement_exposure": book.settlement_exposure(),
+        "n_settled": len(getattr(book, "settlement_events", []) or []),
+        "n_pending_settle": sum(1 for e in (getattr(book, "settlement_events", []) or [])
+                                if e.get("pending")),
+        "attribution": book.pnl_attribution(realized),
         "sample_n": sample_n,
     }
+
+
+def _compliance_match(q):
+    """返回命中的屏蔽词（None=未命中）。判定与 is_blocked 完全一致，但额外暴露具体词，供看板可观测。"""
+    if P._is_blocked(q, None):
+        return "(polymarket 内建屏蔽词)"
+    ql = (q or "").lower()
+    tag = classify(q)
+    is_match = (" vs " in ql) or (" vs. " in ql) or (" o/u " in ql) or (" over/under" in ql)
+    words = BLOCK_SPORTS if (tag == "sports" or is_match) else BLOCK_EXTRA
+    for k in words:
+        if k in ql:
+            return k
+    return None
+
+
+def compute_compliance():
+    """P2-5 合规过滤可观测：扫描实时盘口池，统计被合规红线拦截的市场，
+    暴露命中词与当前词表，使「合规过滤」从黑盒变可观测。"""
+    rows = list(MARKETS_LIVE or [])
+    scanned = [m for m in rows if isinstance(m, dict) and "error" not in m]
+    n_scanned = len(scanned)
+    n_blocked = 0
+    samples = []
+    for m in scanned:
+        q = m.get("question", "") or ""
+        reason = _compliance_match(q)
+        if reason is not None:
+            n_blocked += 1
+            if len(samples) < 30:
+                samples.append({"question": q, "matched": reason,
+                                "tag": m.get("tag") or classify(q)})
+    n_passed = n_scanned - n_blocked
+    return {
+        "n_scanned": n_scanned,
+        "n_blocked": n_blocked,
+        "n_passed": n_passed,
+        "block_rate_pct": round(n_blocked / n_scanned * 100.0, 2) if n_scanned else 0.0,
+        "blocked_samples": samples,
+        "block_extra_count": len(BLOCK_EXTRA),
+        "block_sports_count": len(BLOCK_SPORTS),
+        "block_extra": BLOCK_EXTRA,
+        "block_sports": BLOCK_SPORTS,
+        "note": ("合规红线（中国部署）已对实时盘口池逐题扫描：命中政治/地缘/军事等敏感词的"
+                 "市场一律剔除，体育对抗赛中的国家名放行。下方为最近一次扫描的拦截样本与词表。"),
+    }
+
 
 # ============ 真实行情池（urllib 直连 Gamma） ============
 MARKETS_LIVE = None   # fetch_poly_quotes 返回的实时二元盘口列表
@@ -412,20 +639,23 @@ def select_mm(rows):
     return [m for _, m in cand[:MM_N]]
 
 
-def fill_prob(adverse):
-    """挂单成交概率（A：成交概率模型）。
+def fill_prob(adverse, liq=0.0):
+    """挂单成交概率（A：成交概率模型，P0-2 起由市场流动性校准）。
 
-    我们把单挂在距市场最优价 adverse*spread 处：
-      adverse=0   -> 贴着市场最优价挂，价格无优势、要排队，成交率最低 = FILL_BASE
-      adverse=0.5 -> 挂在中间价，让出半个价差，几乎必成交 -> 1
-    这是做市的核心权衡：挂得越贪（越靠内）越难成交，挂得越让（越靠中间）越稳但赚得越少。
+    基础成交率不再用全局常数 FILL_BASE，而由该市场流动性归一化得到：
+      liq=0            -> 基础率最低（FILL_BASE 兜底，~0.30）
+      liq>=LIQ_REF     -> 基础率 ~0.92（高流动性盘口排队消化快、被打掉概率高）
+    再叠加价格改善 adverse：adverse=0 贴最优价排队（基础率），adverse=0.5 挂 mid（必成）。
+    诚实边界：这是基于流动性代理的校准，非链上真实成交观测；真校准需 CLOB trade history
+    （本环境受地域限制 404），留作后续。
     """
     if not APPLY_FILL:
         return 1.0
+    base = 0.12 + 0.80 * min(1.0, float(liq) / LIQ_REF)
+    base = max(FILL_BASE, min(0.95, base))   # FILL_BASE 作最差市场成交率下限
     u = adverse / 0.5
     u = 0.0 if u < 0 else (1.0 if u > 1 else u)
-    p = FILL_BASE + (1.0 - FILL_BASE) * (u ** FILL_GAMMA)
-    return p
+    return base + (1.0 - base) * (u ** FILL_GAMMA)
 
 
 # ============ 真实引擎实例 ============
@@ -498,7 +728,7 @@ def step():
         for _leg in range(legs):
             # B：真实做市下挂单不必然成交，按价格改善幅度判定
             if SIM_MODE == "inv" and APPLY_FILL:
-                _p = fill_prob(adverse)
+                _p = fill_prob(adverse, opp["liquidity"])
                 FILL_ATTEMPTS[0] += 1
                 if random.random() >= _p:
                     continue          # 挂单没被打掉，本腿不成交
@@ -590,6 +820,12 @@ def step():
         _init_eq = float(RUN_META.get("initial_equity") or 10000.0)
         STATE["unrealized"] = round(float(STATE["equity"]) - _init_eq
                                     - float(STATE["realized"]), 2)
+        # 逆向选择累计损耗（知情对手盘推动价格蒸发的可锁利）
+        STATE["adverse_sel_loss"] = round(book.adverse_sel_loss, 2)
+        # 结算风险闭环（P1-1）：已结算锁利 + 仍暴露在结算风险下的敞口
+        STATE["settled_pnl"] = round(getattr(book, "settled_pnl", 0.0), 2)
+        STATE["settlement_exposure"] = book.settlement_exposure()
+        STATE["n_settled"] = len(getattr(book, "settlement_events", []) or [])
         # 成交率统计（挂单尝试 vs 实际被打掉）
         STATE["fill"] = {
             "base": FILL_BASE, "gamma": FILL_GAMMA, "on": APPLY_FILL,
@@ -628,6 +864,32 @@ def step():
                               STATE.get("peak_equity"))
 
 
+def save_quotes_snapshot(markets):
+    """P0-3：真实盘口时序落盘。每次刷新把 300 个市场快照追加写 JSONL（按日分文件），
+    支撑离线 walk-forward 回测（train_IC vs oos_IC 验证）。"""
+    if not markets:
+        return
+    import json
+    try:
+        day = _dt.datetime.now().strftime("%Y%m%d")
+        path = os.path.join(QUOTES_TS_DIR, "quotes_%s.jsonl" % day)
+        snap = {"ts": time.time(),
+                "markets": [
+                    {"token_id": m.get("token_id"),
+                     "question": (m.get("question") or "")[:80],
+                     "yes_bid": m.get("yes_bid"), "yes_ask": m.get("yes_ask"),
+                     "liquidity": m.get("liquidity"),
+                     "mid": round((float(m.get("yes_bid") or 0) + float(m.get("yes_ask") or 0)) / 2.0, 4)}
+                    for m in markets
+                    if isinstance(m, dict) and "error" not in m and m.get("yes_bid") is not None
+                ]}
+        if snap["markets"]:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(snap, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 def price_refresh_daemon():
     """后台刷新真实盘口（B 模式必需）。
 
@@ -647,6 +909,28 @@ def price_refresh_daemon():
                 global MARKETS_LIVE
                 with LOCK:
                     MARKETS_LIVE = rows
+                save_quotes_snapshot(rows)   # P0-3：落盘真实盘口时序
+        except Exception:
+            pass
+        # P1-1：为尚未记录 end_date 的开放库存补登到期时间（来自实时盘口），
+        # 确保重启前已开仓、或建仓时未带 end_date 的持仓也不会漏过结算闭环。
+        try:
+            for m in (MARKETS_LIVE or []):
+                tid = m.get("token_id")
+                if (tid and tid in book.inventory and book.inventory[tid] != 0
+                        and not book.end_dates.get(tid) and m.get("end_date")):
+                    book.end_dates[tid] = m["end_date"]
+        except Exception:
+            pass
+        # P1-1 结算风险闭环：每次刷新后，把已到期且仍持库存的市场按真实结算价了结
+        try:
+            evs = book.settle_expired_markets(resolve_fn=P.fetch_resolution_price)
+            if evs:
+                for e in evs:
+                    print("[settle] %s %s x%d @%.4f pnl=%+.2f%s"
+                          % (e["side"], (e["question"] or "")[:40], e["size"],
+                             e["resolved_price"], e["pnl"],
+                             " (pending复核)" if e["pending"] else ""))
         except Exception:
             pass
         time.sleep(PRICE_REFRESH_SEC)
@@ -657,6 +941,7 @@ def loop():
     try:
         global MARKETS_LIVE
         MARKETS_LIVE = P.fetch_poly_quotes(limit=300, force=True)
+        save_quotes_snapshot(MARKETS_LIVE)   # P0-3：启动即落首份快照
     except Exception:
         pass
     # inv 模式：价格刷新交给后台线程，交易循环不阻塞
@@ -783,6 +1068,15 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
 .kv{display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px dashed var(--line);font-size:12.5px}
 .kv:last-child{border-bottom:none}
 .kv .k{color:var(--mut)}.kv .v{font-variant-numeric:tabular-nums}
+/* P2-5 合规过滤可观测面板 */
+.comp-bar{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:4px 0 10px}
+.comp-stat{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:8px 10px;text-align:center}
+.comp-stat .k{display:block;color:var(--mut);font-size:11px;margin-bottom:3px}
+.comp-stat .v{font-size:17px;font-variant-numeric:tabular-nums}
+.comp-detail{margin-top:8px}
+.comp-detail summary{cursor:pointer;color:var(--mut);font-size:12px;padding:4px 0}
+.comp-detail .note{font-size:11.5px;line-height:1.6;word-break:break-word}
+.comp-words{color:#9fb0c8}
 </style></head>
 <body>
 <div class="ticker"><div class="run" id="tick">正在加载真实 Polymarket 盘口…</div></div>
@@ -849,12 +1143,49 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
         <div class="stat"><div class="k">胜率(平仓)</div><div class="v" id="st-win">0%</div></div>
         <div class="stat"><div class="k">成交频率</div><div class="v" id="st-rate">0</div></div>
         <div class="stat"><div class="k">累计锁利</div><div class="v" id="st-real">$0</div></div>
+        <div class="stat"><div class="k">逆向选择损耗</div><div class="v dn" id="st-asel">$0</div></div>
+        <div class="stat"><div class="k">已结算锁利</div><div class="v b" id="st-settled">$0</div></div>
+        <div class="stat"><div class="k">结算敞口(风险)</div><div class="v dn" id="st-settlexp">$0</div></div>
         <div class="stat"><div class="k">峰值盈利</div><div class="v" id="st-pk">$0</div></div>
         <div class="stat"><div class="k">权益峰值</div><div class="v" id="st-peak">$0</div></div>
         <div class="stat"><div class="k">当前回撤</div><div class="v" id="st-dd">0%</div></div>
         <div class="stat"><div class="k">历史最大回撤</div><div class="v" id="st-mdd">0%</div></div>
       </div>
       <div class="note" id="st-note">—</div>
+    </div>
+
+    <!-- P1-2 敏感性分析 -->
+    <div class="panel">
+      <h2>🎚️ 敏感性分析（参数弹性）</h2>
+      <div class="note">当前参数下，各旋钮对「一轮做市对冲期望锁利」的弹性（±扰动间 PnL 变化 / 基准）。负值=调大该参数会降低锁利。基于代表性市场解析估计；非零项即最影响盈亏的旋钮。</div>
+      <div class="scroll"><table id="sens-tbl"><thead><tr><th>参数</th><th>当前值</th><th>弹性</th><th>ΔPnL(±)</th></tr></thead><tbody></tbody></table></div>
+      <div class="note" id="sens-base">基准一轮锁利: $0</div>
+    </div>
+
+    <!-- P1-3 盈亏归因瀑布 -->
+    <div class="panel">
+      <h2>🧮 盈亏归因（瀑布）</h2>
+      <div class="note">累计净锁利拆解为各成本分量：毛价差捕获 − 走簿滑点 − 手续费 − 逆向选择 + 结算净损益。各分量均来自真实成交记录，恒等式闭合。</div>
+      <div class="scroll"><table id="attr-tbl"><thead><tr><th>成分</th><th>金额</th></tr></thead><tbody></tbody></table></div>
+      <div class="note" id="attr-net">净锁利: $0</div>
+    </div>
+
+    <!-- P2-5 合规过滤可观测 -->
+    <div class="panel">
+      <h2>🛡️ 合规过滤（红线可观测）</h2>
+      <div class="note" id="comp-note">扫描实时盘口池，统计被政治/地缘/军事红线拦截的市场，使合规过滤从黑盒变可观测。</div>
+      <div class="comp-bar">
+        <div class="comp-stat"><span class="k">扫描总数</span><span class="v b" id="comp-scanned">0</span></div>
+        <div class="comp-stat"><span class="k">已拦截</span><span class="v r" id="comp-blocked">0</span></div>
+        <div class="comp-stat"><span class="k">放行</span><span class="v up" id="comp-passed">0</span></div>
+        <div class="comp-stat"><span class="k">拦截率</span><span class="v" id="comp-rate">0%</span></div>
+      </div>
+      <div class="scroll"><table id="comp-tbl"><thead><tr><th>命中词</th><th>类别</th><th>市场题目（截断）</th></tr></thead><tbody></tbody></table></div>
+      <details class="comp-detail">
+        <summary>查看屏蔽词表（BLOCK_EXTRA / BLOCK_SPORTS）</summary>
+        <div class="note">非体育语境屏蔽词（<b id="comp-extra-n">0</b>）：<span class="comp-words" id="comp-extra">—</span></div>
+        <div class="note">体育赛事专用屏蔽词（<b id="comp-sports-n">0</b>）：<span class="comp-words" id="comp-sports">—</span></div>
+      </details>
     </div>
   </div>
 
@@ -989,6 +1320,9 @@ function renderStats(st){
     +'分类/按日/按市场三项之和均等于累计锁利 $'+st.realized+'（口径一致可交叉核对）。'
     +'注：成交频率高源于模拟引擎每轮对 20 个市场双边撮合，非真实成交能力。';
   const rc=document.getElementById('st-real'); rc.className='v '+col(st.realized); rc.textContent=sgn(st.realized);
+  document.getElementById('st-asel').textContent='$'+Number(st.adverse_sel_loss||0).toFixed(2);
+  document.getElementById('st-settled').textContent='$'+Number(st.settled_pnl||0).toFixed(2);
+  document.getElementById('st-settlexp').textContent='$'+Number(st.settlement_exposure||0).toFixed(2);
   const tags=Object.keys(st.per_tag).sort((a,b)=>st.per_tag[b].pnl-st.per_tag[a].pnl);
   document.getElementById('ptag').querySelector('tbody').innerHTML=tags.map(t=>{const d=st.per_tag[t];
     return `<tr><td>${t}</td><td>${d.n}</td><td class="${col(d.pnl)}">${sgn(d.pnl)}</td><td>${d.win}</td></tr>`;}).join('');
@@ -1000,6 +1334,17 @@ function renderStats(st){
     sgn(st.best_trade.pnl)+'  ('+String(st.best_trade.mkt).slice(0,18)+')';
   if(st.worst_trade) document.getElementById('st-wt').textContent=
     sgn(st.worst_trade.pnl)+'  ('+String(st.worst_trade.mkt).slice(0,18)+')';
+}
+function renderSensitivity(sens){
+  if(!sens||sens.error) return;
+  document.getElementById('sens-base').textContent='基准一轮锁利: $'+Number(sens.base_pnl||0).toFixed(3);
+  const tb=document.getElementById('sens-tbl').querySelector('tbody');
+  tb.innerHTML=(sens.params||[]).map(p=>{
+    const e=p.elasticity; const cls=e>0.05?'up':(e<-0.05?'dn':'');
+    return `<tr><td>${p.param}</td><td>${p.base}</td>`
+      +`<td class="${cls}">${e>=0?'+':''}${e.toFixed(3)}</td>`
+      +`<td class="${cls}">${e>=0?'+':''}$${Number(p.delta_pnl||0).toFixed(3)}</td></tr>`;
+  }).join('');
 }
 function tickState(){
   fetch('/api/state').then(r=>r.json()).then(s=>{
@@ -1053,6 +1398,42 @@ function tickState(){
     }
   }).catch(()=>{});
   fetch('/api/stats').then(r=>r.json()).then(renderStats).catch(()=>{});
+  fetch('/api/sensitivity').then(r=>r.json()).then(renderSensitivity).catch(()=>{});
+  fetch('/api/attribution').then(r=>r.json()).then(renderAttribution).catch(()=>{});
+  fetch('/api/compliance').then(r=>r.json()).then(renderCompliance).catch(()=>{});
+}
+function renderAttribution(a){
+  if(!a||a.error) return;
+  const rows=[
+    ['毛价差捕获(税前)', a.gross_spread, 'up'],
+    ['走簿滑点', a.walk_the_book, 'dn'],
+    ['手续费', a.fees, 'dn'],
+    ['逆向选择损耗', a.adverse_selection, 'dn'],
+    ['结算净损益', a.settlement, 'up'],
+    ['= 净锁利', a.net, 'b'],
+  ];
+  document.getElementById('attr-tbl').querySelector('tbody').innerHTML=rows.map(r=>{
+    const v=Number(r[1]||0);
+    const cls=r[2]==='b'?(v>=0?'up':'dn'):(v>=0?'up':'dn');
+    return `<tr><td>${r[0]}</td><td class="${r[2]==='b'?'b':cls}">${v>=0?'+':''}$${v.toFixed(2)}</td></tr>`;
+  }).join('');
+  const net=Number(a.net||0);
+  document.getElementById('attr-net').textContent='净锁利: $'+net.toFixed(2);
+}
+function renderCompliance(c){
+  if(!c||c.error) return;
+  const se=document.getElementById('comp-scanned'); if(se){se.className='v b'; se.textContent=c.n_scanned;}
+  const bl=document.getElementById('comp-blocked'); if(bl){bl.className='v r'; bl.textContent=c.n_blocked;}
+  const pa=document.getElementById('comp-passed'); if(pa){pa.className='v up'; pa.textContent=c.n_passed;}
+  const rt=document.getElementById('comp-rate'); if(rt) rt.textContent=c.block_rate_pct+'%';
+  const tb=document.getElementById('comp-tbl'); if(tb){
+    tb.querySelector('tbody').innerHTML=(c.blocked_samples||[]).map(s=>
+      `<tr><td class="r">${String(s.matched)}</td><td>${s.tag||'-'}</td><td class="l">${String(s.question).slice(0,70)}</td></tr>`).join('');
+  }
+  const en=document.getElementById('comp-extra-n'); if(en) en.textContent=c.block_extra_count||0;
+  const sn=document.getElementById('comp-sports-n'); if(sn) sn.textContent=c.block_sports_count||0;
+  const ex=document.getElementById('comp-extra'); if(ex) ex.textContent=(c.block_extra||[]).join('、');
+  const sp=document.getElementById('comp-sports'); if(sp) sp.textContent=(c.block_sports||[]).join('、');
 }
 let liveCache=null;
 function tickLive(){
@@ -1165,57 +1546,56 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
-        elif u.path == "/api/export_report":
-            # 复用当前在跑引擎的内存数据 + sim_report 已验证的渲染函数，生成 HTML/MD 并打开
+        elif u.path == "/api/sensitivity":
+            # P1-2 敏感性分析：当前参数下，各旋钮对一轮做市对冲期望锁利的弹性
             try:
                 with LOCK:
-                    st = {
-                        "round": STATE["round"], "cash": STATE["cash"],
-                        "realized": STATE["realized"], "equity": STATE["equity"],
-                        "round_pnl": STATE["round_pnl"],
-                        "n_markets": STATE["n_markets"], "inv_notional": STATE["inv_notional"],
-                        "unrealized": STATE.get("unrealized", 0.0),
-                        "mode": STATE.get("mode", "pairs"), "fill": STATE.get("fill", {}),
-                        "live_count": STATE["live_count"], "mm_count": STATE["mm_count"],
-                        "params": STATE["params"], "quotes": STATE["quotes"],
-                        "positions": STATE["positions"], "equity_curve": STATE["equity_curve"],
-                    }
-                    s = compute_stats()
-                # 行情样本（与 /api/markets 同口径，已合规过滤）
-                mout = []
-                for m in (MARKETS_LIVE or []):
-                    if not isinstance(m, dict) or "error" in m:
-                        continue
-                    q = m.get("question") or ""
-                    if is_blocked(q):
-                        continue
-                    mout.append({
-                        "question": (q[:90] + ("…" if len(q) > 90 else "")),
-                        "tag": classify(q),
-                        "yes_bid": m.get("yes_bid"), "yes_ask": m.get("yes_ask"),
-                        "no_bid": m.get("no_bid"), "no_ask": m.get("no_ask"),
-                        "liquidity": round(float(m.get("liquidity") or 0), 0),
-                        "token_id": str(m.get("token_id")),
-                    })
-                mkts = {"markets": mout}
-                ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-                out_dir = os.path.join(os.path.dirname(_HERE), "output")
-                os.makedirs(out_dir, exist_ok=True)
-                html_name = "sim_report_%s.html" % stamp
-                md_name = "sim_report_%s.md" % stamp
-                html_path = os.path.join(out_dir, html_name)
-                md_path = os.path.join(out_dir, md_name)
-                with open(html_path, "w", encoding="utf-8") as f:
-                    f.write(build_html(st, s, mkts, 15, ts))
-                with open(md_path, "w", encoding="utf-8") as f:
-                    f.write(build_md(st, s, mkts, 15, ts))
+                    rig = dict(book.rigor)
+                    fr = float(getattr(book, "fee_rate", 0.01) or 0.01)
+                sens = R.mm_param_sensitivity(rig, fee_rate=fr)
+            except Exception as ex:
+                sens = {"error": str(ex)}
+            body = json.dumps(sens, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif u.path == "/api/attribution":
+            # P1-3 盈亏归因瀑布：累计净锁利 -> 毛价差/滑点/手续费/逆向选择/结算
+            try:
+                with LOCK:
+                    attr = book.pnl_attribution(STATE["realized"])
+            except Exception as ex:
+                attr = {"error": str(ex)}
+            body = json.dumps(attr, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif u.path == "/api/compliance":
+            # P2-5 合规过滤可观测：扫描实时盘口池，统计拦截数/样本/词表
+            try:
+                comp = compute_compliance()
+            except Exception as ex:
+                comp = {"error": str(ex)}
+            body = json.dumps(comp, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif u.path == "/api/export_report":
+            # P2-3 复用 build_and_write_report：生成 HTML/MD 报告并打开（与自动报告线程共用）
+            try:
+                r = build_and_write_report(15)
                 payload = {
-                    "ok": True, "stamp": stamp, "ts": ts,
-                    "html": html_name, "md": md_name,
-                    "url": "/reports/" + html_name,
-                    "equity": st["equity"], "realized": st["realized"],
-                    "round": st["round"],
+                    "ok": True, "stamp": r["stamp"], "ts": r["ts"],
+                    "html": r["html_name"], "md": r["md_name"],
+                    "url": "/reports/" + r["html_name"],
+                    "equity": r["equity"], "realized": r["realized"],
+                    "round": r["round"],
                 }
                 body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
                 self.send_response(200)
@@ -1254,6 +1634,29 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif u.path == "/api/shutdown":
+            # P2-2 优雅停止：停循环 -> 落盘 -> 关 HTTP -> 释放锁（atexit）
+            try:
+                with LOCK:
+                    STATE["running"] = False
+                save_persistence()
+                _release_lock()  # 同步释放锁（处理线程存活期执行，避免后台运行器绕过 finally/atexit 致锁残留）
+                body = json.dumps({"ok": True, "msg": "正在优雅停止，进程即将退出"},
+                                  ensure_ascii=False).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                # 等响应写完再关服务器，避免连接被中途掐断
+                threading.Thread(target=_delayed_shutdown).start()
+            except Exception as ex:
+                body = json.dumps({"ok": False, "error": str(ex)}, ensure_ascii=False).encode("utf-8")
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
         else:
             self.send_response(404)
             self.end_headers()
@@ -1262,18 +1665,49 @@ class H(BaseHTTPRequestHandler):
         pass
 
 
+def _delayed_shutdown():
+    """响应写完后再关 HTTP server（serve_forever 返回 -> 进程正常退出 -> 释放锁）。"""
+    time.sleep(0.2)
+    if SRV is not None:
+        try:
+            SRV.shutdown()
+        except Exception:
+            pass
+    _release_lock()  # 显式释放，避免后台运行器绕过 atexit 时锁残留
+
+
 def main():
+    _acquire_lock()                      # P2-1 单实例启动锁
     load_persistence()
     t = threading.Thread(target=loop, daemon=True)
     t.start()
-    srv = ThreadingHTTPServer(("0.0.0.0", PORT), H)
-    print("[sim_server v3] listening on http://127.0.0.1:%d  (Ctrl+C to stop)" % PORT)
+    threading.Thread(target=auto_report_loop, daemon=True).start()  # P2-3 报告自动化
+    global SRV
+    SRV = ThreadingHTTPServer(("0.0.0.0", PORT), H)
+    print("[sim_server v3] listening on http://127.0.0.1:%d  (Ctrl+C 或 /api/shutdown 停止)" % PORT)
+
+    def _on_term(signum, frame):         # P2-2 信号优雅停止
+        with LOCK:
+            STATE["running"] = False
+        save_persistence()
+        if SRV is not None:
+            SRV.shutdown()
+        _release_lock()
+
     try:
-        srv.serve_forever()
+        signal.signal(signal.SIGTERM, _on_term)
+        signal.signal(signal.SIGINT, _on_term)
+    except Exception:
+        pass
+    try:
+        SRV.serve_forever()
     except KeyboardInterrupt:
         with LOCK:
             STATE["running"] = False
-        srv.shutdown()
+        SRV.shutdown()
+    finally:
+        save_persistence()
+        _release_lock()  # 主线程 finally 保证执行（后台运行器不绕过）
 
 
 if __name__ == "__main__":

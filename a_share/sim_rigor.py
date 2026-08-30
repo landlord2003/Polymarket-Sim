@@ -39,6 +39,8 @@ DEFAULT_RIGOR = {
     "max_global_inv_notional": 1500.0,  # 全局净库存名义上限(USD)，超则拒新开仓
     "stop_loss_frac": 0.05,             # 单市场未实现亏损超该比例(相对成本)则强制平仓
     "inventory_skew": 0.5,             # 有净头寸时双边报价推离 mid（抑制追单、鼓励平仓）
+    # ---- 逆向选择（信息优势对手盘） ----
+    "adverse_selection_frac": 0.10,  # 成交后被知情交易者推动价格、蒸发部分可锁利的比例
 }
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -197,6 +199,15 @@ class RigorVirtualBook(VirtualBook):
         super().__init__(path or os.path.join(_HERE, "sim_book_poly.json"),
                          bankroll)
         self.rigor = rigor or rigor_params_from_config()
+        # 逆向选择累计损耗（USD），与账本同生命周期持久化
+        self.adverse_sel_loss = 0.0
+        # ---- 盈亏归因累计（P1-3）----
+        self.fees_paid = 0.0          # 累计手续费（USD）
+        self.slippage_paid = 0.0      # 累计走簿滑点成本（USD，= slip/unit × size）
+        # ---- 结算风险闭环（P1-1）----
+        self.end_dates = {}          # mkt(token_id) -> end_date 字符串（建仓时记录）
+        self.settled_pnl = 0.0       # 已结算锁利（到期按真实结算价了结的净额）
+        self.settlement_events = []  # 结算事件流水（含方向/结算价/损益）
         # 单市场日成交上限状态（独立 JSON 持久化，跨轮次累积；不污染 webui 账本）
         self.daily_caps_path = os.path.join(_HERE, "sim_daily_caps.json")
         self.daily_caps = self._load_caps()
@@ -263,6 +274,10 @@ class RigorVirtualBook(VirtualBook):
         q = opp.get("question", "")
         spread = ask - bid
         adverse = float(self.rigor.get("adverse_frac", 0.30))
+        # 记录到期时间，供结算风险闭环（P1-1）在 end_date 到达时按真实结算价了结
+        ed = opp.get("end_date")
+        if ed:
+            self.end_dates[mkt] = ed
         # 时间衰减：距到期越近，对冲基准价额外不利漂移越大（真实时间风险）
         ttm = time_to_settle_hours(opp)
         extra = time_decay_penalty(ttm, self.rigor) if ttm is not None else 0.0
@@ -316,6 +331,8 @@ class RigorVirtualBook(VirtualBook):
                                                       self.rigor)
                 fee = leg_fee(avg_fill, size, self.fee_rate)
                 self.cash -= avg_fill * size + fee
+                self.fees_paid += fee
+                self.slippage_paid += slip * size
                 self.inventory[mkt] = inv + size
                 prev_avg = float(self.avg_cost.get(mkt, 0.0))
                 self.avg_cost[mkt] = arb_avg_cost_on_buy(prev_avg, inv,
@@ -339,18 +356,23 @@ class RigorVirtualBook(VirtualBook):
                                                       liq, self.rigor)
                 fee = leg_fee(avg_fill, size, self.fee_rate)
                 self.cash += avg_fill * size - fee
+                self.fees_paid += fee
+                self.slippage_paid += slip * size
                 self.inventory[mkt] = inv - size
                 pnl = 0.0
                 avg_cost = float(self.avg_cost.get(mkt, avg_fill))
                 if self.inventory[mkt] == 0:
                     buy_fee = leg_fee(avg_cost, size, self.fee_rate)
-                    locked = round(realized_pnl(avg_cost, avg_fill, size)
-                                   - fee - buy_fee, 4)
+                    locked_raw = realized_pnl(avg_cost, avg_fill, size) - fee - buy_fee
+                    asel = round(locked_raw * float(self.rigor.get(
+                        "adverse_selection_frac", 0.0)), 4)
+                    locked = round(locked_raw - asel, 4)
                     self.realized_pnl += locked
+                    self.adverse_sel_loss += asel
                     pnl = locked
                     self.avg_cost[mkt] = 0.0
-                    msg = ("对冲(滑点%.4f/单位,%d档,漂移%.0f%%): 卖@%.4f×%d，"
-                           "净库存归0，锁利$%.2f" % (slip, tiers, adverse * 100,
+                    msg = ("对冲(滑点%.4f/单位,%d档,逆向选择损耗$%.2f): 卖@%.4f×%d，"
+                           "净库存归0，净锁利$%.2f" % (slip, tiers, asel,
                                                   avg_fill, size, locked))
                 else:
                     msg = ("部分对冲(滑点%.4f/单位): 卖@%.4f×%d，净库存%d"
@@ -428,6 +450,44 @@ class RigorVirtualBook(VirtualBook):
                 "fill_ratio": fill_ratio, "residual": residual,
             }
 
+    # ---------- 逆向选择损耗持久化（覆盖基类，附加字段） ----------
+    def _load(self):
+        super()._load()
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            self.adverse_sel_loss = float(d.get("adverse_sel_loss", 0.0))
+            self.fees_paid = float(d.get("fees_paid", 0.0))
+            self.slippage_paid = float(d.get("slippage_paid", 0.0))
+            self.end_dates = d.get("end_dates", {}) or {}
+            self.settled_pnl = float(d.get("settled_pnl", 0.0))
+            self.settlement_events = d.get("settlement_events", []) or []
+        except Exception:
+            self.adverse_sel_loss = getattr(self, "adverse_sel_loss", 0.0)
+            self.end_dates = getattr(self, "end_dates", {})
+            self.settled_pnl = getattr(self, "settled_pnl", 0.0)
+            self.settlement_events = getattr(self, "settlement_events", [])
+
+    def _save(self):
+        try:
+            with open(self.path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "cash": self.cash, "bankroll": self.bankroll,
+                    "realized_pnl": self.realized_pnl,
+                    "positions": self.positions, "inventory": self.inventory,
+                    "avg_cost": self.avg_cost, "inv_q": self.inv_q,
+                    "seq": self._seq, "max_skew": self.max_skew,
+                    "fee_rate": self.fee_rate,
+                    "adverse_sel_loss": round(self.adverse_sel_loss, 2),
+                    "fees_paid": round(self.fees_paid, 2),
+                    "slippage_paid": round(self.slippage_paid, 2),
+                    "end_dates": self.end_dates,
+                    "settled_pnl": round(self.settled_pnl, 2),
+                    "settlement_events": self.settlement_events[-200:],
+                }, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
     # ---------- 库存盯市（成本基准权益） ----------
     def equity_at_cost(self):
         """真实权益 = 现金 + 未平仓库存按成本基准计价。
@@ -452,6 +512,168 @@ class RigorVirtualBook(VirtualBook):
         with self.lock:
             return round(sum(abs(v) * abs(self.avg_cost.get(mk, 0.0))
                               for mk, v in self.inventory.items()), 2)
+
+    # ---------- 结算风险闭环（P1-1） ----------
+    def settlement_exposure(self):
+        """当前仍持开放库存的市场，若全部按最不利方向结算（多头 yes 归 0 /
+        空头 yes 归 1）的最大不利现金变动——即'仍暴露在结算风险下的金额'。"""
+        with self.lock:
+            exp = 0.0
+            for mk, v in self.inventory.items():
+                if v == 0:
+                    continue
+                c = float(self.avg_cost.get(mk, 0.0))
+                s = abs(v)
+                # 多头 yes 归 0 损失 s*c；空头 yes 归 1 损失 s*(1-c)
+                exp += s * (c if v > 0 else (1.0 - c))
+            return round(exp, 2)
+
+    def settle_expired_markets(self, now=None, resolve_fn=None):
+        """结算已到期且仍有库存的市场：把'逐笔锁利'升级为'已结算锁利'。
+
+        - 对每个 end_date 已过、库存非 0 的市场，取真实结算价 resolve_fn(token_id)。
+        - 结算价取不到（未结算 / API 失败）时用最近中间价 last_mid 暂估并标记
+          pending，待下一轮复核，避免凭空确认收益（不伪造成功）。
+        - 返回本次触发的结算事件列表。
+        """
+        now = now or time.time()
+        if resolve_fn is None:
+            resolve_fn = lambda tid: None
+        events = []
+        with self.lock:
+            for mkt, inv in list(self.inventory.items()):
+                if inv == 0:
+                    continue
+                ed = self.end_dates.get(mkt)
+                ts = parse_end_date(ed) if ed else None
+                if ts is None or ts > now:
+                    continue
+                rp = resolve_fn(mkt)
+                cost = float(self.avg_cost.get(mkt, 0.0))
+                s = abs(inv)
+                pending = rp is None
+                if rp is None:
+                    rp = float(self.last_mid.get(mkt, 0.0))
+                buy_fee = leg_fee(cost, s, self.fee_rate)
+                redeem_fee = leg_fee(rp, s, self.fee_rate)
+                if inv > 0:
+                    self.cash += s * rp - redeem_fee
+                    pnl = round(s * (rp - cost) - buy_fee - redeem_fee, 4)
+                else:
+                    self.cash -= s * rp + redeem_fee
+                    pnl = round(s * (cost - rp) - buy_fee - redeem_fee, 4)
+                self.realized_pnl += pnl
+                self.settled_pnl += pnl
+                ev = {
+                    "ts": round(now, 3), "mkt": mkt,
+                    "question": self.inv_q.get(mkt, ""),
+                    "side": "long" if inv > 0 else "short",
+                    "size": s, "cost": round(cost, 4),
+                    "resolved_price": round(rp, 4), "pending": pending,
+                    "pnl": pnl,
+                }
+                self.settlement_events.append(ev)
+                events.append(ev)
+                self.inventory[mkt] = 0
+                self.avg_cost[mkt] = 0.0
+                self.end_dates.pop(mkt, None)
+            if events:
+                self._save()
+        return events
+
+    def settlement_summary(self):
+        """供看板 / 报告展示的结算风险摘要。"""
+        with self.lock:
+            n_pending = sum(1 for e in self.settlement_events if e.get("pending"))
+            return {
+                "settled_pnl": round(self.settled_pnl, 2),
+                "n_settled": len(self.settlement_events),
+                "n_pending": n_pending,
+                "exposure": self.settlement_exposure(),
+                "events": self.settlement_events[-20:],
+            }
+
+    def pnl_attribution(self, realized_total):
+        """盈亏归因瀑布（P1-3）：把累计净锁利拆成
+        毛价差捕获 − 走簿滑点 − 手续费 − 逆向选择 + 结算净损益。
+
+        realized_total 为 STATE['realized']（已含结算损益）；book 自身累计器提供各成本分量。
+        恒等式：gross = realized − settled + fees + slip + asel。各分量均来自真实成交记录，
+        不编造。"""
+        fees = self.fees_paid
+        slip = self.slippage_paid
+        asel = self.adverse_sel_loss
+        settled = self.settled_pnl
+        gross = float(realized_total) - settled + fees + slip + asel
+        return {
+            "gross_spread": round(gross, 2),
+            "walk_the_book": round(-slip, 2),
+            "fees": round(-fees, 2),
+            "adverse_selection": round(-asel, 2),
+            "settlement": round(settled, 2),
+            "net": round(float(realized_total), 2),
+        }
+
+
+# ============ 敏感性分析（P1-2）：参数对一轮做市对冲期望锁利的边际影响 ============
+def mm_expected_lock(rigor, mid=0.5, spread=0.02, liq=50000.0, fee_rate=0.01):
+    """代表性市场（mid=0.5、价差=0.02、流动性=50000、单笔 size 取 rigor.size）
+    一轮「建仓→对冲」的期望锁利（USD），用于敏感性分析的基准量。
+
+    与 market_make 真实成交模型一致：买腿吃 bid+adverse*spread、卖腿吃 ask-adverse*spread，
+    再扣双边手续费、扣逆向选择蒸发比例。size 超过档位深度时叠加走簿滑点。
+    """
+    a = float(rigor.get("adverse_frac", 0.15))
+    asel = float(rigor.get("adverse_selection_frac", 0.10))
+    f = float(rigor.get("fee_rate", fee_rate))
+    size = int(float(rigor.get("size", 100) or 100))
+    bid = mid - spread / 2.0
+    ask = mid + spread / 2.0
+    buy_fill, _, _, _ = model_fill("buy", bid + a * spread, size, liq, rigor)
+    sell_fill, _, _, _ = model_fill("sell", ask - a * spread, size, liq, rigor)
+    gross = (sell_fill - buy_fill) * size
+    fees = leg_fee(buy_fill, size, f) + leg_fee(sell_fill, size, f)
+    locked_raw = gross - fees
+    asel_loss = locked_raw * asel
+    return round(locked_raw - asel_loss, 4)
+
+
+def mm_param_sensitivity(rigor, fee_rate=0.01):
+    """对每个可调参数做 ±step 扰动，估计对一轮期望锁利的弹性（敏感性排序）。
+
+    返回 {base_pnl, rep, params:[{param, base, step, pnl_up, pnl_dn,
+    delta_pnl, elasticity}]}（按 |elasticity| 降序）。elasticity = (pnl_up-pnl_dn)/2 / base。
+
+    诚实边界：基于代表性市场解析估计，非全量重模拟；用于看板快速定位「哪个旋钮最影响盈亏」。
+    """
+    rep = {"mid": 0.5, "spread": 0.02, "liq": 50000.0, "size": int(float(rigor.get("size", 100) or 100))}
+    base = mm_expected_lock(rigor, fee_rate=fee_rate)
+    specs = [
+        ("adverse_frac", float(rigor.get("adverse_frac", 0.15) or 0.15), 0.05),
+        ("adverse_selection_frac", float(rigor.get("adverse_selection_frac", 0.10) or 0.10), 0.05),
+        ("fee_rate", float(fee_rate), 0.005),
+        ("size", float(rep["size"]), 20.0),
+        ("tick", float(rigor.get("tick", 0.002) or 0.002), 0.001),
+        ("depth_frac", float(rigor.get("depth_frac", 0.01) or 0.01), 0.005),
+        ("inventory_skew", float(rigor.get("inventory_skew", 0.5) or 0.5), 0.2),
+        ("stop_loss_frac", float(rigor.get("stop_loss_frac", 0.05) or 0.05), 0.02),
+    ]
+    out = []
+    for name, val, step in specs:
+        if val <= 0:
+            continue
+        r_up = dict(rigor); r_up[name] = val + step
+        r_dn = dict(rigor); r_dn[name] = max(0.0, val - step)
+        up = mm_expected_lock(r_up)
+        dn = mm_expected_lock(r_dn)
+        delta = (up - dn) / 2.0
+        elasticity = (delta / base) if base else 0.0
+        out.append({"param": name, "base": round(val, 4), "step": step,
+                    "pnl_up": up, "pnl_dn": dn,
+                    "delta_pnl": round(delta, 4),
+                    "elasticity": round(elasticity, 3)})
+    out.sort(key=lambda x: -abs(x["elasticity"]))
+    return {"base_pnl": base, "rep": rep, "params": out}
 
 
 if __name__ == "__main__":

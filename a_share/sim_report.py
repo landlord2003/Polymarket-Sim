@@ -106,6 +106,9 @@ def build_html(st, s, mkts, top_n, ts):
     cards = "".join([
         card("盯市权益", _money(st.get("equity")), "b"),
         card("累计锁利", _sgn(s.get("realized")), _cls(s.get("realized"))),
+        card("逆向选择损耗", _sgn(-(s.get("adverse_sel_loss") or 0)), "dn"),
+        card("已结算锁利", _sgn(s.get("settled_pnl") or 0), _cls(s.get("settled_pnl") or 0)),
+        card("结算敞口(风险)", _sgn(-(s.get("settlement_exposure") or 0)), "dn"),
         card("浮动盈亏", _sgn(st.get("unrealized")), _cls(st.get("unrealized"))),
         card("峰值盈利", _sgn(s.get("peak_profit")), _cls(s.get("peak_profit"))),
         card("历史最大回撤", "%.2f%%" % s.get("max_drawdown_pct", 0), "dn"),
@@ -152,6 +155,27 @@ def build_html(st, s, mkts, top_n, ts):
 
     bt = s.get("best_trade") or {}
     wt = s.get("worst_trade") or {}
+
+    # 盈亏归因瀑布（P1-3）
+    _a = s.get("attribution") or {}
+    attr_rows = ""
+    if _a:
+        _arows = [
+            ("毛价差捕获（做市两腿价差收入）", _a.get("gross_spread", 0)),
+            ("走簿滑点（成交冲击盘口）", _a.get("walk_the_book", 0)),
+            ("手续费", _a.get("fees", 0)),
+            ("逆向选择损耗", _a.get("adverse_selection", 0)),
+            ("结算净损益", _a.get("settlement", 0)),
+        ]
+        _body = "".join(
+            "<tr><td>%s</td><td class='%s'>%s</td></tr>" % (nm, _cls(v), _sgn(v))
+            for nm, v in _arows)
+        attr_rows = ("<h2>盈亏归因（瀑布）</h2>"
+                     "<table><thead><tr><th>分量</th><th>金额</th></tr></thead><tbody>%s</tbody>"
+                     "<tfoot><tr><td><b>净锁利</b></td><td class='b %s'>%s</td></tr></tfoot></table>"
+                     "<div class='note'>恒等式：毛价差 − 滑点 − 手续费 − 逆向选择 + 结算 = 净锁利。"
+                     "各分量来自真实成交记录（fee/slip/adverse/settled 累加器），不编造。</div>" % (
+                         _body, _cls(_a.get("net", 0)), _sgn(_a.get("net", 0))))
 
     html = """<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
@@ -237,6 +261,8 @@ FILL_BASE 是拍的参数。真实的成交率<b>只能用真钱小额挂单测�
 <b>5. 收益不等于实盘。</b>按成交率 51%% 的假设，加回成交真实性后收益约为「假设必然成交」乐观上界的 21%%。
 </div>
 
+%s
+
 <footer>本报告由 a_share/sim_report.py 自动生成 · 数据源 Polymarket Gamma · 模拟引擎 RigorVirtualBook</footer>
 </div></body></html>""" % (
         ts, CSS, ts, s.get("run_start"), s.get("duration_min"), mode_txt,
@@ -266,6 +292,7 @@ FILL_BASE 是拍的参数。真实的成交率<b>只能用真钱小额挂单测�
         f.get("base"), (st.get("params") or {}).get("adverse"),
         (st.get("params") or {}).get("size"),
         (0.005 * 100),
+        attr_rows,
     )
     return html
 
@@ -292,12 +319,32 @@ def build_md(st, s, mkts, top_n, ts):
     A("|---|---|")
     A("| 盯市权益 | %s |" % _money(st.get("equity")))
     A("| 累计锁利 | %s |" % _sgn(s.get("realized")))
+    A("| 逆向选择损耗 | %s |" % _sgn(-(s.get("adverse_sel_loss") or 0)))
+    A("| 已结算锁利 | %s |" % _sgn(s.get("settled_pnl") or 0))
+    A("| 结算敞口(风险) | %s |" % _sgn(-(s.get("settlement_exposure") or 0)))
     A("| 浮动盈亏 | %s |" % _sgn(st.get("unrealized")))
     A("| 峰值盈利 | %s |" % _sgn(s.get("peak_profit")))
     A("| 历史最大回撤 | %.2f%% |" % s.get("max_drawdown_pct", 0))
     A("| 挂单成交率 | %.1f%% |" % fill_rate)
     A("| 胜率（平仓） | %.1f%% |" % s.get("win_rate", 0))
     A("| 总成交 | %s 笔 |" % _num(s.get("trades_total")))
+    A("")
+    A("## 盈亏归因（瀑布）")
+    A("")
+    A("恒等式：**毛价差 − 滑点 − 手续费 − 逆向选择 + 结算 = 净锁利**。各分量来自真实成交记录，不编造。")
+    A("")
+    _a = s.get("attribution") or {}
+    if _a:
+        A("| 分量 | 金额 |")
+        A("|---|---|")
+        A("| 毛价差捕获（做市两腿价差收入） | %s |" % _sgn(_a.get("gross_spread", 0)))
+        A("| 走簿滑点（成交冲击盘口） | %s |" % _sgn(_a.get("walk_the_book", 0)))
+        A("| 手续费 | %s |" % _sgn(_a.get("fees", 0)))
+        A("| 逆向选择损耗 | %s |" % _sgn(_a.get("adverse_selection", 0)))
+        A("| 结算净损益 | %s |" % _sgn(_a.get("settlement", 0)))
+        A("| **净锁利** | **%s** |" % _sgn(_a.get("net", 0)))
+    else:
+        A("（暂无归因数据）")
     A("")
     A("## 成交统计")
     A("")

@@ -104,13 +104,60 @@ def _is_blocked(question: str, tags) -> bool:
     return False
 
 
+class GammaRateLimited(Exception):
+    """Gamma 命中 429 冷却中；调用方应降级用旧缓存而非继续打 Gamma。"""
+    pass
+
+
+_GAP_COOLDOWN_UNTIL = 0.0    # 429 触发的全局冷却截止时间（秒）
+_GAP_BACKOFF_BASE = 2.0      # 指数退避基数（秒）
+_GAP_MAX_RETRY = 3           # 单次请求最大重试次数（5xx / 网络抖动）
+_GAP_COOLDOWN_SEC = 30.0     # 命中 429 后的冷却时长（秒）
+
+
+def gamma_cooldown_remaining() -> float:
+    """距离 Gamma 限流冷却结束还剩多少秒（0=未冷却），供看板可观测。"""
+    return max(0.0, _GAP_COOLDOWN_UNTIL - time.time())
+
+
 def _http_get(url: str, timeout: int = 15) -> str:
-    req = urllib.request.Request(url, headers={
-        "User-Agent": "Mozilla/5.0 (compatible; QuantTrading/1.0)",
-        "Accept": "application/json",
-    })
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read().decode("utf-8")
+    """带限流退避的 Gamma HTTP GET（P2-4）。
+
+    - 429：进入全局冷却（默认 30s），期间所有调用直接抛 GammaRateLimited，避免反复打 Gamma。
+    - 5xx / 网络抖动：指数退避重试（2/4/8s），最多 _GAP_MAX_RETRY 次。
+    - 其他 4xx：直接抛出（非限流，不重试）。
+    """
+    global _GAP_COOLDOWN_UNTIL
+    if time.time() < _GAP_COOLDOWN_UNTIL:
+        raise GammaRateLimited("Gamma 冷却中（剩 %.1fs）" % gamma_cooldown_remaining())
+    last_err = None
+    for attempt in range(_GAP_MAX_RETRY):
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; QuantTrading/1.0)",
+                "Accept": "application/json",
+            })
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            last_err = e
+            if e.code == 429:
+                _GAP_COOLDOWN_UNTIL = time.time() + _GAP_COOLDOWN_SEC
+                print("[gamma] 429 限流 -> 进入冷却 %.0fs" % _GAP_COOLDOWN_SEC)
+                raise GammaRateLimited("HTTP 429 rate limited; cooldown %.0fs" % _GAP_COOLDOWN_SEC)
+            if 500 <= e.code < 600:
+                wait = _GAP_BACKOFF_BASE * (2 ** attempt)
+                print("[gamma] %d 服务端错误，退避 %.1fs 重试" % (e.code, wait))
+                time.sleep(wait)
+                continue
+            raise
+        except (urllib.error.URLError, OSError) as e:
+            last_err = e
+            wait = _GAP_BACKOFF_BASE * (2 ** attempt)
+            print("[gamma] 网络错误(%s)，退避 %.1fs 重试" % (e, wait))
+            time.sleep(wait)
+            continue
+    raise last_err or GammaRateLimited("Gamma 请求失败")
 
 
 def _parse_outcomes(market: dict):
@@ -351,6 +398,44 @@ def _parse_price_history(token_id, interval="max"):
         out.append((int(t), float(p)))
     out.sort(key=lambda x: x[0])
     return out
+
+
+def fetch_resolution_price(token_id, timeout=20):
+    """返回该 clob token 的结算价（0/1 或最终概率）。
+
+    用 Gamma markets 详情：clobTokenIds 定位 token 下标，取对应 outcomePrices。
+    市场尚未结算（resolved 字段为空 / outcomePrices 仍为非 0/1 概率）时返回 None，
+    调用方应以最近中间价作暂估、标 pending，待真正结算后再复核。
+    网络/解析失败返回 None。
+    """
+    try:
+        url = "https://gamma-api.polymarket.com/markets?clobTokenIds=%s" % token_id
+        d = json.loads(_http_get(url, timeout=timeout))
+        if not isinstance(d, list):
+            return None
+        for m in d:
+            toks = m.get("clobTokenIds")
+            if not toks:
+                continue
+            try:
+                toks = json.loads(toks) if isinstance(toks, str) else toks
+            except Exception:
+                toks = []
+            if not isinstance(toks, list) or token_id not in toks:
+                continue
+            idx = toks.index(token_id)
+            prices = m.get("outcomePrices")
+            if not prices:
+                return None
+            try:
+                prices = json.loads(prices) if isinstance(prices, str) else prices
+            except Exception:
+                return None
+            if 0 <= idx < len(prices):
+                return float(prices[idx])
+    except Exception:  # noqa: BLE001
+        return None
+    return None
 
 
 def clear_cache():
