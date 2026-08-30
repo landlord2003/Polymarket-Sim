@@ -351,3 +351,23 @@ def _parse_price_history(token_id, interval="max"):
         out.append((int(t), float(p)))
     out.sort(key=lambda x: x[0])
     return out
+
+
+def clear_cache():
+    """清空盘口缓存，强制下一次 fetch_poly_quotes 走真实网络请求。
+
+    背景：fetch_poly_quotes(force=True) 只绕过 _poly_quotes_cache 这一层，
+    底层 _fetch_pool() 还有 _POOL_TTL(120s) 缓存，force 管不到它。结果是
+    连续多次 force 拉取拿到的是同一批报价（实测 6 秒内 300 个市场价格变化为 0）。
+    做市模拟里库存跨轮持有，价格必须真实演化才有风险可言，因此需要真正的清缓存。
+    """
+    global _pool_cache
+    _pool_cache = None
+    _poly_quotes_cache["ts"] = 0.0
+    _poly_quotes_cache["data"] = None
+
+
+def fetch_quotes_fresh(limit: int = 300):
+    """强制走网络的实时盘口（= clear_cache + fetch_poly_quotes）。"""
+    clear_cache()
+    return fetch_poly_quotes(limit=limit, force=True)

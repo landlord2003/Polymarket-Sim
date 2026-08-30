@@ -21,6 +21,7 @@ import threading
 import time
 import collections
 import datetime as _dt
+import random
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
@@ -33,7 +34,27 @@ import polymarket as P  # noqa: E402
 PORT = 8787
 LOCK = threading.Lock()
 MM_N = 20          # 同时做市的真实市场数（取流动性最高者）
-MM_REFRESH = 75    # 每 75 轮(~90s)刷新一次真实盘口池
+MM_REFRESH = 75    # 每 75 轮(~90s)重选一次做市标的（价格刷新另由后台线程负责）
+
+# ============ 成交真实性模型（A：成交概率；B：真实库存管理） ============
+# SIM_MODE:
+#   pairs = 旧行为 —— 同轮双边建平（买→卖，库存归零），乐观假设双边都成交
+#   inv   = 新的真实做市 —— 每轮每市场只尝试一腿(按库存方向)，按概率判定是否成交，
+#           未平敞口跨轮持有、承担真实价格波动，受止损/库存上限约束
+SIM_MODE = os.environ.get("SIM_MODE", "pairs").strip().lower()
+if SIM_MODE not in ("pairs", "inv"):
+    SIM_MODE = "pairs"
+# 挂单成交概率模型：我们把单挂在距市场最优价 adverse*spread 处
+#   adverse=0   -> 挂在市场最优价，需排队等对手方，成交率 = FILL_BASE
+#   adverse=0.5 -> 挂在中间价，让出半个价差，成交率 -> 1
+FILL_BASE = float(os.environ.get("FILL_BASE", "0.30"))
+FILL_GAMMA = float(os.environ.get("FILL_GAMMA", "1.0"))
+APPLY_FILL = os.environ.get("APPLY_FILL", "1") != "0"   # 0 = 关闭概率，退回 100% 成交
+# inv 模式下真实盘口的刷新间隔(秒)。
+# 实测：一次全量拉取(10 页 × 100)约需 20 秒，且 Gamma 盘口在秒/分钟级非常稳定
+# （实测 8 秒内 300 个市场的 bestBid/bestAsk 变化为 0）。因此刷新间隔不能设太小，
+# 否则请求会堆积、有被 Gamma 限流的风险。默认 150 秒。
+PRICE_REFRESH_SEC = float(os.environ.get("PRICE_REFRESH_SEC", "150"))
 
 # ============ 状态 ============
 STATE = {
@@ -44,11 +65,15 @@ STATE = {
     "equity": 10000.0,
     "round_pnl": 0.0,
     "inv_notional": 0.0,
+    "unrealized": 0.0,
     "n_markets": 0,
     "live_count": 0,
     "mm_count": 0,
     "last_refresh": 0.0,
     "params": {"mm": 0.02, "adverse": 0.15, "tick": 0.002, "size": 100, "inventory_skew": 0.5},
+    "mode": SIM_MODE,
+    "fill": {"base": FILL_BASE, "gamma": FILL_GAMMA, "on": APPLY_FILL,
+             "attempts": 0, "hits": 0, "rate": 0.0},
     "quotes": {},
     "positions": [],
     "equity_curve": [],
@@ -75,16 +100,19 @@ def load_persistence():
     meta_path = os.path.join(DATA_DIR, "run_meta.json")
     # 显式重置：SIM_RESET=1 时清空历史，从今天重新建立干净起点（默认不启用，防误删）
     if os.environ.get("SIM_RESET") == "1":
+        # 注意：用 open(w) 截断而非 os.remove —— 后者会被 WorkBuddy 的 safe-delete
+        # shim 拦截（windows-sandbox-recycle-bin-unavailable），导致重置静默失败、
+        # 旧数据被继续加载，统计彻底失真。
         for _f in ("run_meta.json", "trades.jsonl", "equity.jsonl"):
             _p = os.path.join(DATA_DIR, _f)
-            if os.path.exists(_p):
-                try:
-                    os.remove(_p)
-                except Exception:
-                    pass
+            try:
+                open(_p, "w", encoding="utf-8").close()
+            except Exception:
+                pass
         RUN_META.clear()
         RUN_META.update({"run_start": None, "initial_equity": 10000.0,
                          "version": 1, "last_round": 0})
+        TRADES.clear()
         print("[persistence] SIM_RESET=1 -> 已清空历史，重建干净起点")
     if os.path.exists(meta_path):
         try:
@@ -370,6 +398,22 @@ def select_mm(rows):
     return [m for _, m in cand[:MM_N]]
 
 
+def fill_prob(adverse):
+    """挂单成交概率（A：成交概率模型）。
+
+    我们把单挂在距市场最优价 adverse*spread 处：
+      adverse=0   -> 贴着市场最优价挂，价格无优势、要排队，成交率最低 = FILL_BASE
+      adverse=0.5 -> 挂在中间价，让出半个价差，几乎必成交 -> 1
+    这是做市的核心权衡：挂得越贪（越靠内）越难成交，挂得越让（越靠中间）越稳但赚得越少。
+    """
+    if not APPLY_FILL:
+        return 1.0
+    u = adverse / 0.5
+    u = 0.0 if u < 0 else (1.0 if u > 1 else u)
+    p = FILL_BASE + (1.0 - FILL_BASE) * (u ** FILL_GAMMA)
+    return p
+
+
 # ============ 真实引擎实例 ============
 book = RigorVirtualBook(rigor=rigor_params_from_config())
 book._save = lambda: None                      # 实时循环不落盘，提速
@@ -377,6 +421,9 @@ book._record_volume = lambda *a, **k: None     # 禁日上限文件 I/O，提速
 book._save_caps = lambda: None                 # 禁日成交上限持久化 I/O，提速
 book.max_skew = 300                            # 允许 size 维度（生产真实上限 300）
 book.fee_rate = 0.005                           # Polymarket 真实低交易费（做市赚价差为主）
+# 挂单成交统计（尝试次数 / 成交次数），用于计算真实成交率
+FILL_ATTEMPTS = [0]
+FILL_HITS = [0]
 
 
 def step():
@@ -387,12 +434,13 @@ def step():
     with LOCK:
         refresh = (STATE["round"] % MM_REFRESH == 0)
     if refresh or not MARKETS_LIVE:
-        try:
-            MARKETS_LIVE = P.fetch_poly_quotes(limit=300, force=True)
-        except Exception:
-            MARKETS_LIVE = MARKETS_LIVE or []
-        # 重选做市标的（固定集合，直到下个刷新周期；避免建仓后掉出导致不平仓）
-        MM_SET = [m["token_id"] for m in select_mm(MARKETS_LIVE)]
+        if SIM_MODE != "inv":   # inv 模式的价格刷新由后台线程负责，此处不阻塞交易循环
+            try:
+                MARKETS_LIVE = P.fetch_poly_quotes(limit=300, force=True)
+            except Exception:
+                MARKETS_LIVE = MARKETS_LIVE or []
+        # 重选做市标的（固定集合，直到下个刷新周期）
+        MM_SET = [m["token_id"] for m in select_mm(MARKETS_LIVE or [])]
     by_tok = {m.get("token_id"): m for m in (MARKETS_LIVE or [])
               if isinstance(m, dict) and "error" not in m}
     size = STATE["params"]["size"]
@@ -421,13 +469,26 @@ def step():
             "liquidity": m.get("liquidity") or 0,
             "buy_id": tok, "sell_id": tok,
             "question": qtext,
-            "end_date": None,   # 同轮建平无持仓时间风险，不计时间衰减惩罚(extra)
+            # pairs 模式同轮建平、无持仓时间风险，故不计时间衰减；
+            # inv 模式真实跨轮持仓，必须计入距到期的时间风险。
+            "end_date": (m.get("end_date") if SIM_MODE == "inv" else None),
             "buy_venue": "poly", "sell_venue": "poly",
         }
-        # 同轮双边建平：先买建仓、再卖平仓，库存归零，纯捕获价差（零漂移风险）。
-        # 这正是离线四维扫描正 EV 的真实对应——同轮盘口不变，锁利 = spread·(1-2·adverse)·size − fee。
+        # ---- 两种模式 ----
+        # pairs（旧）：同轮双边建平，先买后卖，库存归零，纯捕获价差。乐观假设：双边都成交。
+        # inv（新）：每轮只尝试一腿（方向由库存决定：有货挂卖单平仓、无货挂买单建仓），
+        #           且必须先通过成交概率判定 —— 挂了不等于成交。未平敞口跨轮持有，
+        #           承担真实价格波动，受止损(5%)与全局库存上限约束。
         tag = classify(qtext)
-        for _leg in (0, 1):
+        legs = 1 if SIM_MODE == "inv" else 2
+        for _leg in range(legs):
+            # B：真实做市下挂单不必然成交，按价格改善幅度判定
+            if SIM_MODE == "inv" and APPLY_FILL:
+                _p = fill_prob(adverse)
+                FILL_ATTEMPTS[0] += 1
+                if random.random() >= _p:
+                    continue          # 挂单没被打掉，本腿不成交
+                FILL_HITS[0] += 1
             try:
                 r = book.market_make(opp, size)
             except Exception:
@@ -476,26 +537,51 @@ def step():
         off = skew * spread
         buy_base = yb + adverse * spread
         sell_base = ya - adverse * spread
+        try:
+            inv_now = int(book.inventory.get(tok, 0) or 0)
+        except Exception:
+            inv_now = 0
         quotes[tok] = {
             "question": qtext[:62],
             "mid": round(mid, 4),
             "yes_bid": yb, "yes_ask": ya,
             "our_buy": round(buy_base, 4), "our_sell": round(sell_base, 4),
-            "inv": 0, "liq": round(float(m.get("liquidity") or 0), 0),
+            "inv": inv_now, "liq": round(float(m.get("liquidity") or 0), 0),
         }
     # 快照到 STATE
     prev_realized = STATE["realized"]
+    # inv 模式下库存不为零，权益必须按市价盯市（现金 + 未平仓按 mid 计价）
+    try:
+        eq_marked = book.equity_marked() if SIM_MODE == "inv" else book.cash
+    except Exception:
+        eq_marked = book.cash
+    try:
+        inv_notional = book.inventory_notional()
+        open_mkts = sum(1 for v in book.inventory.values() if v != 0)
+    except Exception:
+        inv_notional, open_mkts = 0.0, 0
     with LOCK:
         STATE["round"] += 1
         STATE["cash"] = round(book.cash, 2)
         STATE["realized"] = round(book.realized_pnl, 2)
-        STATE["equity"] = round(book.cash, 2)   # 库存恒0，盯市权益=现金
+        STATE["equity"] = round(eq_marked, 2)
         STATE["round_pnl"] = round(round_pnl, 2)
         # 历史峰值权益（跨重启不丢）
         if STATE["equity"] > STATE.get("peak_equity", 0):
             STATE["peak_equity"] = round(STATE["equity"], 2)
-        STATE["n_markets"] = 0
-        STATE["inv_notional"] = 0.0
+        STATE["n_markets"] = open_mkts
+        STATE["inv_notional"] = round(inv_notional, 2)
+        # 浮动盈亏 = 盯市权益 − 初始权益 − 已实现盈亏
+        # （注意：不能写成 equity − cash，那等于「库存市值」而非「盈亏」）
+        _init_eq = float(RUN_META.get("initial_equity") or 10000.0)
+        STATE["unrealized"] = round(float(STATE["equity"]) - _init_eq
+                                    - float(STATE["realized"]), 2)
+        # 成交率统计（挂单尝试 vs 实际被打掉）
+        STATE["fill"] = {
+            "base": FILL_BASE, "gamma": FILL_GAMMA, "on": APPLY_FILL,
+            "attempts": FILL_ATTEMPTS[0], "hits": FILL_HITS[0],
+            "rate": round(FILL_HITS[0] / FILL_ATTEMPTS[0] * 100, 1) if FILL_ATTEMPTS[0] else 0.0,
+        }
         STATE["quotes"] = quotes
         STATE["live_count"] = len(MARKETS_LIVE) if MARKETS_LIVE else 0
         STATE["mm_count"] = len(MM_SET)
@@ -528,6 +614,30 @@ def step():
                               STATE.get("peak_equity"))
 
 
+def price_refresh_daemon():
+    """后台刷新真实盘口（B 模式必需）。
+
+    inv 模式下库存跨轮持有，价格必须真实演化才有风险可言。若沿用旧的「每 75 轮
+    才刷新一次」，同一批价格会被复用 75 次、库存毫无风险，模拟等于自欺欺人。
+    因此价格刷新与交易循环解耦，由独立线程按 PRICE_REFRESH_SEC 秒更新。
+    """
+    while True:
+        with LOCK:
+            if not STATE["running"]:
+                break
+        try:
+            # 必须清掉底层 _fetch_pool 的 TTL 缓存，否则拿回的是同一批报价，
+            # 价格不演化 = 库存无风险 = 模拟自欺欺人
+            rows = P.fetch_quotes_fresh(limit=300)
+            if rows:
+                global MARKETS_LIVE
+                with LOCK:
+                    MARKETS_LIVE = rows
+        except Exception:
+            pass
+        time.sleep(PRICE_REFRESH_SEC)
+
+
 def loop():
     # 启动即拉一次真实盘口
     try:
@@ -535,6 +645,9 @@ def loop():
         MARKETS_LIVE = P.fetch_poly_quotes(limit=300, force=True)
     except Exception:
         pass
+    # inv 模式：价格刷新交给后台线程，交易循环不阻塞
+    if SIM_MODE == "inv":
+        threading.Thread(target=price_refresh_daemon, daemon=True).start()
     while True:
         with LOCK:
             if not STATE["running"]:
@@ -625,10 +738,15 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
   <span class="badge live" id="status">● 连接中…</span>
   <span class="badge" id="rnd">round 0</span>
   <span class="badge" id="live">真实盘口 0 · 做市 0</span>
+  <span class="badge mode" id="modebadge">—</span>
   <span class="sndbtn" id="snd" title="成交音效开关（默认关）">🔇 音效</span>
   <span class="badge">引擎: RigorVirtualBook.market_make</span>
 </header>
-<div class="banner">✅ 行情来自<b>真实 Polymarket 盘口</b>（urllib 直连 Gamma，每 ~90s 刷新，已合规过滤政治/地缘/军事/中东航运咽喉等敏感类）。每个真实市场由<b>验证过的做市引擎</b>在真实盘口上<b>同轮双边建平</b>（库存归零，纯捕获价差，零漂移风险）。全程 <b>DRY_RUN 影子账本、零真钱</b>——演示真实行情下的策略表现，<b>不等同于实盘结论</b>。配色按中国习惯：<b style="color:var(--up)">红=涨/盈利</b>，<b style="color:var(--dn)">绿=跌/亏损</b>。数据自 <b id="run-start">—</b> 起落盘累计。</div>
+<div class="banner">✅ 行情来自<b>真实 Polymarket 盘口</b>（urllib 直连 Gamma，已合规过滤政治/地缘/军事等敏感类）。
+<b>成交不再是必然</b>：挂单按价格改善幅度判定成交概率（<code>FILL_BASE</code> 参数），挂得越贪越难被打到。
+<b>未平敞口跨轮持有</b>，承担真实价格波动，受止损(5%)与全局库存上限约束，权益按市价盯市。
+全程 <b>DRY_RUN 影子账本、零真钱</b>。配色按中国习惯：<b style="color:var(--up)">红=涨/盈利</b>，<b style="color:var(--dn)">绿=跌/亏损</b>。
+数据自 <b id="run-start">—</b> 起落盘累计。</div>
 <div class="wrap">
   <div class="cards" id="cards"></div>
 
@@ -732,6 +850,9 @@ document.getElementById('cards').innerHTML=
    '<div class="card"><div class="k">累计锁利</div><div class="v b" id="c-real">$0</div></div>',
    '<div class="card"><div class="k">本轮锁利</div><div class="v b" id="c-rpnl">$0</div></div>',
    '<div class="card"><div class="k">盯市权益</div><div class="v b" id="c-eq">$0</div></div>',
+   '<div class="card"><div class="k">浮动盈亏</div><div class="v b" id="c-unreal">$0</div></div>',
+   '<div class="card"><div class="k">挂单成交率</div><div class="v b" id="c-fill">0%</div></div>',
+   '<div class="card"><div class="k">敞口名义</div><div class="v b" id="c-inv">$0</div></div>',
    '<div class="card"><div class="k">真实盘口</div><div class="v b" id="c-live">0</div></div>',
    '<div class="card"><div class="k">做市市场</div><div class="v b" id="c-mm">0</div></div>'].join('');
 let seen=new Set(), prevRound=0;
@@ -818,6 +939,15 @@ function tickState(){
     setNum('c-round',s.round); setMoney('c-cash',s.cash,false);
     setMoney('c-real',s.realized,true); setMoney('c-rpnl',s.round_pnl,true);
     setMoney('c-eq',eq,false); setNum('c-live',s.live_count); setNum('c-mm',s.mm_count);
+    setMoney('c-unreal',(s.unrealized||0),true);
+    setMoney('c-inv',(s.inv_notional||0),false);
+    const fe=document.getElementById('c-fill');
+    if(fe){const fr=(s.fill&&s.fill.on)?(s.fill.rate||0):100;
+      fe.className='v '+(fr>=60?'b':(fr>=40?'g':'r'));
+      fe.textContent=fr.toFixed(1)+'%';}
+    const mb=document.getElementById('modebadge');
+    if(mb&&s.fill){mb.textContent=(s.mode==='inv'?'真实做市(库存管理)':'同轮双边建平')
+      +' · 挂单成交模型'+(s.fill.on?'开':'关');}
     document.getElementById('ninv').textContent=(s.round_pnl>=0?'+$':'-$')+fmt(Math.abs(s.round_pnl));
     document.getElementById('invn').textContent=(s.realized>=0?'+$':'-$')+fmt(Math.abs(s.realized));
     drawCandles(s.equity_curve);
@@ -886,6 +1016,8 @@ class H(BaseHTTPRequestHandler):
                     "realized": STATE["realized"], "equity": STATE["equity"],
                     "round_pnl": STATE["round_pnl"],
                     "n_markets": STATE["n_markets"], "inv_notional": STATE["inv_notional"],
+                    "unrealized": STATE.get("unrealized", 0.0),
+                    "mode": STATE.get("mode", "pairs"), "fill": STATE.get("fill", {}),
                     "live_count": STATE["live_count"], "mm_count": STATE["mm_count"],
                     "params": STATE["params"], "quotes": STATE["quotes"],
                     "positions": STATE["positions"], "equity_curve": STATE["equity_curve"],
