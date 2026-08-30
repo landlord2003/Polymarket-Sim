@@ -326,7 +326,8 @@ class RigorVirtualBook(VirtualBook):
                     "venue": opp.get("buy_venue", "poly"), "question": q,
                     "entry": round(avg_fill, 4), "size": size, "ts": ts,
                     "fee": round(fee, 4), "slip": round(slip, 4),
-                    "tiers": tiers, "cash_after": round(self.cash, 2),
+                    "tiers": tiers, "pnl": 0.0,
+                    "cash_after": round(self.cash, 2),
                 })
                 self._record_volume(mkt, avg_fill * size)
                 pnl = 0.0
@@ -360,7 +361,8 @@ class RigorVirtualBook(VirtualBook):
                     "venue": opp.get("sell_venue", "poly"), "question": q,
                     "entry": round(avg_fill, 4), "size": size, "ts": ts,
                     "fee": round(fee, 4), "slip": round(slip, 4),
-                    "tiers": tiers, "cash_after": round(self.cash, 2),
+                    "tiers": tiers, "pnl": round(pnl, 4),
+                    "cash_after": round(self.cash, 2),
                 })
             self._record_volume(mkt, avg_fill * size)
             self._save()
