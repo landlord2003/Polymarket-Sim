@@ -30,6 +30,8 @@ sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.dirname(_HERE))
 from sim_rigor import RigorVirtualBook, rigor_params_from_config  # noqa: E402
 import polymarket as P  # noqa: E402
+# 复用 sim_report 的已验证报告渲染函数（HTML/Markdown），避免双重实现
+from sim_report import build_html, build_md  # noqa: E402
 
 PORT = 8787
 LOCK = threading.Lock()
@@ -706,6 +708,11 @@ header h1{margin:0;font-size:19px}
 .badge.live{background:#0e2419;color:#7fe9bd;border-color:#1c503a}
 .sndbtn{cursor:pointer;font-size:14px;background:#101a28;border:1px solid var(--line);border-radius:8px;padding:4px 10px;color:var(--mut);transition:all .2s}
 .sndbtn:hover{color:var(--ink);border-color:var(--acc)}
+/* 导出报告按钮 */
+.rptbtn{cursor:pointer;font-size:13px;background:#0e1c2b;border:1px solid var(--acc);color:var(--acc);
+  border-radius:8px;padding:5px 13px;font-weight:600;transition:all .2s;font-family:inherit}
+.rptbtn:hover{background:var(--acc);color:#06121f}
+.rptbtn:disabled{opacity:.6;cursor:wait}
 .banner{background:linear-gradient(90deg,#0e1b14,#0c1813);border:1px solid #1d3a2a;color:#9fe3c4;padding:8px 14px;margin:12px 22px 0;border-radius:8px;font-size:12.5px}
 .wrap{padding:14px 22px;max-width:1720px;margin:0 auto}
 /* 指标卡：按 10 / 5 / 2 列切换，保证任意宽度下每行都填满（不留半截空行） */
@@ -787,6 +794,7 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
   <span class="badge" id="live">真实盘口 0 · 做市 0</span>
   <span class="badge mode" id="modebadge">—</span>
   <span class="sndbtn" id="snd" title="成交音效开关（默认关）">🔇 音效</span>
+  <button class="rptbtn" id="export" title="生成并打开实况与统计报告">📤 导出报告</button>
   <span class="badge">引擎: RigorVirtualBook.market_make</span>
 </header>
 <div class="banner">✅ 行情来自<b>真实 Polymarket 盘口</b>（urllib 直连 Gamma，已合规过滤政治/地缘/军事等敏感类）。
@@ -1072,6 +1080,31 @@ window.addEventListener('resize',()=>{clearTimeout(_rz);_rz=setTimeout(()=>drawC
 
 setInterval(tickState,2000); setInterval(tickLive,15000);
 tickState(); tickLive();
+
+// 导出报告按钮：点一下生成并打开
+(function(){
+  var btn=document.getElementById('export');
+  if(!btn) return;
+  btn.onclick=function(){
+    btn.disabled=true; btn.textContent='⏳ 生成中…';
+    fetch('/api/export_report').then(function(r){return r.json();}).then(function(d){
+      if(d&&d.ok){
+        var w=window.open(d.url,'_blank');
+        if(!w){ // 弹窗被拦截时退化为跳转
+          location.href=d.url;
+        }
+        btn.textContent='✅ 已打开 ('+d.round+' 轮)';
+        setTimeout(function(){btn.textContent='📤 导出报告';btn.disabled=false;}, 3000);
+      }else{
+        alert('生成失败：'+(d&&d.error?d.error:'未知错误'));
+        btn.textContent='📤 导出报告'; btn.disabled=false;
+      }
+    }).catch(function(e){
+      alert('请求失败：'+e);
+      btn.textContent='📤 导出报告'; btn.disabled=false;
+    });
+  };
+})();
 </script></body></html>"""
 
 
@@ -1132,6 +1165,88 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif u.path == "/api/export_report":
+            # 复用当前在跑引擎的内存数据 + sim_report 已验证的渲染函数，生成 HTML/MD 并打开
+            try:
+                with LOCK:
+                    st = {
+                        "round": STATE["round"], "cash": STATE["cash"],
+                        "realized": STATE["realized"], "equity": STATE["equity"],
+                        "round_pnl": STATE["round_pnl"],
+                        "n_markets": STATE["n_markets"], "inv_notional": STATE["inv_notional"],
+                        "unrealized": STATE.get("unrealized", 0.0),
+                        "mode": STATE.get("mode", "pairs"), "fill": STATE.get("fill", {}),
+                        "live_count": STATE["live_count"], "mm_count": STATE["mm_count"],
+                        "params": STATE["params"], "quotes": STATE["quotes"],
+                        "positions": STATE["positions"], "equity_curve": STATE["equity_curve"],
+                    }
+                    s = compute_stats()
+                # 行情样本（与 /api/markets 同口径，已合规过滤）
+                mout = []
+                for m in (MARKETS_LIVE or []):
+                    if not isinstance(m, dict) or "error" in m:
+                        continue
+                    q = m.get("question") or ""
+                    if is_blocked(q):
+                        continue
+                    mout.append({
+                        "question": (q[:90] + ("…" if len(q) > 90 else "")),
+                        "tag": classify(q),
+                        "yes_bid": m.get("yes_bid"), "yes_ask": m.get("yes_ask"),
+                        "no_bid": m.get("no_bid"), "no_ask": m.get("no_ask"),
+                        "liquidity": round(float(m.get("liquidity") or 0), 0),
+                        "token_id": str(m.get("token_id")),
+                    })
+                mkts = {"markets": mout}
+                ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+                out_dir = os.path.join(os.path.dirname(_HERE), "output")
+                os.makedirs(out_dir, exist_ok=True)
+                html_name = "sim_report_%s.html" % stamp
+                md_name = "sim_report_%s.md" % stamp
+                html_path = os.path.join(out_dir, html_name)
+                md_path = os.path.join(out_dir, md_name)
+                with open(html_path, "w", encoding="utf-8") as f:
+                    f.write(build_html(st, s, mkts, 15, ts))
+                with open(md_path, "w", encoding="utf-8") as f:
+                    f.write(build_md(st, s, mkts, 15, ts))
+                payload = {
+                    "ok": True, "stamp": stamp, "ts": ts,
+                    "html": html_name, "md": md_name,
+                    "url": "/reports/" + html_name,
+                    "equity": st["equity"], "realized": st["realized"],
+                    "round": st["round"],
+                }
+                body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as ex:
+                body = json.dumps({"ok": False, "error": str(ex)}, ensure_ascii=False).encode("utf-8")
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+        elif u.path.startswith("/reports/"):
+            fname = os.path.basename(u.path)
+            if not fname or not fname.endswith((".html", ".md")):
+                self.send_response(404); self.end_headers(); return
+            fpath = os.path.join(os.path.dirname(_HERE), "output", fname)
+            if not os.path.isfile(fpath):
+                self.send_response(404); self.end_headers(); return
+            with open(fpath, "rb") as f:
+                data = f.read()
+            ctype = "text/html; charset=utf-8" if fname.endswith(".html") else "text/markdown; charset=utf-8"
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Disposition", "inline")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
         elif u.path in ("/", "/index.html"):
             body = HTML.encode("utf-8")
             self.send_response(200)
