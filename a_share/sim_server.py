@@ -708,29 +708,52 @@ header h1{margin:0;font-size:19px}
 .sndbtn:hover{color:var(--ink);border-color:var(--acc)}
 .banner{background:linear-gradient(90deg,#0e1b14,#0c1813);border:1px solid #1d3a2a;color:#9fe3c4;padding:8px 14px;margin:12px 22px 0;border-radius:8px;font-size:12.5px}
 .wrap{padding:14px 22px;max-width:1720px;margin:0 auto}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:12px 0}
+/* 指标卡：按 10 / 5 / 2 列切换，保证任意宽度下每行都填满（不留半截空行） */
+.cards{display:grid;gap:12px;margin:12px 0;grid-template-columns:repeat(5,minmax(0,1fr))}
+@media(min-width:1600px){.cards{grid-template-columns:repeat(10,minmax(0,1fr))}}
+@media(max-width:820px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .card{background:linear-gradient(160deg,var(--panel),#0c131d);border:1px solid var(--line);border-radius:12px;padding:13px 16px;transition:transform .25s,box-shadow .25s,border-color .25s}
 .card:hover{transform:translateY(-3px);box-shadow:0 8px 22px rgba(70,176,255,.16);border-color:#2a3c57}
 .card .k{color:var(--mut);font-size:12px}.card .v{font-size:21px;font-weight:700;margin-top:4px;font-variant-numeric:tabular-nums;transition:color .4s}
 .v.up{color:var(--up)}.v.dn{color:var(--dn)}.v.b{color:var(--acc)}
-/* 主区三列：等宽 + 等高（每列内部纵向弹性铺满，面板对齐） */
+/* 主区：面板直接作为网格项（不再包一层 .col —— 那会让窄屏出现"孤儿第三列"）
+   行情榜跨两行，其余 4 个面板各占一格：三列时是 3×2、两列时是 2×3，任何宽度都填满且对称 */
 .big{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:stretch}
-.big>.col{display:flex;flex-direction:column;gap:14px;min-width:0}
-.big>.col>.panel{flex:1 1 0;display:flex;flex-direction:column;margin-bottom:0;min-height:0}
-.big>.col>.panel>.scroll{flex:1 1 auto;min-height:0}
+.big>.panel{margin-bottom:0;display:flex;flex-direction:column;min-height:0;overflow:hidden}
+.big>.panel.span2{grid-row:span 2}
 /* 自适应断点：三列 -> 两列 -> 单列 */
 @media(max-width:1420px){.big{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:920px){.big{grid-template-columns:1fr}}
+@media(max-width:920px){.big{grid-template-columns:1fr}.big>.panel.span2{grid-row:span 1;min-height:460px}}
+/* 滚动区吃掉剩余高度，使同一行面板底边对齐、三列等高 */
+.scroll{overflow:auto;min-height:0}
+.big>.panel>.scroll{flex:1 1 0;min-height:170px}
+.panel>h2,.panel>.note,.panel>.latest{flex:none}
 .panel{background:linear-gradient(160deg,var(--panel),#0c131d);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:14px;animation:fade .35s ease}
 @keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
-.panel h2{margin:0 0 10px;font-size:14.5px;color:#cdd8e8;display:flex;align-items:center;gap:8px}
+.panel h2{margin:0 0 10px;font-size:14.5px;color:#cdd8e8;display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
 .panel h2 .sub{color:var(--mut);font-size:11.5px;font-weight:400}
-canvas{width:100%;height:260px;background:#070b11;border:1px solid var(--line);border-radius:8px;display:block}
-.scroll{max-height:520px;overflow:auto}
-table{border-collapse:collapse;width:100%;font-size:12.5px}
-th,td{border:1px solid var(--line);padding:5px 8px;text-align:center}
+.panel h2>select{margin-left:auto;max-width:46%}
+/* canvas 高度可伸缩以吃掉面板剩余空间；位图尺寸由 JS 按 CSS 实际尺寸 × DPR 设定，避免非等比压扁 */
+canvas{width:100%;height:240px;min-height:200px;max-height:380px;background:#070b11;border:1px solid var(--line);border-radius:8px;display:block;flex:1 1 auto}
+table{border-collapse:collapse;width:100%;font-size:12.5px;table-layout:fixed}
+th,td{border:1px solid var(--line);padding:5px 8px;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 th{background:#101a28;color:var(--mut);position:sticky;top:0;z-index:1}
-td.l{text-align:left}.buy{color:var(--up)}.sell{color:var(--dn)}
+td.l{text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.buy{color:var(--up)}.sell{color:var(--dn)}
+/* 列宽分配：长文本列给足宽度、数字列压窄，杜绝表格横向撑出面板 */
+#mkt th:nth-child(1){width:38%}
+#mkt th:nth-child(2){width:11%}
+#mkt th:nth-child(3),#mkt th:nth-child(4),#mkt th:nth-child(5),#mkt th:nth-child(6){width:9%}
+#mkt th:nth-child(7){width:15%}
+#trd th:nth-child(1){width:13%}
+#trd th:nth-child(2){width:25%}
+#trd th:nth-child(3){width:9%}
+#trd th:nth-child(4){width:8%}
+#trd th:nth-child(5){width:10%}
+#trd th:nth-child(6){width:7%}
+#trd th:nth-child(7){width:11%}
+#trd th:nth-child(8){width:8%}
+#trd th:nth-child(9){width:12%}
 @keyframes flashUp{0%{background:rgba(255,91,110,.36)}100%{background:transparent}}
 @keyframes flashDn{0%{background:rgba(46,230,166,.30)}100%{background:transparent}}
 tr.row-new.flash-up td{animation:flashUp 1.2s ease-out}
@@ -775,58 +798,55 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
   <div class="cards" id="cards"></div>
 
   <div class="big">
-    <!-- 列 1：真实行情榜 -->
-    <div class="col">
-    <div class="panel">
+    <!-- 行情榜：跨两行，高度由网格拉伸填充 -->
+    <div class="panel span2">
       <h2>📡 Polymarket 真实行情
         <select id="cat" style="margin-left:auto"><option value="all">全部类别</option><option value="crypto">crypto</option><option value="economy">economy</option><option value="finance">finance</option><option value="sports">sports</option><option value="tech">tech</option><option value="science">science</option><option value="entertainment">entertainment</option><option value="other">other</option></select>
       </h2>
       <div class="scroll"><table id="mkt"><thead><tr><th>市场(问题)</th><th>类别</th><th>YES 买</th><th>YES 卖</th><th>NO 买</th><th>NO 卖</th><th>流动性</th></tr></thead><tbody></tbody></table></div>
       <div class="note">YES=结果代币隐含概率；买/卖为 Gamma 真实最优买卖盘口；<b style="color:var(--up)">买价红</b>、<b style="color:var(--dn)">卖价绿</b>；流动性为该市场 USDC 深度。</div>
     </div>
+
+    <!-- K 线 -->
+    <div class="panel">
+      <h2>📈 账户权益 K 线（真实成交累计）<span class="sub">红涨绿跌 · 每根=8 轮聚合</span></h2>
+      <canvas id="kc" width="680" height="240"></canvas>
+      <div class="note" id="kc-note">equity = 现金（库存恒 0）；K 线由逐轮权益聚合，涨红跌绿。</div>
     </div>
 
-    <!-- 列 2：K线 + 实时成交 -->
-    <div class="col">
-      <div class="panel">
-        <h2>📈 账户权益 K 线（真实成交累计）<span class="sub">红涨绿跌 · 每根=8 轮聚合</span></h2>
-        <canvas id="kc" width="680" height="260"></canvas>
-        <div class="note" id="kc-note">equity = 现金（库存恒 0）；K 线由逐轮权益聚合，涨红跌绿。</div>
-      </div>
-      <div class="panel">
-        <div class="latest"><span class="beat" id="beat2"></span><span style="color:var(--mut)">最新成交：</span><span id="latest-txt">等待第一笔…</span></div>
-        <h2>🤖 实时成交（过程与结果）</h2>
-        <div class="scroll"><table id="trd"><thead><tr><th>时间</th><th>市场</th><th>类别</th><th>方向</th><th>成交价</th><th>量</th><th>本笔锁利</th><th>滑点</th><th>现金</th></tr></thead><tbody></tbody></table></div>
-        <div class="note">BUY=建仓（锁利 0），SELL=平仓（显示本笔锁利）；每笔在真实盘口价位成交。新成交行红/绿闪光。</div>
-      </div>
+    <!-- 实时成交 -->
+    <div class="panel">
+      <h2>🤖 实时成交（过程与结果）</h2>
+      <div class="latest"><span class="beat" id="beat2"></span><span style="color:var(--mut)">最新成交：</span><span id="latest-txt">等待第一笔…</span></div>
+      <div class="scroll"><table id="trd"><thead><tr><th>时间</th><th>市场</th><th>类别</th><th>方向</th><th>成交价</th><th>量</th><th>本笔锁利</th><th>滑点</th><th>现金</th></tr></thead><tbody></tbody></table></div>
+      <div class="note">BUY=建仓（锁利 0），SELL=平仓（显示本笔锁利）；每笔在真实盘口价位成交。新成交行红/绿闪光。</div>
     </div>
 
-    <!-- 列 3：本轮/累计 + 统计中心摘要 -->
-    <div class="col">
-      <div class="panel">
-        <h2>💰 本轮 / 累计锁利</h2>
-        <div class="cards" style="grid-template-columns:1fr 1fr;margin:0">
-          <div class="card"><div class="k">本轮锁利</div><div class="v b" id="ninv">$0</div></div>
-          <div class="card"><div class="k">累计锁利</div><div class="v" id="invn">$0</div></div>
-        </div>
-        <div class="note">累计锁利 = 全部平仓笔锁利之和（落盘累计，重启不丢）。</div>
+    <!-- 本轮 / 累计锁利 -->
+    <div class="panel">
+      <h2>💰 本轮 / 累计锁利</h2>
+      <div class="cards" style="grid-template-columns:1fr 1fr;margin:0">
+        <div class="card"><div class="k">本轮锁利</div><div class="v b" id="ninv">$0</div></div>
+        <div class="card"><div class="k">累计锁利</div><div class="v" id="invn">$0</div></div>
       </div>
-      <div class="panel">
-        <h2>📊 统计中心（实时）</h2>
-        <div class="statbox">
-          <div class="stat"><div class="k">运行时长</div><div class="v" id="st-dur">—</div></div>
-          <div class="stat"><div class="k">轮次</div><div class="v" id="st-round">0</div></div>
-          <div class="stat"><div class="k">总成交</div><div class="v" id="st-tot">0</div></div>
-          <div class="stat"><div class="k">胜率(平仓)</div><div class="v" id="st-win">0%</div></div>
-          <div class="stat"><div class="k">成交频率</div><div class="v" id="st-rate">0</div></div>
-          <div class="stat"><div class="k">累计锁利</div><div class="v" id="st-real">$0</div></div>
-          <div class="stat"><div class="k">峰值盈利</div><div class="v" id="st-pk">$0</div></div>
-          <div class="stat"><div class="k">权益峰值</div><div class="v" id="st-peak">$0</div></div>
-          <div class="stat"><div class="k">当前回撤</div><div class="v" id="st-dd">0%</div></div>
-          <div class="stat"><div class="k">历史最大回撤</div><div class="v" id="st-mdd">0%</div></div>
-        </div>
-        <div class="note" id="st-note">—</div>
+      <div class="note">累计锁利 = 全部平仓笔锁利之和（落盘累计，重启不丢）。</div>
+    </div>
+    <!-- 统计中心 -->
+    <div class="panel">
+      <h2>📊 统计中心（实时）</h2>
+      <div class="statbox">
+        <div class="stat"><div class="k">运行时长</div><div class="v" id="st-dur">—</div></div>
+        <div class="stat"><div class="k">轮次</div><div class="v" id="st-round">0</div></div>
+        <div class="stat"><div class="k">总成交</div><div class="v" id="st-tot">0</div></div>
+        <div class="stat"><div class="k">胜率(平仓)</div><div class="v" id="st-win">0%</div></div>
+        <div class="stat"><div class="k">成交频率</div><div class="v" id="st-rate">0</div></div>
+        <div class="stat"><div class="k">累计锁利</div><div class="v" id="st-real">$0</div></div>
+        <div class="stat"><div class="k">峰值盈利</div><div class="v" id="st-pk">$0</div></div>
+        <div class="stat"><div class="k">权益峰值</div><div class="v" id="st-peak">$0</div></div>
+        <div class="stat"><div class="k">当前回撤</div><div class="v" id="st-dd">0%</div></div>
+        <div class="stat"><div class="k">历史最大回撤</div><div class="v" id="st-mdd">0%</div></div>
       </div>
+      <div class="note" id="st-note">—</div>
     </div>
   </div>
 
@@ -900,20 +920,32 @@ function beep(freq,dur,type,gain){
   o.connect(g); g.connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime+dur);
 }
 document.getElementById('snd').onclick=toggleSound;
+let lastCurve=null;
 function drawCandles(curve){
-  const cv=document.getElementById('kc'),ctx=cv.getContext('2d'),W=cv.width,H=cv.height;
+  if(curve) lastCurve=curve;
+  const cv=document.getElementById('kc'); if(!cv) return;
+  const ctx=cv.getContext('2d');
+  // 位图尺寸跟随 CSS 实际尺寸 × DPR，否则画布会被非等比拉伸（K 线变形、文字发虚）
+  const dpr=window.devicePixelRatio||1;
+  const W=Math.max(300, Math.round(cv.clientWidth||cv.width));
+  const H=Math.max(160, Math.round(cv.clientHeight||240));
+  const bw=Math.round(W*dpr), bh=Math.round(H*dpr);
+  if(cv.width!==bw||cv.height!==bh){cv.width=bw;cv.height=bh;}
+  ctx.setTransform(dpr,0,0,dpr,0,0);
   ctx.clearRect(0,0,W,H);
-  if(!curve||curve.length<2) return;
-  const K=Math.max(1,Math.floor(curve.length/64));
+  if(!lastCurve||lastCurve.length<2) return;
+  const curve2=lastCurve;
+  const K=Math.max(1,Math.floor(curve2.length/64));
   const candles=[];
-  for(let i=0;i<curve.length;i+=K){
-    const seg=curve.slice(i,i+K); if(!seg.length) continue;
+  for(let i=0;i<curve2.length;i+=K){
+    const seg=curve2.slice(i,i+K); if(!seg.length) continue;
     candles.push({o:seg[0],h:Math.max.apply(null,seg),l:Math.min.apply(null,seg),c:seg[seg.length-1]});
   }
   let mn=Infinity,mx=-Infinity;
   candles.forEach(c=>{mn=Math.min(mn,c.h,c.l);mx=Math.max(mx,c.h,c.l);});
   const pad=(mx-mn)*0.12||1; mn-=pad; mx+=pad;
-  const X=i=>i/(candles.length-1)*W, Y=v=>H-((v-mn)/(mx-mn))*H;
+  const PL=8, PR=12;   // 左右留白，避免首尾蜡烛被画布边缘切掉一半
+  const X=i=>PL+(i/(candles.length-1))*(W-PL-PR), Y=v=>H-((v-mn)/(mx-mn))*H;
   ctx.strokeStyle='#16202e'; ctx.lineWidth=1;
   for(let g=0;g<=4;g++){const y=g/4*H; ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
   const cw=Math.max(2, W/candles.length*0.6);
@@ -1034,6 +1066,10 @@ function renderLive(){
     `<td>$${fmt(m.liquidity)}</td></tr>`).join('');
 }
 document.getElementById('cat').onchange=renderLive;
+// 窗口尺寸变化后重画 K 线（位图尺寸跟着 CSS 尺寸走，否则会被拉伸变形）
+let _rz=null;
+window.addEventListener('resize',()=>{clearTimeout(_rz);_rz=setTimeout(()=>drawCandles(null),180);});
+
 setInterval(tickState,2000); setInterval(tickLive,15000);
 tickState(); tickLive();
 </script></body></html>"""

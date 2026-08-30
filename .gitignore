@@ -49,6 +49,11 @@ a_share/sim_book_dryrun_test.json
 a_share/live_dryrun_orders.jsonl
 a_share/live_reconcile.jsonl
 
+# 看板输出/审计/截图/日志（本地生成，不入库）
+output/
+a_share/SIM_REPORT.md
+a_share/sim_daily_caps.json
+
 # 本地启动脚本（含本机路径，不入库）
 start_sim_dashboard.bat
 重置模拟数据.bat
