@@ -52,7 +52,11 @@ cp .env.nb .env                                        # 编辑 .env 填真实�
 | `PM_BOT_PK` | 你的钱包私钥 | **仅 env，绝不写代码 / 提交**；`LIVE_MODE=1` 时必须 |
 | `COMPLIANCE_FILTER` | `0` | NB 无合规风险，关闭过滤，交易所有市场 |
 | `LIVE_MODE` | 先 `0` | 先模拟跑通，再改 `1` 小资金实盘 |
+| `LIVE_POLL_SEC` | `30` | `LIVE_MODE=1` 时后台每 N 秒轮询在途订单真实成交状态（用于看板真实成交率） |
 | `DINGTALK_WEBHOOK` / `DINGTALK_SECRET` | （可选） | kill switch 触发 / 报告推送；建议配置以便手机告警 |
+
+> **真实成交率看板**：`LIVE_MODE=1` 后，看板新增「真实成交率(LIVE)」卡片（显示 `命中/尝试` 与百分比），
+> 数据来自后台对 `clob_exec.get_order_status` 的异步轮询；北京 `DRY_RUN` 下该卡片显示 `DRY_RUN`，不影响模拟盘。
 
 > 完整变量见 `.env.nb` 注释；其余见 `DEPLOY_POLYMARKET.md` §6。
 

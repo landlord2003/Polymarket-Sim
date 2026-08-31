@@ -26,7 +26,7 @@ import collections
 import datetime as _dt
 import random
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
@@ -722,22 +722,91 @@ FILL_ATTEMPTS = [0]
 FILL_HITS = [0]
 
 
+# ---------- P3-7+ 真实成交异步轮询跟踪（仅 LIVE_MODE=1 生效；DRY_RUN 完全不触及） ----------
+_LIVE_EXE = None                              # 复用的 ClobExec 客户端（惰性初始化）
+_LIVE_POLL_STOP = None                        # threading.Event，main 里创建
+_LIVE_POLL_SEC = float(os.environ.get("LIVE_POLL_SEC", "30"))   # 在途订单轮询间隔（秒）
+LIVE_ORDERS = []                              # 在途/已观测真实订单：{order_id,token_id,side,price,size,ts,filled,last_checked,status}
+LIVE_FILL = {"attempts": 0, "hits": 0, "rate": 0.0, "partial": 0, "by_token": {}}  # 真实成交率（实盘可靠值）
+
+
 def live_dispatch(token_id, side, price, size):
-    """P3-7 / LIVE_MODE 守护：把策略意图的做市挂单真实发到 CLOB（过风控闸门）。
-    仅 LIVE_MODE=1 生效；默认 DRY_RUN 不调用，零副作用。异常被吞掉，绝不影响模拟盘主循环。"""
+    """P3-7+ LIVE_MODE 守护：把策略意图的做市挂单真实发到 CLOB（过风控闸门），
+    捕获 order_id 并登记到 LIVE_ORDERS，由后台 poll 线程异步查询真实成交状态，
+    把**真实成交率**更新进 LIVE_FILL，最终显示在看板 /api/state['live_fill']。
+    仅 LIVE_MODE=1 生效；默认 DRY_RUN 返回 None、零副作用。异常被吞，绝不影响模拟盘主循环。"""
     if not LIVE_MODE:
         return None
+    global _LIVE_EXE
     try:
         from clob_exec import ClobExec
     except Exception as ex:
         print("[live] clob_exec 导入失败: %s" % ex, file=sys.stderr)
         return None
     try:
-        ex = ClobExec()                      # 读 env（PM_BOT_PK / LIVE_MODE）
-        return ex.place_maker_order(token_id, side, price, size)
+        if _LIVE_EXE is None:
+            _LIVE_EXE = ClobExec()            # 读 env（PM_BOT_PK / LIVE_MODE）；无私钥抛 RuntimeError
+        resp = _LIVE_EXE.place_maker_order(token_id, side, price, size)
     except Exception as e:
         print("[live] 实盘下单异常 %s: %s" % (token_id, e), file=sys.stderr)
         return None
+    # 捕获 order_id，登记在途订单 + 累加尝试次数（真实成交率分母）；被风控拒绝不计数
+    if isinstance(resp, dict) and resp.get("ok") and not resp.get("risk_blocked"):
+        oid = (resp.get("order_id") or resp.get("orderID")
+               or (resp.get("resp") or {}).get("orderID") or (resp.get("resp") or {}).get("order_id"))
+        if oid:
+            LIVE_ORDERS.append({
+                "order_id": oid, "token_id": token_id, "side": str(side).upper(),
+                "price": float(price), "size": float(size), "ts": time.time(),
+                "filled": False, "last_checked": 0.0, "status": "OPEN",
+            })
+            LIVE_FILL["attempts"] += 1
+            _bt = LIVE_FILL["by_token"].setdefault(token_id, {"attempts": 0, "hits": 0})
+            _bt["attempts"] += 1
+    return resp
+
+
+def live_fill_poll_loop():
+    """后台异步轮询在途真实订单的成交状态，更新 LIVE_FILL['hits'/'rate']。
+    仅在 LIVE_MODE=1 下由 main 启动；DRY_RUN 不启动。被打掉（含部分成交）即算一次命中。
+    网络调用不持锁，仅在计数器更新时短暂持 LOCK，避免阻塞模拟盘主循环。"""
+    while _LIVE_POLL_STOP is not None and not _LIVE_POLL_STOP.is_set():
+        try:
+            if _LIVE_EXE is not None:
+                now = time.time()
+                pend = [o for o in LIVE_ORDERS
+                        if not o["filled"] and (now - o["last_checked"]) >= _LIVE_POLL_SEC]
+                for o in pend:
+                    o["last_checked"] = now
+                    try:
+                        st = _LIVE_EXE.get_order_status(o["order_id"])   # 网络调用，不持锁
+                    except Exception as e:
+                        print("[live-poll] 查询异常 %s: %s" % (o["order_id"], e), file=sys.stderr)
+                        continue
+                    if not isinstance(st, dict) or st.get("error"):
+                        continue
+                    filled = float(st.get("filled") or 0)
+                    if filled > 1e-9:                     # 被打掉（含部分成交）= 命中
+                        with LOCK:
+                            o["filled"] = True
+                            o["status"] = st.get("status")
+                            LIVE_FILL["hits"] += 1
+                            if filled < o["size"] - 1e-9:
+                                LIVE_FILL["partial"] += 1
+                            _bt = LIVE_FILL["by_token"].get(o["token_id"])
+                            if _bt:
+                                _bt["hits"] += 1
+                # 精简在途列表（保留最近 500 条未成交，避免无限增长）
+                if len(LIVE_ORDERS) > 500:
+                    with LOCK:
+                        LIVE_ORDERS[:] = [o for o in LIVE_ORDERS if not o["filled"]][-500:]
+                with LOCK:
+                    if LIVE_FILL["attempts"]:
+                        LIVE_FILL["rate"] = round(LIVE_FILL["hits"] / LIVE_FILL["attempts"] * 100, 1)
+        except Exception as e:
+            print("[live-poll] 循环异常: %s" % e, file=sys.stderr)
+        if _LIVE_POLL_STOP is not None:
+            _LIVE_POLL_STOP.wait(_LIVE_POLL_SEC)
 
 
 def step():
@@ -1316,7 +1385,8 @@ document.getElementById('cards').innerHTML=
    '<div class="card"><div class="k">挂单成交率</div><div class="v b" id="c-fill">0%</div></div>',
    '<div class="card"><div class="k">敞口名义</div><div class="v b" id="c-inv">$0</div></div>',
    '<div class="card"><div class="k">真实盘口</div><div class="v b" id="c-live">0</div></div>',
-   '<div class="card"><div class="k">做市市场</div><div class="v b" id="c-mm">0</div></div>'].join('');
+   '<div class="card"><div class="k">做市市场</div><div class="v b" id="c-mm">0</div></div>',
+   '<div class="card"><div class="k">真实成交率(LIVE)</div><div class="v b" id="c-livefill">—</div></div>'].join('');
 let seen=new Set(), prevRound=0;
 function flashBeat(id){const b=document.getElementById(id); if(!b)return; b.classList.add('hot'); setTimeout(()=>b.classList.remove('hot'),650);}
 let audioCtx=null, soundOn=false;
@@ -1437,6 +1507,16 @@ function tickState(){
     if(fe){const fr=(s.fill&&s.fill.on)?(s.fill.rate||0):100;
       fe.className='v '+(fr>=60?'b':(fr>=40?'g':'r'));
       fe.textContent=fr.toFixed(1)+'%';}
+    const lf=document.getElementById('c-livefill');
+    if(lf){
+      if(s.live_fill && s.live_fill.attempts>0){
+        const lr=s.live_fill.rate||0;
+        lf.className='v '+(lr>=60?'b':(lr>=40?'g':'r'));
+        lf.textContent=lr.toFixed(1)+'% ('+s.live_fill.hits+'/'+s.live_fill.attempts+')';
+      } else {
+        lf.className='v b'; lf.textContent='DRY_RUN';
+      }
+    }
     const mb=document.getElementById('modebadge');
     if(mb&&s.fill){mb.textContent=(s.mode==='inv'?'真实做市(库存管理)':'同轮双边建平')
       +' · 挂单成交模型'+(s.fill.on?'开':'关');}
@@ -1634,6 +1714,8 @@ class H(BaseHTTPRequestHandler):
                     "unrealized": STATE.get("unrealized", 0.0),
                     "mode": STATE.get("mode", "pairs"), "fill": STATE.get("fill", {}),
                     "live_count": STATE["live_count"], "mm_count": STATE["mm_count"],
+                    "live_fill": dict(LIVE_FILL, by_token={k: dict(v) for k, v in LIVE_FILL.get("by_token", {}).items()}),
+                    "live_orders_pending": sum(1 for o in LIVE_ORDERS if not o["filled"]),
                     "params": STATE["params"], "quotes": STATE["quotes"],
                     "positions": STATE["positions"], "equity_curve": STATE["equity_curve"],
                     "quotes_source": (getattr(P, "quotes_source", None)() if hasattr(P, "quotes_source") else "gamma"),
@@ -1801,7 +1883,7 @@ class H(BaseHTTPRequestHandler):
             # P3-4 kill switch 控制：复用 SHUTDOWN_TOKEN 鉴权（运维已持该 token）
             _ktok = ""
             try:
-                _ktok = (urlparse(u.query).get("token") or "").strip()
+                _ktok = (parse_qs(u.query).get("token", [""])[0] or "").strip()
             except Exception:
                 _ktok = ""
             if not _ktok:
@@ -1817,7 +1899,7 @@ class H(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(_kbody)
                 return
-            _act = (urlparse(u.query).get("action") or "on").strip().lower()
+            _act = (parse_qs(u.query).get("action", ["on"])[0] or "on").strip().lower()
             _kres = RC.reset_kill_switch() if _act == "off" else RC.trigger_kill_switch(reason="api_manual")
             _kbody = json.dumps({"ok": True, "kill_switch": _kres},
                                 ensure_ascii=False).encode("utf-8")
@@ -1830,7 +1912,7 @@ class H(BaseHTTPRequestHandler):
             # P0-A 关停端点鉴权：同局域网任意主机不再能直接关停服务
             _tok = ""
             try:
-                _tok = (urlparse(u.query).get("token") or "").strip()
+                _tok = (parse_qs(u.query).get("token", [""])[0] or "").strip()
             except Exception:
                 _tok = ""
             if not _tok:
@@ -1905,6 +1987,11 @@ def preflight():
     print("  %s 合规过滤 : %s" % (ok if COMPLIANCE_FILTER else warn,
           "开启(中国部署过滤敏感市场)" if COMPLIANCE_FILTER
           else "关闭(COMPLIANCE_FILTER=0，NB 部署无合规风险)"))
+    if LIVE_MODE:
+        _live_msg = "LIVE_MODE=1 (真实成交轮询 %ss，看板显示真实成交率)" % int(_LIVE_POLL_SEC)
+    else:
+        _live_msg = "DRY_RUN (仅模拟，真实成交轮询不启动)"
+    print("  %s 实盘模式 : %s" % (ok if LIVE_MODE else "ℹ️", _live_msg))
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
         _t = os.path.join(DATA_DIR, ".preflight_test")
@@ -1930,6 +2017,11 @@ def main():
     t = threading.Thread(target=loop, daemon=True)
     t.start()
     threading.Thread(target=auto_report_loop, daemon=True).start()  # P2-3 报告自动化
+    # P3-7+ 真实成交异步轮询（仅 LIVE_MODE=1 启动；DRY_RUN 不启动，北京模拟盘零额外开销）
+    if LIVE_MODE:
+        global _LIVE_POLL_STOP
+        _LIVE_POLL_STOP = threading.Event()
+        threading.Thread(target=live_fill_poll_loop, daemon=True).start()
     global SRV
     SRV = ThreadingHTTPServer(("0.0.0.0", PORT), H)
     print("[sim_server v3] listening on http://127.0.0.1:%d  (Ctrl+C 或 /api/shutdown 停止)" % PORT)
@@ -1938,6 +2030,8 @@ def main():
         with LOCK:
             STATE["running"] = False
         save_persistence()
+        if _LIVE_POLL_STOP is not None:
+            _LIVE_POLL_STOP.set()
         if SRV is not None:
             SRV.shutdown()
         _release_lock()
@@ -1954,6 +2048,8 @@ def main():
             STATE["running"] = False
         SRV.shutdown()
     finally:
+        if _LIVE_POLL_STOP is not None:
+            _LIVE_POLL_STOP.set()
         save_persistence()
         _release_lock()  # 主线程 finally 保证执行（后台运行器不绕过）
 
