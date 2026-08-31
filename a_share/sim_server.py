@@ -1285,6 +1285,7 @@ header h1{margin:0;font-size:19px}
 .card:hover{transform:translateY(-3px);box-shadow:0 8px 22px rgba(70,176,255,.16);border-color:#2a3c57}
 .card .k{color:var(--mut);font-size:12px}.card .v{font-size:21px;font-weight:700;margin-top:4px;font-variant-numeric:tabular-nums;transition:color .4s}
 .v.up{color:var(--up)}.v.dn{color:var(--dn)}.v.b{color:var(--acc)}
+.mmtag{display:inline-block;margin:3px 5px 0 0;padding:2px 8px;border-radius:11px;background:#101a28;border:1px solid var(--line);font-size:11.5px;color:var(--fg)}.mmtag b{color:var(--acc);font-variant-numeric:tabular-nums}
 /* 主区：面板直接作为网格项（不再包一层 .col —— 那会让窄屏出现"孤儿第三列"）
    行情榜跨两行，其余 4 个面板各占一格：三列时是 3×2、两列时是 2×3，任何宽度都填满且对称 */
 .big{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:stretch}
@@ -1521,6 +1522,7 @@ document.getElementById('cards').innerHTML=
    '<div class="card"><div class="k">敞口名义</div><div class="v b" id="c-inv">$0</div></div>',
    '<div class="card"><div class="k">真实盘口</div><div class="v b" id="c-live">0</div></div>',
    '<div class="card"><div class="k">做市市场</div><div class="v b" id="c-mm">0</div></div>',
+   '<div class="card" title="做市标的按类别分散（每类上限 MM_N_PER_CAT），避免集中在单一类别"><div class="k">做市类别分布</div><div class="v sm" id="c-mmcat" style="font-size:12px;font-weight:400;line-height:1.7;margin-top:6px">—</div></div>',
    '<div class="card"><div class="k">真实成交率(LIVE)</div><div class="v b" id="c-livefill">—</div></div>'].join('');
 let seen=new Set(), prevRound=0;
 function flashBeat(id){const b=document.getElementById(id); if(!b)return; b.classList.add('hot'); setTimeout(()=>b.classList.remove('hot'),650);}
@@ -1650,6 +1652,11 @@ function tickState(){
     setNum('c-round',s.round); setMoney('c-cash',s.cash,false);
     setMoney('c-real',s.realized,true); setMoney('c-rpnl',s.round_pnl,true);
     setMoney('c-eq',eq,false); setNum('c-live',s.live_count); setNum('c-mm',s.mm_count);
+    const mcel=document.getElementById('c-mmcat');
+    if(mcel && s.mm_cats){
+      const me=Object.entries(s.mm_cats).sort((a,b)=>b[1]-a[1]);
+      mcel.innerHTML=me.length?me.map(([k,v])=>`<span class="mmtag">${k} <b>${v}</b></span>`).join(''):'—';
+    }
     setMoney('c-unreal',(s.unrealized||0),true);
     setMoney('c-inv',(s.inv_notional||0),false);
     const fe=document.getElementById('c-fill');
