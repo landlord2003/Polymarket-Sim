@@ -112,6 +112,7 @@ python a_share/calibrate_fill.py --live --markets 30 --size 3 --window 600 --rou
   ```
   触发即钉钉告警，状态落盘 `a_share/data/risk_state.json`（重启仍生效）。
 - **优雅停止**：`/api/shutdown?token=<SHUTDOWN_TOKEN>`（P0-A 鉴权）。
+- **可观测性（P2-A）**：`GET /metrics` 暴露 Prometheus 文本格式指标（round/equity/realized/cash/合成与真实成交率/累计成交笔数/kill switch/盘口来源/合规过滤/实盘模式）。可自建 `prometheus.yml`  scrape `http://127.0.0.1:8787/metrics` + Grafana 看板/告警，零额外依赖（服务本身不装 Prometheus）。
 - **金融风控**：单市场 / 总仓位 / 日亏超限自动拒单（`risk_control.py`，参数 `MAX_POS_PER_MARKET` / `MAX_TOTAL_POS` / `DAILY_LOSS_LIMIT`）。
 
 ---

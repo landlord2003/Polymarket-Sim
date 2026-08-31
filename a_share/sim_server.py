@@ -809,6 +809,51 @@ def live_fill_poll_loop():
             _LIVE_POLL_STOP.wait(_LIVE_POLL_SEC)
 
 
+def prometheus_metrics():
+    """P2-A 可观测性：输出 Prometheus 文本暴露格式指标，供 scrape（Grafana/告警）。
+    纯文本生成，零依赖；/metrics 端点返回 text/plain。"""
+    s = STATE
+    rm = RUN_META
+    out = []
+    def _g(name, val, help_=None, typ="gauge"):
+        if help_:
+            out.append("# HELP %s %s" % (name, help_))
+            out.append("# TYPE %s %s" % (name, typ))
+        out.append("%s %s" % (name, val))
+    _fill = s.get("fill", {}) or {}
+    _lf = s.get("live_fill", {}) or {}
+    _g("polymarket_sim_round", s.get("round", 0), "当前轮次", "counter")
+    _g("polymarket_sim_equity", round(float(s.get("equity", 0) or 0), 2), "盯市权益(账户总值)")
+    _g("polymarket_sim_realized", round(float(s.get("realized", 0) or 0), 2), "累计锁利(已实现)")
+    _g("polymarket_sim_cash", round(float(s.get("cash", 0) or 0), 2), "现金(含未平仓名义)")
+    _g("polymarket_sim_unrealized", round(float(s.get("unrealized", 0) or 0), 2), "浮动盈亏")
+    _g("polymarket_sim_fill_rate", float(_fill.get("rate", 0) or 0), "合成成交率%(意图成交假设)")
+    _g("polymarket_sim_live_fill_rate", float(_lf.get("rate", 0) or 0), "真实成交率%(实盘观测,LIVE_MODE下)")
+    _g("polymarket_sim_live_fill_attempts", int(_lf.get("attempts", 0) or 0), "真实挂单尝试数", "counter")
+    _g("polymarket_sim_live_fill_hits", int(_lf.get("hits", 0) or 0), "真实成交命中数", "counter")
+    _g("polymarket_sim_n_markets", s.get("n_markets", 0), "实时盘口市场数")
+    _g("polymarket_sim_mm_count", s.get("mm_count", 0), "做市市场数")
+    _g("polymarket_sim_live_count", s.get("live_count", 0), "真实盘口市场数")
+    _g("polymarket_sim_trades_total", int(rm.get("trades_total", 0) or 0), "累计成交笔数", "counter")
+    _g("polymarket_sim_sells_total", int(rm.get("sells_total", 0) or 0), "累计平仓笔数", "counter")
+    _g("polymarket_sim_wins_total", int(rm.get("wins_total", 0) or 0), "累计盈利笔数", "counter")
+    _blocked = 0
+    for m in (MARKETS_LIVE or []):
+        if isinstance(m, dict) and is_blocked(m.get("question", "")):
+            _blocked += 1
+    _g("polymarket_sim_blocked_live", _blocked, "实时盘口中被合规红线拦截的市场数")
+    _ks = RC.status().get("kill_switch", {}) or {}
+    _g("polymarket_sim_kill_switch", 1 if _ks.get("on") else 0, "风控 kill switch 状态(1=触发)")
+    _qs = P.quotes_source() if hasattr(P, "quotes_source") else "gamma"
+    _g("polymarket_sim_quotes_source_gamma", 1 if _qs == "gamma" else 0, "盘口主源=Gamma(1/0)")
+    _g("polymarket_sim_quotes_source_clob", 1 if _qs == "clob" else 0, "盘口主源=CLOB(1/0)")
+    _g("polymarket_sim_quotes_source_cache", 1 if _qs == "cache" else 0, "盘口主源=持久化缓存(1/0)")
+    _g("polymarket_sim_step_seconds", PRICE_REFRESH_SEC, "盘口刷新间隔(秒)")
+    _g("polymarket_sim_compliance_filter", 1 if COMPLIANCE_FILTER else 0, "合规过滤开关(1=开)")
+    _g("polymarket_sim_live_mode", 1 if LIVE_MODE else 0, "实盘模式(1=LIVE)")
+    return "\n".join(out) + "\n"
+
+
 def step():
     """跑一轮：刷新真实盘口(每~90s) -> 对固定做市标的集各调一次真实 market_make。"""
     global MARKETS_LIVE, MM_SET
@@ -1879,6 +1924,14 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif u.path == "/metrics":
+            # P2-A 可观测性：Prometheus 文本暴露格式，供 scrape（Grafana/告警）
+            _m = prometheus_metrics().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+            self.send_header("Content-Length", str(len(_m)))
+            self.end_headers()
+            self.wfile.write(_m)
         elif u.path == "/api/kill_switch":
             # P3-4 kill switch 控制：复用 SHUTDOWN_TOKEN 鉴权（运维已持该 token）
             _ktok = ""

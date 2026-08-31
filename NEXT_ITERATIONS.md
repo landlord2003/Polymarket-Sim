@@ -60,9 +60,10 @@
 
 ## 🟢 P2（增强项，按需求排期）
 
-### P2-A 可观测性升级
-- 暴露 Prometheus `/metrics`（round、equity、fill_rate、block_rate、gamma_cooldown_gauge），接 Grafana/告警。
-- 合规拦截样本人工复核闭环：误杀/漏杀反馈回流词表。
+### P2-A 可观测性升级 ✅（2026-09-01 完成）
+- 暴露 Prometheus `/metrics`（round、equity、realized、cash、unrealized、合成/真实成交率、累计成交笔数、kill switch、盘口来源 gamma/clob/cache、合规过滤、实盘模式等），接 Grafana/告警。
+- **已做**：`sim_server.py` 新增 `prometheus_metrics()` + `GET /metrics` 端点（text/plain 暴露格式，零依赖）；`USAGE_MANUAL.md` §6 + `DEPLOY_NB.md` 补监控说明。重启验证 `/metrics` 正常输出。
+- 合规拦截样本人工复核闭环（误杀/漏杀回流词表）：仍为可选增强，未做。
 
 ### P2-B 旧文档清理 ✅（2026-09-01 完成）
 - 现有 `DEPLOY.md` / `launch_dashboard.py` 讲的是旧 A 股 `webui.py`，已过时且与本项目无关，易混淆。
@@ -95,7 +96,7 @@
 | P1-B 测试覆盖 | 🟡 | 中 | 防回归 |
 | P1-C 配置外提+自检 | 🟡 | 小 | 易运维 |
 | P1-D CLOB 冗余源 | 🟡 | 中 | 抗限流 |
-| P2-A 可观测升级 | 🟢 | 中 | 监控 |
+| P2-A 可观测升级 ✅ | 🟢 | 中 | 监控 |
 | P2-B 旧文档清理 ✅ | 🟢 | 小 | 防混淆 |
 | P2-C 多策略并行 | 🟢 | 大 | 对比 |
 | P2-D 回测加厚 | 🟢 | 中 | 稳健性 |

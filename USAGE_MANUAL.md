@@ -129,6 +129,7 @@ C:/Users/Lenovo/.workbuddy/binaries/python/versions/3.13.12/python.exe a_share/s
 | `GET /api/risk` | 无 | 风控状态（仓位/日亏/kill switch） |
 | `POST /api/kill_switch?token=` | SHUTDOWN_TOKEN | 触发/复位 kill switch（触发即钉钉告警） |
 | `POST /api/shutdown?token=` | SHUTDOWN_TOKEN | 优雅停止并释放启动锁 |
+| `GET /metrics` | 无 | **P2-A 可观测性**：Prometheus 文本暴露格式（round/equity/realized/cash/unrealized/合成与真实成交率/成交笔数/kill switch/盘口来源/合规过滤/实盘模式等），供 Prometheus scrape + Grafana/告警，零依赖 |
 | `GET /` | 无 | 看板 HTML |
 
 ---
