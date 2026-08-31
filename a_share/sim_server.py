@@ -171,6 +171,7 @@ def build_and_write_report(top_n=15, stamp=None):
             "unrealized": STATE.get("unrealized", 0.0),
             "mode": STATE.get("mode", "pairs"), "fill": STATE.get("fill", {}),
             "live_count": STATE["live_count"], "mm_count": STATE["mm_count"],
+            "mm_cats": STATE.get("mm_cats", {}),
             "params": STATE["params"], "quotes": STATE["quotes"],
             "positions": STATE["positions"], "equity_curve": STATE["equity_curve"],
         }
@@ -271,6 +272,7 @@ def save_persistence():
     except Exception as ex:
         print("[persistence] 落盘失败：%s" % ex)
 MM_N = 20          # 同时做市的真实市场数（取流动性最高者）
+MM_N_PER_CAT = int(os.environ.get("MM_N_PER_CAT", "5") or 5)  # 每类做市上限，保证类别多样性
 MM_REFRESH = 75    # 每 75 轮(~90s)重选一次做市标的（价格刷新另由后台线程负责）
 
 # ============ 成交真实性模型（A：成交概率；B：真实库存管理） ============
@@ -658,6 +660,7 @@ def compute_compliance():
 # ============ 真实行情池（urllib 直连 Gamma） ============
 MARKETS_LIVE = None   # fetch_poly_quotes 返回的实时二元盘口列表
 MM_SET = []           # 当前做市标的 token 集合（固定，避免建仓不平仓）
+MM_CATS = {}          # 当前做市标的类别分布（可观测：{cat: count}）
 
 
 def classify(q):
@@ -705,7 +708,14 @@ def is_blocked(q, tag=None):
 
 
 def select_mm(rows):
-    """从真实盘口池挑选做市标的：流动性够、价格居中、价差够赚。"""
+    """从真实盘口池挑选做市标的：流动性够、价格居中、价差够赚，且跨类别分散。
+
+    改进点（相对旧版纯流动性降序）：
+      - 综合分 = 流动性 × (1 + 2·价差)：既偏爱深度，也偏爱每轮可捕获的价差宽度；
+      - 每类做市上限 MM_N_PER_CAT：避免 20 个标的全挤在流动性最高的 1~2 类，
+        降低模拟组合的相关性/集中风险，令盘口榜更代表全市场。
+    仍保留合规过滤与基础有效性门槛（流动性≥4000 / mid∈[0.12,0.88] / 价差≥0.01）。
+    """
     if not rows:
         return []
     cand = []
@@ -727,9 +737,38 @@ def select_mm(rows):
             continue
         if sp < 0.01:
             continue
-        cand.append((liq, m))
-    cand.sort(key=lambda x: -x[0])
-    return [m for _, m in cand[:MM_N]]
+        cat = classify(m.get("question", "")) or "other"
+        score = liq * (1.0 + 2.0 * sp)   # 价差越宽权重越高
+        cand.append((cat, score, m))
+    cand.sort(key=lambda x: -x[1])
+    out = []
+    per_cat = {}
+    # 第一轮：每类上限 MM_N_PER_CAT，保证多样性
+    for cat, score, m in cand:
+        if len(out) >= MM_N:
+            break
+        if per_cat.get(cat, 0) < MM_N_PER_CAT:
+            out.append(m)
+            per_cat[cat] = per_cat.get(cat, 0) + 1
+    # 第二轮：不足 MM_N 时，逐类均匀放宽上限补齐（避免全涌进单一类别）
+    taken = set(id(x) for x in out)
+    extra = 1
+    while len(out) < MM_N:
+        progressed = False
+        for cat, score, m in cand:
+            if len(out) >= MM_N:
+                break
+            if id(m) in taken:
+                continue
+            if per_cat.get(cat, 0) < MM_N_PER_CAT + extra:
+                out.append(m)
+                taken.add(id(m))
+                per_cat[cat] = per_cat.get(cat, 0) + 1
+                progressed = True
+        if not progressed:
+            break
+        extra += 1
+    return out[:MM_N]
 
 
 def fill_prob(adverse, liq=0.0):
@@ -897,11 +936,11 @@ def prometheus_metrics():
 
 def step():
     """跑一轮：刷新真实盘口(每~90s) -> 对固定做市标的集各调一次真实 market_make。"""
-    global MARKETS_LIVE, MM_SET
+    global MARKETS_LIVE, MM_SET, MM_CATS
     # 刷新真实盘口池
     refresh = False
     with LOCK:
-        refresh = (STATE["round"] % MM_REFRESH == 0)
+        refresh = (STATE["round"] % MM_REFRESH == 0) or (not MM_SET)
     if refresh or not MARKETS_LIVE:
         if SIM_MODE != "inv":   # inv 模式的价格刷新由后台线程负责，此处不阻塞交易循环
             try:
@@ -909,7 +948,13 @@ def step():
             except Exception:
                 MARKETS_LIVE = MARKETS_LIVE or []
         # 重选做市标的（固定集合，直到下个刷新周期）
-        MM_SET = [m["token_id"] for m in select_mm(MARKETS_LIVE or [])]
+        _sel = select_mm(MARKETS_LIVE or [])
+        MM_SET = [m["token_id"] for m in _sel]
+        _mc = {}
+        for m in _sel:
+            c = classify(m.get("question", "")) or "other"
+            _mc[c] = _mc.get(c, 0) + 1
+        MM_CATS = _mc
     by_tok = {m.get("token_id"): m for m in (MARKETS_LIVE or [])
               if isinstance(m, dict) and "error" not in m}
     size = STATE["params"]["size"]
@@ -1064,6 +1109,7 @@ def step():
         STATE["quotes"] = quotes
         STATE["live_count"] = len(MARKETS_LIVE) if MARKETS_LIVE else 0
         STATE["mm_count"] = len(MM_SET)
+        STATE["mm_cats"] = MM_CATS
         STATE["last_refresh"] = time.time()
         # 最近成交（取服务器侧 TRADES 末尾，新->旧；带类别，供统计中心）
         pos = []
@@ -1817,6 +1863,7 @@ class H(BaseHTTPRequestHandler):
                     "unrealized": STATE.get("unrealized", 0.0),
                     "mode": STATE.get("mode", "pairs"), "fill": STATE.get("fill", {}),
                     "live_count": STATE["live_count"], "mm_count": STATE["mm_count"],
+                    "mm_cats": STATE.get("mm_cats", {}),
                     "live_fill": dict(LIVE_FILL, by_token={k: dict(v) for k, v in LIVE_FILL.get("by_token", {}).items()}),
                     "live_orders_pending": sum(1 for o in LIVE_ORDERS if not o["filled"]),
                     "params": STATE["params"], "quotes": STATE["quotes"],
