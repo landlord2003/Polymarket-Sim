@@ -121,6 +121,29 @@ class ClobExec:
             return {"ok": True, "dry_run": True, "order_id": order_id}
         return self._ensure_client().cancel_order(order_id)
 
+    # ---------- 订单成交状态（校准用） ----------
+    def get_order_status(self, order_id):
+        """查询已挂单的成交状态（校准 FILL_BASE 用）。返回 {filled, size, status}。
+        注意：py-clob-client 各版本字段名可能不同（sizeMatched / filledSize / size），
+        已做容错；若拿到 error，按报错核对你安装版本的 get_order 返回结构。"""
+        if not self.live:
+            return {"live": False, "note": "DRY_RUN 无真实订单"}
+        try:
+            cli = self._ensure_client()
+            o = cli.get_order(order_id)
+            if isinstance(o, list) and o:
+                o = o[0]
+            if not isinstance(o, dict):
+                return {"live": True, "order_id": order_id,
+                        "raw": str(o)[:200], "note": "返回结构非 dict，请核对 get_order"}
+            size = float(o.get("size") or 0)
+            filled = float(o.get("sizeMatched") or o.get("filledSize")
+                            or o.get("matchedSize") or 0)
+            return {"live": True, "order_id": order_id,
+                    "status": o.get("status"), "size": size, "filled": filled}
+        except Exception as e:
+            return {"live": True, "order_id": order_id, "error": str(e)[:200]}
+
 
 def main():
     """CLI 自检：派生凭证 / 模拟挂单（不真发）。"""

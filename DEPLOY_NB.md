@@ -71,6 +71,23 @@ LIVE_MODE=0 python a_share/sim_server.py
 - 看 `/api/risk`：确认仓位 / 日亏 / kill switch 状态正常。
 - 重点观察：实际成交节奏、盘口来源 `quotes_source`（应为 `gamma`；失败降级 `clob`/`cache`）。
 
+### 阶段一·五：真实成交率校准（回填 FILL_BASE，必经）
+
+> 模拟盘 `fill_prob` 是假设值，不能直接当实盘成交率。实盘前必须用真实（极小）订单校准一次。
+> 详细步骤见 **`CALIBRATE_FILL_BASE.md`**。
+
+```bash
+# 1) 预览将挂的价/量（不发单）
+python a_share/calibrate_fill.py --preview
+
+# 2) 真校准：30 个市场、单笔 $3、观察 10 分钟、跑 2 轮（须 LIVE_MODE=1 + PM_BOT_PK）
+python a_share/calibrate_fill.py --live --markets 30 --size 3 --window 600 --rounds 2
+#   → 输出 observed_fill_rate_pct + recommended_base，写入 a_share/data/fill_calibration_live.json
+```
+
+- 把 `recommended_base` 回填进 `.env` 的 `FILL_BASE`，重启生效。**若 observed_rate < 0.30，先调 `adverse_frac` / 换高流动市场，不要放大。**
+- 校准闭环是"模拟 258K 能否在实盘兑现"的唯一实测手段（净价差闸门见 `CALIBRATE_FILL_BASE.md` §5）。
+
 ### 阶段二：小资金实盘（热钱包 $200–500）
 
 1. 钱包只留小额热钱；主资金冷存。
@@ -114,4 +131,5 @@ LIVE_MODE=0 python a_share/sim_server.py
 | `clob_exec.py` | CLOB 实盘下单（L2 凭证 + 钱包签名）；`LIVE_MODE=1` 真发单，下单前过风控 |
 | `ws_polymarket.py` | CLOB WebSocket 实时盘口（实盘低延迟；`pip install websockets`） |
 | `probe_polymarket.py` | 只读探针（概率 → 情报，北京也可用） |
+| `calibrate_fill.py` | **真实成交率校准**（NB 真挂单+轮询，输出回填 FILL_BASE 的 recommended_base） |
 | `compliance.py` | 合规过滤（NB 下由 `COMPLIANCE_FILTER=0` 关闭） |

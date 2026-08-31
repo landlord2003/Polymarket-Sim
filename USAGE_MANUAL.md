@@ -110,7 +110,9 @@ C:/Users/Lenovo/.workbuddy/binaries/python/versions/3.13.12/python.exe a_share/s
 | 对手竞争 | 无对手盘，静态价差白捡 | 职业做市商抢单 | 🔴 |
 | 费率 | 写死 0.5% | 做市挂单(maker) **0 费**，吃单方峰值 1.8% | 🟡 非主因 |
 
-**所以：258K 不能当作实盘预期。** 唯一能验证实盘收益的办法，是在 NB 用 `LIVE_MODE=0` 先跑 ≥1 周，量出**真实成交率**，回填 `FILL_BASE`，确认真实净价差 > 费率再放大资金（见 §8）。这一步已内建（`DEPLOY_NB.md` + `FILL_CALIBRATE_APPLY`）。
+**所以：258K 不能当作实盘预期。** 唯一能验证实盘收益的办法，是在 NB 用真实（极小）订单测出**真实成交率**，回填 `FILL_BASE`，确认真实净价差 > 费率再放大资金。
+
+> ⚠️ 区分两种标定：`FILL_CALIBRATE_APPLY` / `/api/fill_calibration` 是**影子标定**（合成 `fill_prob` 假设值，≈0.94，**禁止**直接回填）；真实回填必须走 `calibrate_fill.py` 真挂单+轮询（`CALIBRATE_FILL_BASE.md` 详细步骤 + 净价差验收闸门）。
 
 **方法论是否需要迭代？** 代码逻辑已自洽（无重复计量、恒等式成立），无需重写；**真正要迭代的是"真实世界标定"**——fill 率 / 逆向选择 / 延迟只能靠 NB 实盘数据回填，不是北京能完成的。
 
