@@ -1220,6 +1220,8 @@ header h1{margin:0;font-size:19px}
 @keyframes beat{0%,100%{transform:scale(1);opacity:1}30%{transform:scale(1.6);opacity:.5}}
 .badge{font-size:12px;padding:3px 10px;border-radius:20px;background:#101a28;color:var(--mut);border:1px solid var(--line);transition:all .3s}
 .badge.live{background:#0e2419;color:#7fe9bd;border-color:#1c503a}
+.badge.warn{background:#2a2310;color:#f0c674;border-color:#5a4a1c}
+.badge.err{background:#2a1014;color:#ff8a9a;border-color:#5a1c24}
 .sndbtn{cursor:pointer;font-size:14px;background:#101a28;border:1px solid var(--line);border-radius:8px;padding:4px 10px;color:var(--mut);transition:all .2s}
 .sndbtn:hover{color:var(--ink);border-color:var(--acc)}
 /* 导出报告按钮 */
@@ -1316,11 +1318,12 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
   <span class="badge" id="rnd">round 0</span>
   <span class="badge" id="live">真实盘口 0 · 做市 0</span>
   <span class="badge mode" id="modebadge">—</span>
+  <span class="badge" id="qsrc">行情源 —</span>
   <span class="sndbtn" id="snd" title="成交音效开关（默认关）">🔇 音效</span>
   <button class="rptbtn" id="export" title="生成并打开实况与统计报告">📤 导出报告</button>
   <span class="badge">引擎: RigorVirtualBook.market_make</span>
 </header>
-<div class="banner">✅ 行情来自<b>真实 Polymarket 盘口</b>（urllib 直连 Gamma，已合规过滤政治/地缘/军事等敏感类）。
+<div class="banner"><span id="qsr">✅ 行情来自<b>真实 Polymarket 盘口</b>（urllib 直连 Gamma，已合规过滤政治/地缘/军事等敏感类）</span>。
 <b>成交不再是必然</b>：挂单按价格改善幅度判定成交概率（<code>FILL_BASE</code> 参数），挂得越贪越难被打到。
 <b>未平敞口跨轮持有</b>，承担真实价格波动，受止损(5%)与全局库存上限约束，权益按市价盯市。
 全程 <b>DRY_RUN 影子账本、零真钱</b>。配色按中国习惯：<b style="color:var(--up)">红=涨/盈利</b>，<b style="color:var(--dn)">绿=跌/亏损</b>。
@@ -1580,6 +1583,20 @@ function tickState(){
   fetch('/api/state').then(r=>r.json()).then(s=>{
     document.getElementById('rnd').textContent='round '+s.round;
     document.getElementById('live').textContent='真实盘口 '+s.live_count+' · 做市 '+s.mm_count;
+    // 行情源诚实标识：消除"这是不是真实行情"的困惑（北京无外网时为缓存快照）
+    const qs=s.quotes_source||'gamma';
+    const qb=document.getElementById('qsrc');
+    const qsr=document.getElementById('qsr');
+    if(qs==='cache'){
+      if(qb){qb.className='badge warn'; qb.textContent='行情源 · 缓存快照(非实时)';}
+      if(qsr){qsr.innerHTML='⚠️ 行情来自<b>本地缓存快照</b>（非实时，北京无外网直连 Polymarket；显示最近一次成功抓取的盘口）';}
+    } else if(qs==='gamma'||qs==='clob'){
+      if(qb){qb.className='badge live'; qb.textContent='行情源 · 实时 '+qs;}
+      if(qsr){qsr.innerHTML='✅ 行情来自<b>真实 Polymarket 盘口</b>（urllib 直连 '+(qs==='gamma'?'Gamma':'CLOB')+'，已合规过滤政治/地缘/军事等敏感类）';}
+    } else {
+      if(qb){qb.className='badge err'; qb.textContent='行情源 · 获取失败';}
+      if(qsr){qsr.innerHTML='❌ 行情获取失败（请检查网络/代理）';}
+    }
     const st=document.getElementById('status');
     if(s.round!==prevRound){prevRound=s.round; st.textContent='● 撮合中 · round '+s.round; flashBeat('beat');}
     else st.textContent='● 实时运行 · round '+s.round;
