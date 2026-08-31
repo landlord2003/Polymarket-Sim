@@ -37,6 +37,7 @@ import polymarket as P  # noqa: E402
 # 复用 sim_report 的已验证报告渲染函数（HTML/Markdown），避免双重实现
 from sim_report import build_html, build_md  # noqa: E402
 from notify import send_markdown as ding_send_markdown  # noqa: E402  (P0-C 周期报告自动推钉钉)
+import risk_control as RC  # noqa: E402  (P3-4 金融风控层：仓位/日亏/kill switch)
 
 PORT = 8787
 LOCK = threading.Lock()
@@ -1764,6 +1765,42 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif u.path == "/api/risk":
+            body = json.dumps(RC.status(), ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif u.path == "/api/kill_switch":
+            # P3-4 kill switch 控制：复用 SHUTDOWN_TOKEN 鉴权（运维已持该 token）
+            _ktok = ""
+            try:
+                _ktok = (urlparse(u.query).get("token") or "").strip()
+            except Exception:
+                _ktok = ""
+            if not _ktok:
+                _kah = (self.headers.get("Authorization", "") or "").strip()
+                if _kah.lower().startswith("bearer "):
+                    _ktok = _kah[7:].strip()
+            if _ktok != SHUTDOWN_TOKEN:
+                _kbody = json.dumps({"ok": False, "error": "unauthorized"},
+                                    ensure_ascii=False).encode("utf-8")
+                self.send_response(403)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(_kbody)))
+                self.end_headers()
+                self.wfile.write(_kbody)
+                return
+            _act = (urlparse(u.query).get("action") or "on").strip().lower()
+            _kres = RC.reset_kill_switch() if _act == "off" else RC.trigger_kill_switch(reason="api_manual")
+            _kbody = json.dumps({"ok": True, "kill_switch": _kres},
+                                ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(_kbody)))
+            self.end_headers()
+            self.wfile.write(_kbody)
         elif u.path == "/api/shutdown":
             # P0-A 关停端点鉴权：同局域网任意主机不再能直接关停服务
             _tok = ""
