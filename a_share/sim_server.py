@@ -661,6 +661,7 @@ def compute_compliance():
 MARKETS_LIVE = None   # fetch_poly_quotes 返回的实时二元盘口列表
 MM_SET = []           # 当前做市标的 token 集合（固定，避免建仓不平仓）
 MM_CATS = {}          # 当前做市标的类别分布（可观测：{cat: count}）
+MM_DETAIL = {}        # 当前做市标的明细（可观测：{token_id: {question,tag,mid,liquidity,spread}}）
 
 
 def classify(q):
@@ -936,7 +937,7 @@ def prometheus_metrics():
 
 def step():
     """跑一轮：刷新真实盘口(每~90s) -> 对固定做市标的集各调一次真实 market_make。"""
-    global MARKETS_LIVE, MM_SET, MM_CATS
+    global MARKETS_LIVE, MM_SET, MM_CATS, MM_DETAIL
     # 刷新真实盘口池
     refresh = False
     with LOCK:
@@ -950,6 +951,17 @@ def step():
         # 重选做市标的（固定集合，直到下个刷新周期）
         _sel = select_mm(MARKETS_LIVE or [])
         MM_SET = [m["token_id"] for m in _sel]
+        MM_DETAIL = {}
+        for m in _sel:
+            yb = m.get("yes_bid") or 0
+            ya = m.get("yes_ask") or 0
+            MM_DETAIL[m["token_id"]] = {
+                "question": (m.get("question") or "")[:80],
+                "tag": classify(m.get("question", "")) or "other",
+                "mid": round((yb + ya) / 2.0, 4) if (yb and ya) else 0,
+                "liquidity": float(m.get("liquidity") or 0),
+                "spread": round(ya - yb, 4) if (yb and ya) else 0,
+            }
         _mc = {}
         for m in _sel:
             c = classify(m.get("question", "")) or "other"
@@ -1490,6 +1502,13 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
         <div class="note">体育赛事专用屏蔽词（<b id="comp-sports-n">0</b>）：<span class="comp-words" id="comp-sports">—</span></div>
       </details>
     </div>
+
+    <!-- 当前做市标的（智能筛选结果透明化） -->
+    <div class="panel">
+      <h2>🎯 当前做市标的（智能筛选结果）<span class="sub">流动性×价差综合分 + 每类上限 MM_N_PER_CAT，从 300 盘口挑 20</span></h2>
+      <div class="note">以下为当前实际在做市的 20 个标的（每类上限保证多样性）。点「做市类别分布」卡片看分散度。</div>
+      <div class="scroll"><table id="mm-tbl"><thead><tr><th>类别</th><th>市场题目</th><th>中间价</th><th>流动性</th><th>价差</th></tr></thead><tbody></tbody></table></div>
+    </div>
   </div>
 
   <!-- 底部：统计中心详情（三列对称） -->
@@ -1687,6 +1706,7 @@ function tickState(){
       mdiv.className='mmdiv '+(d.well_div?'ok':'warn');
       mdiv.textContent=`覆盖 ${d.n_cats} 类 · 最大类占比 ${Math.round(d.max_share*100)}% · HHI ${d.hhi}（越低越分散）${d.well_div?' ✅健康':' ⚠️偏集中'}`;
     }
+    renderMMMarkets(s.mm_markets);
     setMoney('c-unreal',(s.unrealized||0),true);
     setMoney('c-inv',(s.inv_notional||0),false);
     const fe=document.getElementById('c-fill');
@@ -1785,6 +1805,18 @@ function renderAttribution(a){
   }
   const netel=document.getElementById('attr-net');
   if(netel){netel.textContent='净锁利: $'+net.toFixed(2)+'（各分量之和，恒等式闭合）';}
+}
+function renderMMMarkets(list){
+  const tb=document.getElementById('mm-tbl'); if(!tb) return;
+  const tbody=tb.querySelector('tbody');
+  if(!tbody) return;
+  if(!list||!list.length){tbody.innerHTML='<tr><td colspan="5" style="color:var(--mut)">暂无做市标的</td></tr>'; return;}
+  tbody.innerHTML=list.map(m=>{
+    const liq=Number(m.liquidity||0);
+    const liqS=liq>=1000?(liq/1000).toFixed(1)+'k':liq.toFixed(0);
+    return `<tr><td><span class="mmtag">${m.tag}</span></td><td class="l">${(m.question||'').slice(0,52)}</td>`+
+      `<td>${Number(m.mid||0).toFixed(3)}</td><td>$${liqS}</td><td>${Number(m.spread||0).toFixed(3)}</td></tr>`;
+  }).join('');
 }
 function renderCompliance(c){
   if(!c||c.error) return;
@@ -1928,6 +1960,7 @@ class H(BaseHTTPRequestHandler):
                     "live_count": STATE["live_count"], "mm_count": STATE["mm_count"],
                     "mm_cats": STATE.get("mm_cats", {}),
                     "mm_div": STATE.get("mm_div", {}),
+                    "mm_markets": list(MM_DETAIL.values()),
                     "live_fill": dict(LIVE_FILL, by_token={k: dict(v) for k, v in LIVE_FILL.get("by_token", {}).items()}),
                     "live_orders_pending": sum(1 for o in LIVE_ORDERS if not o["filled"]),
                     "params": STATE["params"], "quotes": STATE["quotes"],
