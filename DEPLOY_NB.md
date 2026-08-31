@@ -61,8 +61,8 @@ cp .env.nb .env                                        # 编辑 .env 填真实�
 | `LIVE_POLL_SEC` | `30` | `LIVE_MODE=1` 时后台每 N 秒轮询在途订单真实成交状态（用于看板真实成交率） |
 | `DINGTALK_WEBHOOK` / `DINGTALK_SECRET` | （可选） | kill switch 触发 / 报告推送；建议配置以便手机告警 |
 
-> **真实成交率看板**：`LIVE_MODE=1` 后，看板新增「真实成交率(LIVE)」卡片（显示 `命中/尝试` 与百分比），
-> 数据来自后台对 `clob_exec.get_order_status` 的异步轮询；北京 `DRY_RUN` 下该卡片显示 `DRY_RUN`，不影响模拟盘。
+> **成交率说明（DRY_RUN 是什么）**：`DRY_RUN` = 影子账本模拟盘、**零真钱、不在链上发单**。看板顶部「成交率」徽章与「模拟成交率」卡片显示的是**模型假设成交率**（挂单按价格改善幅度判定被打到的概率，约 94%），并非链上真实观测。
+> `LIVE_MODE=1`（真钱实盘）后，顶部徽章变「实盘成交率 X%」、「实盘成交率(LIVE)」卡片显示 `命中/尝试`，数据来自后台对 `clob_exec.get_order_status` 的异步轮询。北京 `DRY_RUN` 下该卡片显示 `— 模拟盘`，不影响模拟盘。
 
 > 完整变量见 `.env.nb` 注释；其余见 `DEPLOY_POLYMARKET.md` §6。
 
@@ -79,11 +79,13 @@ python a_share/sim_server.py
 # 如需临时覆盖（不影响 .env 文件）：LIVE_MODE=0 python a_share/sim_server.py
 ```
 
-- 浏览器开 `http://127.0.0.1:8787`，看 🛡️ 合规面板应为「已关闭」、`/api/state` 的 `compliance` 关。
+- 浏览器开 `http://127.0.0.1:8787`，看 🛡️ 合规面板应为「已关闭」、header「合规」徽章显示「合规 关(NB无限制)」、`/api/state` 的 `compliance_filter` = `false`。
 - 看 `/api/risk`：确认仓位 / 日亏 / kill switch 状态正常。
 - 重点观察：实际成交节奏、盘口来源 `quotes_source`（应为 `gamma`；失败降级 `clob`/`cache`）。
 - **看板新增可观测项（2026-08-31 迭代）**：
   - header 「行情源」徽章：`gamma`/`clob`=绿（实时）、`cache`=黄（缓存快照非实时）、获取失败=红。北京无外网时显示 `cache` 并标注「本地缓存快照(非实时)」——**如实告知是否为实时行情**，避免误判。
+  - header 「成交率」徽章（与 round 同一行）：`DRY_RUN` 模拟盘显示「模拟成交率 X% · 零真钱」；`LIVE_MODE=1` 显示「实盘成交率 X%」。
+  - header 「合规」徽章：开=黄「合规 开(已过滤)」、关=绿「合规 关(NB无限制)」——`COMPLIANCE_FILTER` 开关的可视化（NB 设 `0`，中国部署默认 `1`）。
   - 「做市类别分布」卡片：实时渲染 20 个做市标的跨几类、每类几个（来自 `/api/state.mm_cats`）。
   - 「分散度」健康行：覆盖类数 + 最大类占比 + HHI 集中度（越低越分散）+ ✅健康/⚠️偏集中（阈值：类数≥4 且 HHI≤0.30）。与 `MM_N_PER_CAT` 上限联动，直观验证组合是否够分散。
 

@@ -1372,9 +1372,11 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
   <h1 class="gtitle">Polymarket 实时模拟交易大屏</h1>
   <span class="badge live" id="status">● 连接中…</span>
   <span class="badge" id="rnd">round 0</span>
+  <span class="badge" id="fillbadge">成交率 —</span>
   <span class="badge" id="live">真实盘口 0 · 做市 0</span>
   <span class="badge mode" id="modebadge">—</span>
   <span class="badge" id="qsrc">行情源 —</span>
+  <span class="badge" id="compbadge">合规 —</span>
   <span class="sndbtn" id="snd" title="成交音效开关（默认关）">🔇 音效</span>
   <button class="rptbtn" id="export" title="生成并打开实况与统计报告">📤 导出报告</button>
   <span class="badge">引擎: RigorVirtualBook.market_make</span>
@@ -1527,12 +1529,12 @@ document.getElementById('cards').innerHTML=
    '<div class="card"><div class="k">本轮锁利</div><div class="v b" id="c-rpnl">$0</div></div>',
    '<div class="card"><div class="k">盯市权益</div><div class="v b" id="c-eq">$0</div></div>',
    '<div class="card"><div class="k">浮动盈亏</div><div class="v b" id="c-unreal">$0</div></div>',
-   '<div class="card"><div class="k">挂单成交率</div><div class="v b" id="c-fill">0%</div></div>',
+   '<div class="card" title="模型假设的成交率：挂单按价格改善幅度判定被打到的概率（FILL_BASE 等参数），非链上真实观测"><div class="k">模拟成交率</div><div class="v b" id="c-fill">0%</div></div>',
    '<div class="card"><div class="k">敞口名义</div><div class="v b" id="c-inv">$0</div></div>',
    '<div class="card"><div class="k">真实盘口</div><div class="v b" id="c-live">0</div></div>',
    '<div class="card"><div class="k">做市市场</div><div class="v b" id="c-mm">0</div></div>',
    '<div class="card" title="做市标的按类别分散（每类上限 MM_N_PER_CAT），避免集中在单一类别"><div class="k">做市类别分布</div><div class="v sm" id="c-mmcat" style="font-size:12px;font-weight:400;line-height:1.7;margin-top:6px">—</div><div class="mmdiv" id="c-mmdiv"></div></div>',
-   '<div class="card"><div class="k">真实成交率(LIVE)</div><div class="v b" id="c-livefill">—</div></div>'].join('');
+   '<div class="card" title="仅在 LIVE_MODE=1（真钱实盘）时才有链上真实成交观测；当前 DRY_RUN 模拟盘不挂真单，故无实盘成交率"><div class="k">实盘成交率(LIVE)</div><div class="v b" id="c-livefill">—</div></div>'].join('');
 let seen=new Set(), prevRound=0;
 function flashBeat(id){const b=document.getElementById(id); if(!b)return; b.classList.add('hot'); setTimeout(()=>b.classList.remove('hot'),650);}
 let audioCtx=null, soundOn=false;
@@ -1680,13 +1682,31 @@ function tickState(){
       fe.textContent=fr.toFixed(1)+'%';}
     const lf=document.getElementById('c-livefill');
     if(lf){
-      if(s.live_fill && s.live_fill.attempts>0){
+      if(s.live_mode && s.live_fill && s.live_fill.attempts>0){
         const lr=s.live_fill.rate||0;
         lf.className='v '+(lr>=60?'b':(lr>=40?'g':'r'));
         lf.textContent=lr.toFixed(1)+'% ('+s.live_fill.hits+'/'+s.live_fill.attempts+')';
       } else {
-        lf.className='v b'; lf.textContent='DRY_RUN';
+        lf.className='v b'; lf.textContent='— 模拟盘';
       }
+    }
+    // 顶部徽章：成交率（与 round 同行）+ 合规开关
+    const fb=document.getElementById('fillbadge');
+    if(fb){
+      const fr=(s.fill&&s.fill.on)?(s.fill.rate||0):100;
+      if(s.live_mode && s.live_fill && s.live_fill.attempts>0){
+        const lr=s.live_fill.rate||0;
+        fb.className='badge live'; fb.textContent='实盘成交率 '+lr.toFixed(1)+'%';
+      } else if(s.live_mode){
+        fb.className='badge'; fb.textContent='实盘成交率 —';
+      } else {
+        fb.className='badge'; fb.textContent='模拟成交率 '+fr.toFixed(1)+'% · 零真钱';
+      }
+    }
+    const cb=document.getElementById('compbadge');
+    if(cb){
+      if(s.compliance_filter){ cb.className='badge warn'; cb.textContent='合规 开(已过滤)'; }
+      else { cb.className='badge live'; cb.textContent='合规 关(NB无限制)'; }
     }
     const mb=document.getElementById('modebadge');
     if(mb&&s.fill){mb.textContent=(s.mode==='inv'?'真实做市(库存管理)':'同轮双边建平')
@@ -1892,6 +1912,8 @@ class H(BaseHTTPRequestHandler):
                     "params": STATE["params"], "quotes": STATE["quotes"],
                     "positions": STATE["positions"], "equity_curve": STATE["equity_curve"],
                     "quotes_source": (getattr(P, "quotes_source", None)() if hasattr(P, "quotes_source") else "gamma"),
+                    "compliance_filter": COMPLIANCE_FILTER,
+                    "live_mode": LIVE_MODE,
                     "persistence": {
                         "run_start": RUN_META.get("run_start"),
                         "initial_equity": RUN_META.get("initial_equity"),
