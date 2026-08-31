@@ -121,18 +121,20 @@ def gamma_cooldown_remaining() -> float:
     return max(0.0, _GAP_COOLDOWN_UNTIL - time.time())
 
 
-def _http_get(url: str, timeout: int = 15) -> str:
+def _http_get(url: str, timeout: int = 15, max_retry: int = None) -> str:
     """带限流退避的 Gamma HTTP GET（P2-4）。
 
     - 429：进入全局冷却（默认 30s），期间所有调用直接抛 GammaRateLimited，避免反复打 Gamma。
-    - 5xx / 网络抖动：指数退避重试（2/4/8s），最多 _GAP_MAX_RETRY 次。
+    - 5xx / 网络抖动：指数退避重试（2/4/8s），最多 _GAP_MAX_RETRY 次（可用 max_retry 覆盖）。
     - 其他 4xx：直接抛出（非限流，不重试）。
+    - 代理/网关硬失败（502 Bad Gateway / Tunnel connection failed）：重试无意义，立即抛出走降级。
     """
     global _GAP_COOLDOWN_UNTIL
     if time.time() < _GAP_COOLDOWN_UNTIL:
         raise GammaRateLimited("Gamma 冷却中（剩 %.1fs）" % gamma_cooldown_remaining())
     last_err = None
-    for attempt in range(_GAP_MAX_RETRY):
+    retries = _GAP_MAX_RETRY if max_retry is None else max_retry
+    for attempt in range(retries):
         try:
             req = urllib.request.Request(url, headers={
                 "User-Agent": "Mozilla/5.0 (compatible; QuantTrading/1.0)",
@@ -147,6 +149,9 @@ def _http_get(url: str, timeout: int = 15) -> str:
                 print("[gamma] 429 限流 -> 进入冷却 %.0fs" % _GAP_COOLDOWN_SEC)
                 raise GammaRateLimited("HTTP 429 rate limited; cooldown %.0fs" % _GAP_COOLDOWN_SEC)
             if 500 <= e.code < 600:
+                # 代理/网关硬失败（502）重试无意义，立即抛出走离线降级
+                if e.code == 502 or "Bad Gateway" in str(getattr(e, "reason", "")):
+                    raise
                 wait = _GAP_BACKOFF_BASE * (2 ** attempt)
                 print("[gamma] %d 服务端错误，退避 %.1fs 重试" % (e.code, wait))
                 time.sleep(wait)
@@ -154,6 +159,9 @@ def _http_get(url: str, timeout: int = 15) -> str:
             raise
         except (urllib.error.URLError, OSError) as e:
             last_err = e
+            # 代理隧道失败（Tunnel connection failed / 502）属硬失败，重试无意义
+            if "502" in str(e) or "Bad Gateway" in str(e) or "Tunnel connection failed" in str(e):
+                raise
             wait = _GAP_BACKOFF_BASE * (2 ** attempt)
             print("[gamma] 网络错误(%s)，退避 %.1fs 重试" % (e, wait))
             time.sleep(wait)
@@ -206,7 +214,7 @@ def _fetch_pool() -> list:
         })
         url = "%s?%s" % (_GAMMA, params)
         try:
-            page = json.loads(_http_get(url))
+            page = json.loads(_http_get(url, timeout=8, max_retry=1))
         except Exception:  # noqa: BLE001
             break
         if not page:
@@ -302,10 +310,71 @@ def _persist_quotes(quotes):
 
 
 def _load_persisted_quotes():
+    """加载 last-good 盘口（Gamma/CLOB 全失败时的离线兜底）。
+
+    优先级：
+      1) quotes_cache.json 的 data（最近一次成功拉取写回）
+      2) quotes_ts/quotes_*.jsonl 最新快照的 markets 数组（本机曾成功抓过的真实盘口）
+    两者皆空才返回 []。这样即便当前环境无外网，模拟盘也能用最近一次真实快照续跑，
+    而不是卡在 quotes={}。
+    """
     try:
         with open(_QUOTES_CACHE_PATH, "r", encoding="utf-8") as f:
             d = json.load(f)
-        return d.get("data") or []
+        cached = d.get("data") or []
+        if cached:
+            return cached
+    except Exception:
+        pass
+    # 兜底：扫描 quotes_ts 目录，取文件名最大（最新日期）的快照
+    try:
+        import glob
+        ts_dir = os.path.join(os.path.dirname(_QUOTES_CACHE_PATH), "quotes_ts")
+        files = sorted(glob.glob(os.path.join(ts_dir, "quotes_*.jsonl")))
+        if not files:
+            return []
+        latest = files[-1]
+        snap_markets = []
+        with open(latest, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                markets = obj.get("markets") if isinstance(obj, dict) else None
+                if isinstance(markets, list):
+                    snap_markets = markets
+                elif isinstance(obj, dict) and "token_id" in obj:
+                    snap_markets = [obj]
+        out = []
+        for m in snap_markets:
+            if not isinstance(m, dict):
+                continue
+            q = m.get("question") or ""
+            if _is_blocked(q, m.get("tags")):
+                continue
+            yb = _to_num(m.get("yes_bid"))
+            ya = _to_num(m.get("yes_ask"))
+            if not yb or not ya or yb <= 0 or ya <= 0 or ya >= 1:
+                continue
+            out.append({
+                "platform": "poly",
+                "id": m.get("token_id"),
+                "token_id": m.get("token_id"),
+                "event_id": m.get("event_id"),
+                "question": q,
+                "yes_bid": round(yb, 4), "yes_ask": round(ya, 4),
+                "no_bid": round(1 - ya, 4), "no_ask": round(1 - yb, 4),
+                "end_date": m.get("end_date"),
+                "liquidity": round(_to_num(m.get("liquidity")) or 0.0, 2),
+                "ts": float(m.get("ts") or time.time()),
+            })
+            if len(out) >= 300:
+                break
+        return out
     except Exception:
         return []
 
@@ -316,7 +385,7 @@ def fetch_poly_quotes_clob(limit: int = 300) -> list:
     """
     url = "https://clob.polymarket.com/markets?limit=%d" % limit
     try:
-        txt = _http_get(url, timeout=15)
+        txt = _http_get(url, timeout=8, max_retry=1)
     except Exception as e:  # noqa: BLE001
         print("[quotes] CLOB 冗余源不可达: %s" % e)
         return []
@@ -380,6 +449,7 @@ def fetch_poly_quotes(limit: int = 300, force: bool = False) -> list:
             and now - _poly_quotes_cache["ts"] < _POLY_QUOTES_TTL:
         return _poly_quotes_cache["data"]
     out = []
+    err = None
     try:
         rows = _fetch_pool()  # 原始 market 列表（含 bestBid/bestAsk/clobTokenIds）
         for m in rows:
@@ -424,34 +494,37 @@ def fetch_poly_quotes(limit: int = 300, force: bool = False) -> list:
             if len(out) >= limit:
                 break
     except Exception as e:  # noqa: BLE001
-        if _poly_quotes_cache["data"] is not None:
-            _FETCH_QUOTES_SOURCE = "gamma-cache"
-            return _poly_quotes_cache["data"]
-        # 主源(Gamma)全失败且内存无缓存 -> 尝试 CLOB 冗余源
-        try:
-            clob_out = fetch_poly_quotes_clob(limit)
-            if clob_out:
-                _persist_quotes(clob_out)
-                _FETCH_QUOTES_SOURCE = "clob"
-                _poly_quotes_cache["ts"] = time.time()
-                _poly_quotes_cache["data"] = clob_out
-                print("[quotes] Gamma 失败，已切换 CLOB 冗余源(%d 个)" % len(clob_out))
-                return clob_out
-        except Exception as ce:  # noqa: BLE001
-            print("[quotes] CLOB 冗余源也失败: %s" % ce)
-        # CLOB 也失败 -> 用持久化 last-good 缓存（降级，保证模拟不中断）
-        cached = _load_persisted_quotes()
-        if cached:
-            _FETCH_QUOTES_SOURCE = "cache"
-            print("[quotes] Gamma+CLOB 均失败，降级使用持久化 last-good 盘口(%d 个)" % len(cached))
-            return cached
-        _FETCH_QUOTES_SOURCE = "error"
-        return [{"error": str(e)}]
-    _persist_quotes(out)
-    _FETCH_QUOTES_SOURCE = "gamma"
-    _poly_quotes_cache["ts"] = now
-    _poly_quotes_cache["data"] = out
-    return out
+        err = e
+    # Gamma 拉到有效盘口 -> 直接采用并缓存
+    if out:
+        _persist_quotes(out)
+        _FETCH_QUOTES_SOURCE = "gamma"
+        _poly_quotes_cache["ts"] = now
+        _poly_quotes_cache["data"] = out
+        return out
+    # Gamma 拉空（无网/限流/异常）-> 降级链：内存缓存 -> CLOB -> 持久化快照
+    if _poly_quotes_cache["data"] is not None:
+        _FETCH_QUOTES_SOURCE = "gamma-cache"
+        return _poly_quotes_cache["data"]
+    try:
+        clob_out = fetch_poly_quotes_clob(limit)
+        if clob_out:
+            _persist_quotes(clob_out)
+            _FETCH_QUOTES_SOURCE = "clob"
+            _poly_quotes_cache["ts"] = time.time()
+            _poly_quotes_cache["data"] = clob_out
+            print("[quotes] Gamma 为空，已切换 CLOB 冗余源(%d 个)" % len(clob_out))
+            return clob_out
+    except Exception as ce:  # noqa: BLE001
+        print("[quotes] CLOB 冗余源失败: %s" % ce)
+    # CLOB 也失败 -> 用持久化 last-good 缓存/快照（降级，保证模拟不中断）
+    cached = _load_persisted_quotes()
+    if cached:
+        _FETCH_QUOTES_SOURCE = "cache"
+        print("[quotes] Gamma 为空，降级使用持久化 last-good 盘口(%d 个)" % len(cached))
+        return cached
+    _FETCH_QUOTES_SOURCE = "error"
+    return [{"error": str(err) if err else "empty"}]
 
 
 def fetch_price_history(market_id=None, token_id=None, interval="max"):

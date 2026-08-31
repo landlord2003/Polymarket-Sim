@@ -291,6 +291,8 @@ COMPLIANCE_FILTER = os.environ.get("COMPLIANCE_FILTER", "1") == "1"
 # NB 实盘开关：LIVE_MODE=1 时策略循环的意图挂单会真实发到 CLOB（经风控闸门）；
 # 默认 0=DRY_RUN，live_dispatch 不调用，零副作用，当前北京模拟盘行为不变。
 LIVE_MODE = os.environ.get("LIVE_MODE", "0") == "1"
+# 初始资金（USD）：重置起点。默认 10000；可用 INITIAL_CAPITAL 覆盖（如 5000）。
+INITIAL_CAPITAL = float(os.environ.get("INITIAL_CAPITAL", "10000.0") or "10000.0")
 FILL_GAMMA = float(os.environ.get("FILL_GAMMA", "1.0"))
 APPLY_FILL = os.environ.get("APPLY_FILL", "1") != "0"   # 0 = 关闭概率，退回 100% 成交
 # 成交率校准（P0-2）：基础成交率由市场流动性归一化得到（高流动性盘口排队消化快→成交率高）
@@ -341,7 +343,7 @@ TRADE_MEM = 5000                             # 统计中心内存样本容量（
 TRADE_FILE_MAX_MB = 60                       # trades.jsonl 超过此大小则轮转归档
 TRADE_ROTATE_KEEP = 50000                    # 轮转时保留最近 N 笔
 TRADES = collections.deque(maxlen=TRADE_MEM) # 服务器侧成交记录(带类别)，供统计中心
-RUN_META = {"run_start": None, "initial_equity": 10000.0, "version": 1, "last_round": 0}
+RUN_META = {"run_start": None, "initial_equity": INITIAL_CAPITAL, "version": 1, "last_round": 0}
 
 def _now_iso():
     return _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -356,14 +358,15 @@ def load_persistence():
         # 注意：用 open(w) 截断而非 os.remove —— 后者会被 WorkBuddy 的 safe-delete
         # shim 拦截（windows-sandbox-recycle-bin-unavailable），导致重置静默失败、
         # 旧数据被继续加载，统计彻底失真。
-        for _f in ("run_meta.json", "trades.jsonl", "equity.jsonl"):
+        for _f in ("run_meta.json", "trades.jsonl", "equity.jsonl",
+                   "risk_state.json", "sim_book_poly.json"):
             _p = os.path.join(DATA_DIR, _f)
             try:
                 open(_p, "w", encoding="utf-8").close()
             except Exception:
                 pass
         RUN_META.clear()
-        RUN_META.update({"run_start": None, "initial_equity": 10000.0,
+        RUN_META.update({"run_start": None, "initial_equity": INITIAL_CAPITAL,
                          "version": 1, "last_round": 0})
         TRADES.clear()
         print("[persistence] SIM_RESET=1 -> 已清空历史，重建干净起点")
@@ -375,7 +378,7 @@ def load_persistence():
             pass
     if not RUN_META.get("run_start"):
         RUN_META["run_start"] = _now_iso()
-        RUN_META["initial_equity"] = 10000.0
+        RUN_META["initial_equity"] = INITIAL_CAPITAL
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(RUN_META, f, ensure_ascii=False, indent=2)
     # 重建成交记录
