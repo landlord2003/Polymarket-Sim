@@ -118,6 +118,44 @@ def _release_lock():
         pass
 
 
+# ============ 启动早期加载 .env（显式，不依赖 notify 导入顺序）============
+def _load_dotenv():
+    """Minimal stdlib-only .env loader：把仓库根 .env 的 KEY=VALUE 注入 os.environ
+    （不覆盖已存在的进程环境变量）。在任何配置常量读取前调用，确保 .env.nb 里的
+    LIVE_MODE / COMPLIANCE_FILTER / PM_BOT_PK / SHUTDOWN_TOKEN 等被读到——
+    否则伙伴 cp .env.nb .env 后跑 python sim_server.py 会静默退回默认 DRY_RUN+合规开启。"""
+    d = os.path.dirname(os.path.abspath(__file__))
+    env_path = None
+    cur = d
+    for _ in range(5):
+        cand = os.path.join(cur, ".env")
+        if os.path.isfile(cand):
+            env_path = cand
+            break
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    if not env_path:
+        return
+    with open(env_path, "r", encoding="utf-8") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):]
+            if "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            if k and k not in os.environ:
+                os.environ[k] = v
+
+_load_dotenv()
+
+
 # ============ P2-3 报告自动化 ============
 AUTO_REPORT_MIN = int(os.environ.get("AUTO_REPORT_MIN", "30") or 30)  # 0=关闭自动报告
 

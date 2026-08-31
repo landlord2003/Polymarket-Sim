@@ -67,8 +67,10 @@ cp .env.nb .env                                        # 编辑 .env 填真实�
 ### 阶段一：模拟观察（≥1 周，零风险）
 
 ```bash
-LIVE_MODE=0 python a_share/sim_server.py
-# 或 .env 里 LIVE_MODE=0 后直接 python a_share/sim_server.py
+# sim_server.py 启动时会自动加载仓库根 .env（stdlib 解析，无需 python-dotenv、不覆盖已设环境变量）
+# 所以 cp .env.nb .env 并填好值后，直接运行即可，配置自动生效：
+python a_share/sim_server.py
+# 如需临时覆盖（不影响 .env 文件）：LIVE_MODE=0 python a_share/sim_server.py
 ```
 
 - 浏览器开 `http://127.0.0.1:8787`，看 🛡️ 合规面板应为「已关闭」、`/api/state` 的 `compliance` 关。
