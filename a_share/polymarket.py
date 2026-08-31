@@ -12,6 +12,7 @@
 """
 
 import json
+import os
 import re
 import socket
 import time
@@ -278,6 +279,89 @@ def _to_num(v) -> Optional[float]:
 _POLY_QUOTES_TTL = 60.0
 _poly_quotes_cache = {"ts": 0.0, "data": None}
 
+# P1-D 盘口冗余数据源：主源 Gamma 全失败时，降级顺序 = CLOB /markets 冗余源 -> 持久化 last-good 缓存。
+# 保证模拟盘在 Gamma 抖动/限流时不停摆（用略旧但有效的盘口续跑）。
+_FETCH_QUOTES_SOURCE = "gamma"   # gamma | clob | cache | error
+_QUOTES_CACHE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "data", "quotes_cache.json")
+
+
+def quotes_source() -> str:
+    """当前盘口数据来源（供看板可观测 P1-D）。"""
+    return _FETCH_QUOTES_SOURCE
+
+
+def _persist_quotes(quotes):
+    """把成功拉到的盘口持久化为 last-good 缓存（供 Gamma 全失败兜底）。"""
+    try:
+        os.makedirs(os.path.dirname(_QUOTES_CACHE_PATH), exist_ok=True)
+        with open(_QUOTES_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump({"ts": time.time(), "data": quotes}, f)
+    except Exception:
+        pass
+
+
+def _load_persisted_quotes():
+    try:
+        with open(_QUOTES_CACHE_PATH, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d.get("data") or []
+    except Exception:
+        return []
+
+
+def fetch_poly_quotes_clob(limit: int = 300) -> list:
+    """P1-D 冗余源：CLOB /markets 顶层盘口（token 级 bestBid/bestAsk 直接对应 YES 盘口）。
+    地域受限环境可能 404/超时，仅作 Gamma 失败时的兜底，绝不用于主路径；映射失败返回 []。
+    """
+    url = "https://clob.polymarket.com/markets?limit=%d" % limit
+    try:
+        txt = _http_get(url, timeout=15)
+    except Exception as e:  # noqa: BLE001
+        print("[quotes] CLOB 冗余源不可达: %s" % e)
+        return []
+    try:
+        data = json.loads(txt)
+    except Exception:
+        return []
+    rows = data if isinstance(data, list) else (data.get("data") or [])
+    out = []
+    for m in rows:
+        if not isinstance(m, dict):
+            continue
+        q = m.get("question") or ""
+        if _is_blocked(q, m.get("tags")):
+            continue
+        # CLOB markets 每条含 tokens 列表（token_id/outcome/bestBid/bestAsk）
+        toks = m.get("tokens") or []
+        yes = None
+        if isinstance(toks, list):
+            for t in toks:
+                if isinstance(t, dict) and str(t.get("outcome", "")).lower() in ("yes", "1", "true"):
+                    yes = t
+                    break
+            if yes is None and toks:
+                yes = toks[0] if isinstance(toks[0], dict) else None
+        if not yes:
+            continue
+        ob = _to_num(yes.get("bestBid"))
+        oa = _to_num(yes.get("bestAsk"))
+        if not ob or not oa or ob <= 0 or oa <= 0 or oa >= 1:
+            continue
+        out.append({
+            "platform": "poly", "id": m.get("id"),
+            "token_id": yes.get("token_id"), "event_id": m.get("eventId"),
+            "question": q,
+            "yes_bid": round(ob, 4), "yes_ask": round(oa, 4),
+            "no_bid": round(1 - oa, 4), "no_ask": round(1 - ob, 4),
+            "end_date": m.get("endDate"),
+            "liquidity": round(_to_num(m.get("liquidity")) or 0.0, 2),
+            "ts": time.time(),
+        })
+        if len(out) >= limit:
+            break
+    return out
+
 
 def fetch_poly_quotes(limit: int = 300, force: bool = False) -> list:
     """返回二元 Polymarket 市场的统一 Quote 列表，供套利引擎使用。
@@ -290,6 +374,7 @@ def fetch_poly_quotes(limit: int = 300, force: bool = False) -> list:
     不调用 CLOB（本环境 CLOB /book 被地域限制 404），Gamma 顶层盘口更稳定。
     Quote = {platform,id,token_id,event_id,question,yes_bid,yes_ask,no_bid,no_ask,ts}
     """
+    global _FETCH_QUOTES_SOURCE
     now = time.time()
     if not force and _poly_quotes_cache["data"] is not None \
             and now - _poly_quotes_cache["ts"] < _POLY_QUOTES_TTL:
@@ -340,8 +425,30 @@ def fetch_poly_quotes(limit: int = 300, force: bool = False) -> list:
                 break
     except Exception as e:  # noqa: BLE001
         if _poly_quotes_cache["data"] is not None:
+            _FETCH_QUOTES_SOURCE = "gamma-cache"
             return _poly_quotes_cache["data"]
+        # 主源(Gamma)全失败且内存无缓存 -> 尝试 CLOB 冗余源
+        try:
+            clob_out = fetch_poly_quotes_clob(limit)
+            if clob_out:
+                _persist_quotes(clob_out)
+                _FETCH_QUOTES_SOURCE = "clob"
+                _poly_quotes_cache["ts"] = time.time()
+                _poly_quotes_cache["data"] = clob_out
+                print("[quotes] Gamma 失败，已切换 CLOB 冗余源(%d 个)" % len(clob_out))
+                return clob_out
+        except Exception as ce:  # noqa: BLE001
+            print("[quotes] CLOB 冗余源也失败: %s" % ce)
+        # CLOB 也失败 -> 用持久化 last-good 缓存（降级，保证模拟不中断）
+        cached = _load_persisted_quotes()
+        if cached:
+            _FETCH_QUOTES_SOURCE = "cache"
+            print("[quotes] Gamma+CLOB 均失败，降级使用持久化 last-good 盘口(%d 个)" % len(cached))
+            return cached
+        _FETCH_QUOTES_SOURCE = "error"
         return [{"error": str(e)}]
+    _persist_quotes(out)
+    _FETCH_QUOTES_SOURCE = "gamma"
     _poly_quotes_cache["ts"] = now
     _poly_quotes_cache["data"] = out
     return out

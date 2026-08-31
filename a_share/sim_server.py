@@ -36,6 +36,7 @@ import sim_rigor as R  # noqa: E402  (P1-2 敏感性分析用 R.mm_param_sensiti
 import polymarket as P  # noqa: E402
 # 复用 sim_report 的已验证报告渲染函数（HTML/Markdown），避免双重实现
 from sim_report import build_html, build_md  # noqa: E402
+from notify import send_markdown as ding_send_markdown  # noqa: E402  (P0-C 周期报告自动推钉钉)
 
 PORT = 8787
 LOCK = threading.Lock()
@@ -168,14 +169,40 @@ def build_and_write_report(top_n=15, stamp=None):
             "equity": st["equity"], "realized": st["realized"], "round": st["round"]}
 
 
+def _push_report_ding(r):
+    """P0-C 周期报告自动推钉钉：把报告核心指标推送到钉钉，闭环（未配置机器人时静默跳过）。"""
+    try:
+        with LOCK:
+            s = compute_stats()
+            fill = dict(STATE.get("fill", {}))
+        title = "📊 模拟盘周期报告 %s" % r["stamp"]
+        rate = fill.get("rate", 0.0)
+        lines = [
+            "**轮次**: %s  " % r["round"],
+            "**已实现锁利**: $%s  " % r["realized"],
+            "**盯市权益**: $%s  " % r["equity"],
+            "**历史峰值**: $%s  当前回撤: %s%%  " % (s.get("peak"), s.get("drawdown_pct")),
+            "**最大回撤**: %s%%  成交胜率: %s%%  " % (s.get("max_drawdown_pct"), s.get("win_rate")),
+            "**观测成交率**: %s%% (尝试%s/命中%s)  " % (rate, fill.get("attempts", 0), fill.get("hits", 0)),
+            "**持仓市场**: %s  库存名义: $%s  " % (r.get("n_markets"), s.get("inv_notional")),
+            "**逆向选择损耗**: $%s  已结算: $%s  " % (s.get("adverse_sel_loss"), s.get("settled_pnl")),
+            "> 报告文件: %s / %s" % (r["html_name"], r["md_name"]),
+        ]
+        ding_send_markdown(title, "\n".join(lines))
+    except Exception as ex:
+        print("[auto_report] 钉钉推送失败：%s" % ex)
+
+
 def auto_report_loop():
-    """P2-3 后台自动报告：每 AUTO_REPORT_MIN 分钟生成一份报告；启动即先出一份。"""
+    """P2-3 后台自动报告：每 AUTO_REPORT_MIN 分钟生成一份报告；启动即先出一份。
+    P0-C：每份报告生成后自动推钉钉（闭环）。"""
     if AUTO_REPORT_MIN <= 0:
         print("[auto_report] 已关闭 (AUTO_REPORT_MIN=%s)" % AUTO_REPORT_MIN)
         return
     try:
         r = build_and_write_report(15)
         print("[auto_report] 启动报告已生成 -> %s" % r["html_name"])
+        _push_report_ding(r)
     except Exception as ex:
         print("[auto_report] 启动报告失败：%s" % ex)
     while True:
@@ -186,6 +213,7 @@ def auto_report_loop():
         try:
             r = build_and_write_report(15)
             print("[auto_report] 周期报告已生成 -> %s (round=%s)" % (r["html_name"], r["round"]))
+            _push_report_ding(r)
         except Exception as ex:
             print("[auto_report] 周期报告失败：%s" % ex)
 
@@ -227,6 +255,11 @@ LIQ_REF = float(os.environ.get("LIQ_REF", "30000.0"))   # 流动性参考值（�
 # （实测 8 秒内 300 个市场的 bestBid/bestAsk 变化为 0）。因此刷新间隔不能设太小，
 # 否则请求会堆积、有被 Gamma 限流的风险。默认 150 秒。
 PRICE_REFRESH_SEC = float(os.environ.get("PRICE_REFRESH_SEC", "150"))
+# P0-A：关停端点鉴权 token（从 .env 读取 SHUTDOWN_TOKEN；未设则用弱默认并启动时告警，
+#        强烈建议生产/局域网部署设 SHUTDOWN_TOKEN，避免同网任意主机可关停服务）
+SHUTDOWN_TOKEN = os.environ.get("SHUTDOWN_TOKEN") or "sim-stop-8787"
+# P1-A：成交率影子标定——是否把标定结果应用到 FILL_BASE（默认仅影子测量，不改变成交假设）
+FILL_CALIBRATE_APPLY = os.environ.get("FILL_CALIBRATE_APPLY", "0") == "1"
 # P0-3：真实盘口时序落盘目录（按日分文件 JSONL），支撑离线回测；已被 .gitignore 忽略
 QUOTES_TS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "quotes_ts")
 os.makedirs(QUOTES_TS_DIR, exist_ok=True)
@@ -1489,6 +1522,64 @@ tickState(); tickLive();
 </script></body></html>"""
 
 
+def compute_fill_calibration():
+    """P1-A 成交率影子标定：用当前实时盘口池各市场的 fill_prob（模型自身意图成交率）
+    分布，对照假设的 FILL_BASE 地板，给出标定建议；并把实际观测成交率(attempts/hits)一并呈现。
+    结果写入 data/fill_calibration.json（影子，默认不改 FILL_BASE；FILL_CALIBRATE_APPLY=1 时由 main 应用）。
+    """
+    import statistics as _st
+    adverse = float(book.rigor.get("adverse_frac", 0.15))
+    ps = []
+    for m in (MARKETS_LIVE or []):
+        if not isinstance(m, dict) or "error" in m:
+            continue
+        q = m.get("question", "")
+        if is_blocked(q):
+            continue
+        liq = float(m.get("liquidity") or 0)
+        try:
+            ps.append(fill_prob(adverse, liq))
+        except Exception:
+            pass
+    mean_p = round(_st.mean(ps), 3) if ps else 0.0
+    med_p = round(_st.median(ps), 3) if ps else 0.0
+    sp = sorted(ps)
+    p10 = round(sp[max(0, len(sp) // 10 - 1)], 3) if sp else 0.0
+    p90 = round(sp[min(len(sp) - 1, len(sp) * 9 // 10)], 3) if sp else 0.0
+    with LOCK:
+        st_fill = dict(STATE.get("fill", {}))
+    attempts = int(st_fill.get("attempts", 0) or 0)
+    hits = int(st_fill.get("hits", 0) or 0)
+    observed = round(hits / attempts, 3) if attempts else None
+    # 推荐地板：取意图成交率中位（夹在 [0.05,0.95]），使 FILL_BASE 与当前盘口结构一致
+    recommended = round(max(0.05, min(0.95, med_p)), 2)
+    cal = {
+        "ts": _now_iso(),
+        "n_markets": len(ps),
+        "assumed_base": FILL_BASE,
+        "intended_mean": mean_p, "intended_median": med_p,
+        "intended_p10": p10, "intended_p90": p90,
+        "observed_attempts": attempts, "observed_hits": hits,
+        "observed_rate": observed,
+        "recommended_base": recommended,
+        "apply": bool(FILL_CALIBRATE_APPLY),
+    }
+    try:
+        with open(os.path.join(DATA_DIR, "fill_calibration.json"), "w", encoding="utf-8") as f:
+            json.dump(cal, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+    return cal
+
+
+def _load_fill_calibration():
+    try:
+        with open(os.path.join(DATA_DIR, "fill_calibration.json"), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
@@ -1504,6 +1595,18 @@ class H(BaseHTTPRequestHandler):
                     "live_count": STATE["live_count"], "mm_count": STATE["mm_count"],
                     "params": STATE["params"], "quotes": STATE["quotes"],
                     "positions": STATE["positions"], "equity_curve": STATE["equity_curve"],
+                    "quotes_source": (getattr(P, "quotes_source", None)() if hasattr(P, "quotes_source") else "gamma"),
+                    "persistence": {
+                        "run_start": RUN_META.get("run_start"),
+                        "initial_equity": RUN_META.get("initial_equity"),
+                        "realized_total_checkpoint": RUN_META.get("realized_total"),
+                        "trades_total": RUN_META.get("trades_total"),
+                        "sells_total": RUN_META.get("sells_total"),
+                        "wins_total": RUN_META.get("wins_total"),
+                        "peak_equity": RUN_META.get("peak_equity"),
+                        "daily_pnl_last7": dict(list((RUN_META.get("daily_pnl") or {}).items())[-7:]),
+                        "equity_samples": len(STATE["equity_curve"]),
+                    },
                 }
             body = json.dumps(snap, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
@@ -1586,6 +1689,18 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif u.path == "/api/fill_calibration":
+            # P1-A 成交率影子标定：测量当前盘口意图成交率分布 + 实际观测成交率，给出 FILL_BASE 建议
+            try:
+                cal = compute_fill_calibration()
+            except Exception as ex:
+                cal = {"error": str(ex)}
+            body = json.dumps(cal, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         elif u.path == "/api/export_report":
             # P2-3 复用 build_and_write_report：生成 HTML/MD 报告并打开（与自动报告线程共用）
             try:
@@ -1635,6 +1750,25 @@ class H(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
         elif u.path == "/api/shutdown":
+            # P0-A 关停端点鉴权：同局域网任意主机不再能直接关停服务
+            _tok = ""
+            try:
+                _tok = (urlparse(u.query).get("token") or "").strip()
+            except Exception:
+                _tok = ""
+            if not _tok:
+                _ah = (self.headers.get("Authorization", "") or "").strip()
+                if _ah.lower().startswith("bearer "):
+                    _tok = _ah[7:].strip()
+            if _tok != SHUTDOWN_TOKEN:
+                _body = json.dumps({"ok": False, "error": "unauthorized"},
+                                   ensure_ascii=False).encode("utf-8")
+                self.send_response(403)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(_body)))
+                self.end_headers()
+                self.wfile.write(_body)
+                return
             # P2-2 优雅停止：停循环 -> 落盘 -> 关 HTTP -> 释放锁（atexit）
             try:
                 with LOCK:
@@ -1676,9 +1810,43 @@ def _delayed_shutdown():
     _release_lock()  # 显式释放，避免后台运行器绕过 atexit 时锁残留
 
 
+def preflight():
+    """P1-C 启动预检：打印配置清单与健康告警（非致命，仅提示），配置集中于此便于排错。"""
+    ok = "✅"; warn = "⚠️"
+    print("=" * 58)
+    print("[preflight] 启动自检")
+    dt_ok = bool(os.getenv("DINGTALK_WEBHOOK") and os.getenv("DINGTALK_SECRET"))
+    print("  %s 钉钉推送 : %s" % (ok if dt_ok else warn,
+          "已配置" if dt_ok else "未配置(通知/报告不推送)"))
+    print("  %s 关停鉴权 : %s" % (ok if os.getenv("SHUTDOWN_TOKEN") else warn,
+          "SHUTDOWN_TOKEN 已设" if os.getenv("SHUTDOWN_TOKEN")
+          else "弱默认 token(sim-stop-8787)，建议设 SHUTDOWN_TOKEN"))
+    print("  %s 成交率   : FILL_BASE=%.2f%s" % (ok, FILL_BASE,
+          " (应用影子标定)" if FILL_CALIBRATE_APPLY else " (影子测量，不应用)"))
+    print("  %s 模式     : SIM_MODE=%s  盘口刷新=%ss  自动报告=%smin"
+          % (ok, SIM_MODE, PRICE_REFRESH_SEC, AUTO_REPORT_MIN))
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        _t = os.path.join(DATA_DIR, ".preflight_test")
+        open(_t, "w").write("ok"); os.remove(_t)
+        print("  %s 数据目录 : 可写 %s" % (ok, DATA_DIR))
+    except Exception as ex:
+        print("  %s 数据目录 : 不可写 %s" % (warn, ex))
+    print("=" * 58)
+
+
 def main():
     _acquire_lock()                      # P2-1 单实例启动锁
     load_persistence()
+    # P1-C 启动预检
+    preflight()
+    # P1-A 成交率影子标定应用（仅当未显式设 FILL_BASE 且 FILL_CALIBRATE_APPLY=1）
+    if FILL_CALIBRATE_APPLY and not os.environ.get("FILL_BASE"):
+        _cal = _load_fill_calibration()
+        if _cal and _cal.get("recommended_base"):
+            globals()["FILL_BASE"] = float(_cal["recommended_base"])
+            print("[fill-calib] 应用影子标定 FILL_BASE=%.2f (assumed %.2f)"
+                  % (FILL_BASE, float(_cal.get("assumed_base", 0.30))))
     t = threading.Thread(target=loop, daemon=True)
     t.start()
     threading.Thread(target=auto_report_loop, daemon=True).start()  # P2-3 报告自动化

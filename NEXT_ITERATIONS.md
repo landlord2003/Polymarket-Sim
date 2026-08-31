@@ -5,7 +5,21 @@
 
 ---
 
-## 🔴 P0（上线前建议必做，影响正确性/安全/可运维）
+## ✅ 本轮（2026-08-31）已补完
+
+- **P0-A 关停端点鉴权** ✅：新增 `SHUTDOWN_TOKEN` 校验（`?token=` 或 Bearer 头），缺失/错误返回 403；绑定仍 `0.0.0.0`（需局域网访问），靠 token 防同网误关。
+- **P0-B 流水/权益跨重启持久化** ✅：经核实 `run_meta.json`/`trades.jsonl`/`equity.jsonl`/`sim_book_poly.json` 已全量落盘并按日/按轮重建，`/api/state` 新增 `persistence` 字段可观测（重启曲线不断片、归因累计连续）。
+- **P0-C 报告自动推钉钉** ✅：`auto_report_loop` 每份报告生成后自动 `send_markdown` 摘要推手机（未配机器人静默跳过）。
+- **P1-A 成交率影子标定** ✅：新增 `compute_fill_calibration()` + `/api/fill_calibration`，测量当前盘口意图成交率分布+实际观测成交率，输出 `recommended_base`；`FILL_CALIBRATE_APPLY=1` 时由 `main` 应用。
+- **P1-B 测试覆盖** ✅：新增 `test_attribution_identity` / `test_compliance_filter` / `test_lock_alive` + `run_tests.py`（归因恒等式/合规过滤/锁判活），`python run_tests.py` 全绿。
+- **P1-C 配置外提+启动自检** ✅：新增 `preflight()` 启动打印配置清单+健康告警（钉钉/关停鉴权/成交率/模式/数据目录），非致命仅提示。
+- **P1-D 盘口冗余数据源** ✅：`polymarket.fetch_poly_quotes` 主源 Gamma 失败后降级 CLOB `/markets` → 持久化 last-good 缓存（`quotes_source` 可观测），模拟不中断。
+
+> 剩余待办见下方 P2 段（可观测升级 / 旧文档清理 / 多策略并行 / 回测加厚）。
+
+---
+
+## 🔴 P0（已全部完成 ✅，见上）
 
 ### P0-A 关停端点鉴权（安全）
 - **现状**：`/api/shutdown` 无 token 保护，且服务绑定 `0.0.0.0:8787`。任何能访问该端口的人（同局域网 / 公网暴露时）都能关停服务。
@@ -23,7 +37,7 @@
 
 ---
 
-## 🟡 P1（显著提升质量，建议近期做）
+## 🟡 P1（已全部完成 ✅，见上「本轮已补完」）
 
 ### P1-A 成交率真实标定（FILL_BASE 不再拍脑袋）
 - **现状**：`FILL_BASE=0.30` 是假设；真实值只能小额真钱挂单测出（用户已明确"接真钱第三步搁置"）。

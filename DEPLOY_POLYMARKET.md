@@ -98,6 +98,8 @@ SIM_MODE=inv FILL_BASE=0.30 PRICE_REFRESH_SEC=150 AUTO_REPORT_MIN=30 python a_sh
 | `PRICE_REFRESH_SEC` | `150` | 真实盘口刷新间隔（秒）；一次全量拉取约 20s，**切勿设太小以免被 Gamma 限流** |
 | `AUTO_REPORT_MIN` | `30` | 自动报告间隔（分钟）；`0`=关闭自动报告 |
 | `SIM_RESET` | （不设） | 设为 `1` 启动时清空模拟账本重来 |
+| `SHUTDOWN_TOKEN` | `sim-stop-8787`（弱默认） | **关停端点鉴权**（P0-A）：`/api/shutdown` 必须带此 token（query `?token=` 或 `Authorization: Bearer`）。局域网部署强烈建议设为随机长串，否则任意同网主机可关停服务 |
+| `FILL_CALIBRATE_APPLY` | `0` | **成交率影子标定应用开关**（P1-A）：`1`=把测量出的 `recommended_base` 应用到 `FILL_BASE`；默认 `0`=仅测量、不改成交假设 |
 
 ---
 
@@ -106,11 +108,12 @@ SIM_MODE=inv FILL_BASE=0.30 PRICE_REFRESH_SEC=150 AUTO_REPORT_MIN=30 python a_sh
 | 地址 | 说明 |
 |------|------|
 | `http://127.0.0.1:8787/` | 主看板：行情榜 / 统计中心（含 🛡️ 合规过滤面板，每 2s 刷新）/ 盈亏归因瀑布 / 敏感性分析 |
-| `/api/state` | 整体运行状态 JSON（round / 权益 / 成交率 / Gamma 限流冷却剩余等） |
+| `/api/state` | 整体运行状态 JSON（round / 权益 / 成交率 / Gamma 限流冷却剩余 / **quotes_source 盘口来源** / **persistence 跨重启累计** 等） |
 | `/api/compliance` | 合规过滤可观测：扫描总数 / 已拦截 / 放行 / 拦截率 + 拦截样本（命中词 + 类别）+ 完整词表（P2-5） |
 | `/api/attribution` | 盈亏归因瀑布：毛价差 / 滑点 / 手续费 / 逆向选择 / 结算 → 净锁利（P1-3） |
+| `/api/fill_calibration` | 成交率影子标定（P1-A）：当前盘口意图成交率分布 + 实际观测成交率 + `recommended_base` 建议 |
 | `/api/export_report` | 导出 HTML + MD 报告（复用内存中在跑引擎数据） |
-| `/api/shutdown` | 优雅停止：停服并同步释放启动锁（P2-2） |
+| `/api/shutdown` | 优雅停止：需带 `SHUTDOWN_TOKEN` 鉴权（P0-A），停服并同步释放启动锁（P2-2） |
 
 ---
 
@@ -118,17 +121,20 @@ SIM_MODE=inv FILL_BASE=0.30 PRICE_REFRESH_SEC=150 AUTO_REPORT_MIN=30 python a_sh
 
 - 启动时写 `output/sim_server.pid` 锁；**第二个实例会被拒绝**（提示用 `taskkill` 或删锁后重起）。
 - 正常停止三选一：
-  1. 浏览器访问 `/api/shutdown`
+  1. 浏览器访问 `/api/shutdown?token=<SHUTDOWN_TOKEN>`（或带 `Authorization: Bearer <SHUTDOWN_TOKEN>` 头）
   2. 关掉启动窗口（`start_sim_dashboard.bat` 那个）
   3. `taskkill /PID <pid> /F`（Windows）/ `kill <pid>`（macOS/Linux）
+- **未带正确 token 调 `/api/shutdown` 会返回 403**（P0-A 防同网误关）。
 - 锁文件会**自动释放**；若异常退出导致锁残留，删 `output/sim_server.pid` 即可重起。
+
+> **持久化（P0-B）**：成交流水 / 权益曲线 / 盈亏归因累计 / 按日拆分全部落盘（`a_share/data/` 下 `run_meta.json` / `trades.jsonl` / `equity.jsonl` / `sim_book_poly.json`），**重启不丢、曲线不断片**。看板 `/api/state` 的 `persistence` 字段可实时查看跨重启累计。
 
 ---
 
 ## 9. 报告与数据落盘
 
 - 报告 / 账本 / 日志均在 `output/`（已 `.gitignore`，**不入库**）。
-- 自动报告每 `AUTO_REPORT_MIN` 分钟生成 `output/sim_report_*.html` / `.md`；启动即先出一份。
+- 自动报告每 `AUTO_REPORT_MIN` 分钟生成 `output/sim_report_*.html` / `.md`；启动即先出一份。**每份报告生成后自动推钉钉**（P0-C 闭环，未配机器人则静默跳过）。
 - 手动导出：看板「📤 导出报告」按钮，或调 `/api/export_report`。
 
 ---
@@ -150,7 +156,10 @@ SIM_MODE=inv FILL_BASE=0.30 PRICE_REFRESH_SEC=150 AUTO_REPORT_MIN=30 python a_sh
 | 盘口长时间不更新 | 查网络能否访问 Gamma；限流时会进 30s 冷却并降级旧缓存（看 `/api/state` 的 `gamma_cooldown`） |
 | 启动即退出 | 看终端报错，多半端口占用或旧锁残留 |
 | 不推送钉钉 | 检查 `.env` 的 `DINGTALK_WEBHOOK` / `DINGTALK_SECRET` 是否正确 |
-| `ModuleNotFoundError` | 确认在仓库根目录运行，且 `a_share/` 下模块齐全（sim_server / polymarket / sim_rigor / sim_report / compliance / notify） |
+| `/api/shutdown` 返回 403 | 未带 `SHUTDOWN_TOKEN`（P0-A）；补 `?token=` 或 Bearer 头。同网其他主机因此无法直接关停 |
+| 盘口来源变成 cache/clob | `/api/state` 的 `quotes_source` 显示当前盘口来源（P1-D）：`gamma`=主源正常；`clob`=Gamma 失败时切 CLOB 冗余源；`cache`=主源+CLOB 都失败，降级用持久化 last-good 盘口（模拟不中断）；`error`=全失败 |
+| 跑测试 | `cd a_share && python run_tests.py`（P1-B：归因恒等式 / 合规过滤 / 锁判活等） |
+| `ModuleNotFoundError` | 确认在仓库根目录运行，且 `a_share/` 下模块齐全（sim_server / polymarket / sim_rigor / sim_report / compliance / notify / test_*.py） |
 
 ---
 
