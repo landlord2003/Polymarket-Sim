@@ -246,6 +246,9 @@ if SIM_MODE not in ("pairs", "inv"):
 #   adverse=0   -> 挂在市场最优价，需排队等对手方，成交率 = FILL_BASE
 #   adverse=0.5 -> 挂在中间价，让出半个价差，成交率 -> 1
 FILL_BASE = float(os.environ.get("FILL_BASE", "0.30"))
+# NB 省部署（无合规风险）可设 COMPLIANCE_FILTER=0 整体关闭合规红线过滤；
+# 默认开（中国部署必须过滤政治/地缘/军事敏感市场）。
+COMPLIANCE_FILTER = os.environ.get("COMPLIANCE_FILTER", "1") == "1"
 FILL_GAMMA = float(os.environ.get("FILL_GAMMA", "1.0"))
 APPLY_FILL = os.environ.get("APPLY_FILL", "1") != "0"   # 0 = 关闭概率，退回 100% 成交
 # 成交率校准（P0-2）：基础成交率由市场流动性归一化得到（高流动性盘口排队消化快→成交率高）
@@ -568,7 +571,16 @@ def _compliance_match(q):
 
 def compute_compliance():
     """P2-5 合规过滤可观测：扫描实时盘口池，统计被合规红线拦截的市场，
-    暴露命中词与当前词表，使「合规过滤」从黑盒变可观测。"""
+    暴露命中词与当前词表，使「合规过滤」从黑盒变可观测。
+    COMPLIANCE_FILTER=0 时返回「已关闭」报告（NB 部署无合规风险）。"""
+    if not COMPLIANCE_FILTER:
+        return {
+            "n_scanned": 0, "n_blocked": 0, "n_passed": 0, "block_rate_pct": 0.0,
+            "blocked_samples": [], "block_extra_count": len(BLOCK_EXTRA),
+            "block_sports_count": len(BLOCK_SPORTS), "block_extra": BLOCK_EXTRA,
+            "block_sports": BLOCK_SPORTS,
+            "note": "合规过滤已关闭（COMPLIANCE_FILTER=0，NB 部署无合规风险），不做任何市场剔除。",
+        }
     rows = list(MARKETS_LIVE or [])
     scanned = [m for m in rows if isinstance(m, dict) and "error" not in m]
     n_scanned = len(scanned)
@@ -632,7 +644,10 @@ BLOCK_SPORTS = ["invade", "invasion", "geopolit", "nuclear", "sanction",
                 "ccp", "communist", "war ", "world war", " houthis", "houthi"]
 def is_blocked(q, tag=None):
     """合规红线过滤。体育赛事里的国家名不算政治敏感（如 New Zealand vs. Syria），
-    因此对 sports 类别只套用「真正政治/军事」词表，避免误杀。"""
+    因此对 sports 类别只套用「真正政治/军事」词表，避免误杀。
+    COMPLIANCE_FILTER=0（如 NB 省部署）时整体放行，不做任何过滤。"""
+    if not COMPLIANCE_FILTER:
+        return False
     if P._is_blocked(q, None):
         return True
     ql = (q or "").lower()
@@ -1825,6 +1840,9 @@ def preflight():
           " (应用影子标定)" if FILL_CALIBRATE_APPLY else " (影子测量，不应用)"))
     print("  %s 模式     : SIM_MODE=%s  盘口刷新=%ss  自动报告=%smin"
           % (ok, SIM_MODE, PRICE_REFRESH_SEC, AUTO_REPORT_MIN))
+    print("  %s 合规过滤 : %s" % (ok if COMPLIANCE_FILTER else warn,
+          "开启(中国部署过滤敏感市场)" if COMPLIANCE_FILTER
+          else "关闭(COMPLIANCE_FILTER=0，NB 部署无合规风险)"))
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
         _t = os.path.join(DATA_DIR, ".preflight_test")

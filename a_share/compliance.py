@@ -8,8 +8,12 @@
 「真正政治/军事」词表，避免误杀（如 New Zealand vs. Syria）。
 """
 from __future__ import annotations
+import os
 import re
 import polymarket as P
+
+# NB 省部署（无合规风险）可设 COMPLIANCE_FILTER=0 整体关闭过滤；默认开。
+COMPLIANCE_FILTER = os.environ.get("COMPLIANCE_FILTER", "1") == "1"
 
 # 非体育语境下的完整屏蔽词（含国家主体/地缘/组织/军事）
 BLOCK_EXTRA = ["iran", "invade", "invasion", "russia", "ukraine", "israel",
@@ -41,7 +45,10 @@ def classify(q):
 
 
 def is_blocked(q, tag=None):
-    """返回 True 表示该市场触碰合规红线，应被过滤。"""
+    """返回 True 表示该市场触碰合规红线，应被过滤。
+    COMPLIANCE_FILTER=0（如 NB 省部署）时整体放行。"""
+    if not COMPLIANCE_FILTER:
+        return False
     if P._is_blocked(q, None):
         return True
     ql = (q or "").lower()
