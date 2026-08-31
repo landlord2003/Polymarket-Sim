@@ -9,7 +9,8 @@
 
 - **Polymarket 模拟做市 / 锁利看板**，全程 **DRY_RUN（零真实资金）**，只是验证策略与工程链路。
 - 入口：`a_share/sim_server.py`，本地起一个 HTTP 服务，浏览器打开 **http://127.0.0.1:8787** 即可看实时看板。
-- **合规红线**：自动过滤政治 / 地缘 / 军事等敏感市场（`compliance.py` 为单一事实来源），中国部署**不可关闭**。
+- **合规红线**：自动过滤政治 / 地缘 / 军事等敏感市场（`compliance.py` 为单一事实来源），中国部署**不可关闭**；NB 等开放省部署可设 `COMPLIANCE_FILTER=0` 整体关闭（见 `DEPLOY_NB.md`）。
+- **实盘化（NB 部署）**：本项目已具备实盘能力——`clob_exec.py`（L2 凭证+钱包签名下单）、`risk_control.py`（仓位/日亏/kill switch）、`ws_polymarket.py`（实时盘口）。NB 省物理 IP 开放、无 KYC 可实盘，详见 `DEPLOY_NB.md`。
 - 看板内置：实时行情榜、统计中心（含 🛡️ 合规过滤面板）、盈亏归因瀑布、敏感性分析、报告导出。
 
 ---
@@ -100,6 +101,14 @@ SIM_MODE=inv FILL_BASE=0.30 PRICE_REFRESH_SEC=150 AUTO_REPORT_MIN=30 python a_sh
 | `SIM_RESET` | （不设） | 设为 `1` 启动时清空模拟账本重来 |
 | `SHUTDOWN_TOKEN` | `sim-stop-8787`（弱默认） | **关停端点鉴权**（P0-A）：`/api/shutdown` 必须带此 token（query `?token=` 或 `Authorization: Bearer`）。局域网部署强烈建议设为随机长串，否则任意同网主机可关停服务 |
 | `FILL_CALIBRATE_APPLY` | `0` | **成交率影子标定应用开关**（P1-A）：`1`=把测量出的 `recommended_base` 应用到 `FILL_BASE`；默认 `0`=仅测量、不改成交假设 |
+| `COMPLIANCE_FILTER` | `1` | **合规过滤开关**（P3-1）：`1`=开启（中国部署必须过滤敏感市场）；`0`=关闭（NB 等开放省无合规风险，交易所有市场） |
+| `LIVE_MODE` | `0` | **实盘开关**（P3-3）：`1`=真发单（须 `PM_BOT_PK`）；默认 `0`=DRY_RUN 不真发单 |
+| `PM_BOT_PK` | （空） | 钱包私钥（**仅环境变量**，绝不写代码/提交）；`LIVE_MODE=1` 时必须 |
+| `CLOB_HOST` / `CLOB_CHAIN_ID` | `https://clob.polymarket.com` / `137` | CLOB 连接（Polygon Mainnet） |
+| `MAX_POS_PER_MARKET` | `200` | 单市场最大仓位(USDC)（P3-4 金融风控） |
+| `MAX_TOTAL_POS` | `2000` | 总仓位上限(USDC) |
+| `DAILY_LOSS_LIMIT` | `100` | 日亏损限额(USDC)，触限即停一切新单 |
+| `CLOB_WS_URI` / `WS_RECONNECT_*` | `wss://.../ws/market` | CLOB WebSocket（P3-2，需 `pip install websockets`） |
 
 ---
 
@@ -114,6 +123,8 @@ SIM_MODE=inv FILL_BASE=0.30 PRICE_REFRESH_SEC=150 AUTO_REPORT_MIN=30 python a_sh
 | `/api/fill_calibration` | 成交率影子标定（P1-A）：当前盘口意图成交率分布 + 实际观测成交率 + `recommended_base` 建议 |
 | `/api/export_report` | 导出 HTML + MD 报告（复用内存中在跑引擎数据） |
 | `/api/shutdown` | 优雅停止：需带 `SHUTDOWN_TOKEN` 鉴权（P0-A），停服并同步释放启动锁（P2-2） |
+| `/api/risk` | 金融风控状态（P3-4）：kill switch / 仓位 / 日亏 / 限额 |
+| `/api/kill_switch` | kill switch 控制：带 `SHUTDOWN_TOKEN` 鉴权；`?action=off` 解除，否则触发（触发即钉钉告警，停止一切新单） |
 
 ---
 
@@ -143,6 +154,7 @@ SIM_MODE=inv FILL_BASE=0.30 PRICE_REFRESH_SEC=150 AUTO_REPORT_MIN=30 python a_sh
 
 - `compliance.py` 是过滤**单一事实来源**：扫描实时盘口、拦截政治 / 地缘 / 军事类市场（本机实测约 7% 拦截率）。
 - 中国部署**不要关闭**此过滤；修改词表（`BLOCK_EXTRA` / `BLOCK_SPORTS`）需评审。
+- **NB 等开放省部署**：可设 `COMPLIANCE_FILTER=0` 整体关闭（无合规风险，交易所有市场）；详见 `DEPLOY_NB.md`。
 - 看板 🛡️ 合规过滤面板实时显示命中词与拦截数，红线从黑盒变可观测。
 
 ---
@@ -160,6 +172,9 @@ SIM_MODE=inv FILL_BASE=0.30 PRICE_REFRESH_SEC=150 AUTO_REPORT_MIN=30 python a_sh
 | 盘口来源变成 cache/clob | `/api/state` 的 `quotes_source` 显示当前盘口来源（P1-D）：`gamma`=主源正常；`clob`=Gamma 失败时切 CLOB 冗余源；`cache`=主源+CLOB 都失败，降级用持久化 last-good 盘口（模拟不中断）；`error`=全失败 |
 | 跑测试 | `cd a_share && python run_tests.py`（P1-B：归因恒等式 / 合规过滤 / 锁判活等） |
 | `ModuleNotFoundError` | 确认在仓库根目录运行，且 `a_share/` 下模块齐全（sim_server / polymarket / sim_rigor / sim_report / compliance / notify / test_*.py） |
+| NB 实盘怎么配 | 见 `DEPLOY_NB.md`：`.env.nb` 模板 + IP 自检 + 先模拟后实盘 SOP；`COMPLIANCE_FILTER=0` + `LIVE_MODE=1` + `PM_BOT_PK` |
+| `/api/kill_switch` 是什么 | 紧急熔断：带 `SHUTDOWN_TOKEN` 调它即停一切新单并钉钉告警；`?action=off` 解除（P3-4） |
+| 实盘下单没反应 | 确认 `LIVE_MODE=1` 且 `PM_BOT_PK` 已填；下单前必过 `risk_control` 限额，超限会被拒（看 `/api/risk`） |
 
 ---
 
@@ -172,10 +187,17 @@ Polymarket-Sim/
 │   ├── polymarket.py     # Gamma 盘口取数 + 429 限流冷却 / 指数退避（P2-4）
 │   ├── sim_rigor.py      # 虚拟账本 + 逆向选择建模 + 敏感性分析（P0 / P1-2）
 │   ├── sim_report.py     # HTML / MD 报告（含盈亏归因瀑布，P1-3）
-│   ├── compliance.py     # 合规过滤（单一事实来源，P2-5）
+│   ├── compliance.py     # 合规过滤（单一事实来源，P2-5；P3-1 支持 COMPLIANCE_FILTER 关闭）
+│   ├── risk_control.py   # 金融风控层（仓位/日亏/kill switch，P3-4）
+│   ├── clob_exec.py      # CLOB 实盘下单（L2 凭证+钱包签名，P3-3）
+│   ├── ws_polymarket.py  # CLOB WebSocket 实时盘口（P3-2）
+│   ├── probe_polymarket.py # 只读探针（概率→情报，P3-5）
 │   └── notify.py         # 钉钉 / 企微推送
 ├── start_sim_dashboard.bat  # Windows 一键启动（清理端口 + 起服务 + 开浏览器）
 ├── requirements.txt          # 仅 A股 / 加密模块需要；模拟盘无需
 ├── .env.example
-└── DEPLOY_POLYMARKET.md
+├── .env.nb              # NB 实盘部署模板（复制为 .env）
+├── DEPLOY_POLYMARKET.md
+├── DEPLOY_NB.md         # NB 省实盘 SOP
+└── requirements_nb.txt  # NB 实盘依赖
 ```

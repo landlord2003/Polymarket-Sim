@@ -1,0 +1,5 @@
+# NB 实盘部署依赖（模拟盘默认零依赖；实盘需以下）
+# 安装：pip install -r requirements_nb.txt
+websockets>=12.0      # P3-2 CLOB WebSocket 实时盘口
+py-clob-client>=0.1.0 # P3-3 CLOB L2 认证 + 实盘下单
+web3>=6.0.0           # py-clob-client 钱包签名依赖
