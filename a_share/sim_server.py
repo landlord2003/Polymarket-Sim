@@ -1409,7 +1409,7 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
 <div class="banner"><span id="qsr">✅ 行情来自<b>真实 Polymarket 盘口</b>（urllib 直连 Gamma，已合规过滤政治/地缘/军事等敏感类）</span>。
 <b>成交不再是必然</b>：挂单按价格改善幅度判定成交概率（<code>FILL_BASE</code> 参数），挂得越贪越难被打到。
 <b>未平敞口跨轮持有</b>，承担真实价格波动，受止损(5%)与全局库存上限约束，权益按市价盯市。
-全程 <b>DRY_RUN 影子账本、零真钱</b>。配色按中国习惯：<b style="color:var(--up)">红=涨/盈利</b>，<b style="color:var(--dn)">绿=跌/亏损</b>。
+全程 <b>模拟盘·零真钱</b>（影子账本，绝不真发单）。因此<b>无链上真实成交率</b>——顶部「成交率」徽章显示的是模型假设成交率；仅当 LIVE_MODE=1 真钱实盘时该徽章才变「实盘成交率」。配色按中国习惯：<b style="color:var(--up)">红=涨/盈利</b>，<b style="color:var(--dn)">绿=跌/亏损</b>。
 数据自 <b id="run-start">—</b> 起落盘累计。</div>
 <div class="wrap">
   <div class="cards" id="cards"></div>
@@ -1984,6 +1984,7 @@ class H(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
         elif u.path == "/api/markets":
@@ -2119,6 +2120,7 @@ class H(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
         elif u.path == "/api/risk":
