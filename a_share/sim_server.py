@@ -1364,6 +1364,19 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
 .comp-detail summary{cursor:pointer;color:var(--mut);font-size:12px;padding:4px 0}
 .comp-detail .note{font-size:11.5px;line-height:1.6;word-break:break-word}
 .comp-words{color:#9fb0c8}
+/* P1-3 盈亏归因瀑布柱状图 */
+.attr-chart{margin-top:6px}
+.attr-row{display:flex;align-items:center;margin:7px 0;font-size:12px}
+.attr-row .lbl{width:118px;flex:none;text-align:right;padding-right:9px;color:var(--mut)}
+.attr-row .bar-wrap{flex:1;background:var(--panel2);border:1px solid var(--line);border-radius:5px;height:18px;position:relative;overflow:hidden}
+.attr-row .bar{position:absolute;left:0;top:0;height:100%;border-radius:5px;min-width:2px}
+.attr-row .bar.up{background:linear-gradient(90deg,#5a1f24,var(--up))}
+.attr-row .bar.dn{background:linear-gradient(90deg,#1f3a28,var(--dn))}
+.attr-row .val{width:96px;flex:none;text-align:right;font-variant-numeric:tabular-nums;padding-left:9px}
+.attr-row.net{margin-top:10px;padding-top:9px;border-top:1px dashed var(--line)}
+.attr-row.net .lbl{color:var(--fg);font-weight:700}
+.attr-row.net .val{font-weight:700;font-size:13px}
+.attr-row.net .bar{box-shadow:0 0 0 1px var(--acc) inset}
 </style></head>
 <body>
 <div class="ticker"><div class="run" id="tick">正在加载真实 Polymarket 盘口…</div></div>
@@ -1456,8 +1469,8 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
     <div class="panel">
       <h2>🧮 盈亏归因（瀑布）</h2>
       <div class="note">累计净锁利拆解为各成本分量：毛价差捕获 − 走簿滑点 − 手续费 − 逆向选择 + 结算净损益。各分量均来自真实成交记录，恒等式闭合。</div>
-      <div class="scroll"><table id="attr-tbl"><thead><tr><th>成分</th><th>金额</th></tr></thead><tbody></tbody></table></div>
-      <div class="note" id="attr-net">净锁利: $0</div>
+      <div class="attr-chart" id="attr-chart"></div>
+      <div class="note" id="attr-net">净锁利: $0（各分量之和，恒等式闭合）</div>
     </div>
 
     <!-- P2-5 合规过滤可观测 -->
@@ -1749,21 +1762,29 @@ function tickState(){
 }
 function renderAttribution(a){
   if(!a||a.error) return;
-  const rows=[
-    ['毛价差捕获(税前)', a.gross_spread, 'up'],
+  const items=[
+    ['毛价差捕获', a.gross_spread, 'up'],
     ['走簿滑点', a.walk_the_book, 'dn'],
     ['手续费', a.fees, 'dn'],
     ['逆向选择损耗', a.adverse_selection, 'dn'],
     ['结算净损益', a.settlement, 'up'],
-    ['= 净锁利', a.net, 'b'],
   ];
-  document.getElementById('attr-tbl').querySelector('tbody').innerHTML=rows.map(r=>{
-    const v=Number(r[1]||0);
-    const cls=r[2]==='b'?(v>=0?'up':'dn'):(v>=0?'up':'dn');
-    return `<tr><td>${r[0]}</td><td class="${r[2]==='b'?'b':cls}">${v>=0?'+':''}$${v.toFixed(2)}</td></tr>`;
-  }).join('');
   const net=Number(a.net||0);
-  document.getElementById('attr-net').textContent='净锁利: $'+net.toFixed(2);
+  const maxv=Math.max(1e-6, ...items.map(i=>Math.abs(Number(i[1]||0))), Math.abs(net));
+  const el=document.getElementById('attr-chart');
+  if(el){
+    const row=(lbl,v,cls,netRow)=>{
+      const val=Number(v||0);
+      const w=Math.max(2, Math.abs(val)/maxv*100);
+      const sign=val>=0?'+':'−';
+      return `<div class="attr-row${netRow?' net':''}"><div class="lbl">${lbl}</div>`+
+        `<div class="bar-wrap"><div class="bar ${cls}" style="width:${w}%"></div></div>`+
+        `<div class="val ${cls}">${sign}$${Math.abs(val).toFixed(2)}</div></div>`;
+    };
+    el.innerHTML=items.map(it=>row(it[0],it[1],it[2],false)).join('')+row('= 净锁利',net,net>=0?'up':'dn',true);
+  }
+  const netel=document.getElementById('attr-net');
+  if(netel){netel.textContent='净锁利: $'+net.toFixed(2)+'（各分量之和，恒等式闭合）';}
 }
 function renderCompliance(c){
   if(!c||c.error) return;
