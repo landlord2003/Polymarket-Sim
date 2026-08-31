@@ -1,5 +1,11 @@
 # 在另一台电脑部署量化交易系统
 
+> ⚠️ **本文件是旧文档（A 股 / 加密线）**，与 Polymarket 预测市场模拟盘**无关**。
+> - 要在本机/局域网跑 **Polymarket 模拟盘**：请看 **`DEPLOY_POLYMARKET.md`**
+> - 要在 **NB 省**部署**实盘**（合作伙伴、无合规风险）：请看 **`DEPLOY_NB.md`**
+> - 只读概率探针（北京可用）：见 `probe_polymarket.py` + `USAGE_MANUAL.md`
+> 照错文档会拉起不存在的 `a_share/webui.py` 而失败，请认准上面三个文件。
+
 本文档写给需要在第二台机器（Windows / macOS / Linux 均可）跑这套系统的你。
 仓库只含代码与配置，**不含任何密钥**。钉钉/微信推送的凭证通过 `.env` 本地提供。
 

@@ -1,6 +1,12 @@
 # -*- coding: utf-8 -*-
 """Quant Trading Dashboard launcher.
 
+⚠️ 旧启动器（A 股 / 加密线）：本脚本启动的是 a_share/webui.py（旧 A 股看板），
+**与 Polymarket 预测市场模拟盘无关，且该文件已不存在**。
+要在本机/局域网跑 Polymarket 模拟盘，请用：
+    python a_share/sim_server.py
+NB 省实盘部署请看 DEPLOY_NB.md。请勿照本脚本部署模拟盘。
+
 Why this exists:
   Windows .bat files are read by CMD using the system ANSI codepage (GBK on
   Chinese Windows). Any UTF-8 Chinese / emoji in the .bat gets mangled and can

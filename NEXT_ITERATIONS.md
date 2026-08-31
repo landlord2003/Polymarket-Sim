@@ -64,9 +64,9 @@
 - 暴露 Prometheus `/metrics`（round、equity、fill_rate、block_rate、gamma_cooldown_gauge），接 Grafana/告警。
 - 合规拦截样本人工复核闭环：误杀/漏杀反馈回流词表。
 
-### P2-B 旧文档清理
+### P2-B 旧文档清理 ✅（2026-09-01 完成）
 - 现有 `DEPLOY.md` / `launch_dashboard.py` 讲的是旧 A 股 `webui.py`，已过时且与本项目无关，易混淆。
-- 建议：删除或顶部加"⚠️ 旧文档，模拟盘请看 DEPLOY_POLYMARKET.md"重定向，避免另一台机器照错文档部署。
+- **已做**：`DEPLOY.md` 顶部加重定向横幅（指向 DEPLOY_POLYMARKET.md / DEPLOY_NB.md）；`launch_dashboard.py` 顶部 docstring 注明"旧 A 股启动器、模拟盘用 sim_server.py"；看板 `c-cash` 卡片标签改「现金(含未平仓)」+ title 说明口径（避免伙伴像用户一样困惑 cash vs equity）。均未删文件，仅加警示，零破坏。
 
 ### P2-C 多策略并行（架构）
 - 现状：单实例锁限制只能跑一个 `SIM_MODE`。
@@ -78,9 +78,10 @@
 
 ---
 
-## ⛔ 明确搁置（用户早前决策）
+## ⛔ 明确搁置 / 已决策
 - **接真钱第三步**：需境外部署 + $50–100，按边界搁置，不自行推进。
-- **合规过滤**：中国部署不可关闭，词表修改需评审。
+- **合规过滤（2026-08-31 更新）**：中国部署默认 `COMPLIANCE_FILTER=1` 保持开启、词表修改需评审；但用户已明确 **NB 省由合作伙伴部署、无合规风险**，`COMPLIANCE_FILTER=0` 可整体关闭（见 `DEPLOY_NB.md`）。即"不可关闭"仅限中国部署语境，NB 部署不受此约束。
+- **Gitee 镜像**：用户 2026-09-01 明确本项目不推 Gitee，仅留 GitHub `landlord2003/Polymarket-Sim`。
 
 ---
 
@@ -95,6 +96,6 @@
 | P1-C 配置外提+自检 | 🟡 | 小 | 易运维 |
 | P1-D CLOB 冗余源 | 🟡 | 中 | 抗限流 |
 | P2-A 可观测升级 | 🟢 | 中 | 监控 |
-| P2-B 旧文档清理 | 🟢 | 小 | 防混淆 |
+| P2-B 旧文档清理 ✅ | 🟢 | 小 | 防混淆 |
 | P2-C 多策略并行 | 🟢 | 大 | 对比 |
 | P2-D 回测加厚 | 🟢 | 中 | 稳健性 |

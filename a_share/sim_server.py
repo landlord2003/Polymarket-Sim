@@ -1377,7 +1377,7 @@ function setMoney(id,val,signed){
 function setNum(id,val){const el=document.getElementById(id); if(!el)return; el.className='v b'; tween(el,val,v=>Number(v).toLocaleString('en-US',{maximumFractionDigits:0}));}
 document.getElementById('cards').innerHTML=
   ['<div class="card"><div class="k">轮次</div><div class="v b" id="c-round">0</div></div>',
-   '<div class="card"><div class="k">现金</div><div class="v b" id="c-cash">$0</div></div>',
+   '<div class="card" title="cash = 实际现金流，已含未平仓库存名义 + 建模逆向选择损耗；它不等于账户总值，看总值请认「盯市权益」"><div class="k">现金(含未平仓)</div><div class="v b" id="c-cash">$0</div></div>',
    '<div class="card"><div class="k">累计锁利</div><div class="v b" id="c-real">$0</div></div>',
    '<div class="card"><div class="k">本轮锁利</div><div class="v b" id="c-rpnl">$0</div></div>',
    '<div class="card"><div class="k">盯市权益</div><div class="v b" id="c-eq">$0</div></div>',
