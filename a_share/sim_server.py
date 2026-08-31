@@ -1110,6 +1110,14 @@ def step():
         STATE["live_count"] = len(MARKETS_LIVE) if MARKETS_LIVE else 0
         STATE["mm_count"] = len(MM_SET)
         STATE["mm_cats"] = MM_CATS
+        # 做市分散度健康指标（HHI 集中度：越低越分散；0=完全均匀）
+        _mc = MM_CATS
+        _tot = sum(_mc.values()) or 1
+        _ncat = len(_mc)
+        _max = max(_mc.values()) if _mc else 0
+        _hhi = round(sum((v / _tot) ** 2 for v in _mc.values()), 3)
+        STATE["mm_div"] = {"n_cats": _ncat, "max_share": round(_max / _tot, 3),
+                           "hhi": _hhi, "well_div": _ncat >= 4 and _hhi <= 0.30}
         STATE["last_refresh"] = time.time()
         # 最近成交（取服务器侧 TRADES 末尾，新->旧；带类别，供统计中心）
         pos = []
@@ -1286,6 +1294,7 @@ header h1{margin:0;font-size:19px}
 .card .k{color:var(--mut);font-size:12px}.card .v{font-size:21px;font-weight:700;margin-top:4px;font-variant-numeric:tabular-nums;transition:color .4s}
 .v.up{color:var(--up)}.v.dn{color:var(--dn)}.v.b{color:var(--acc)}
 .mmtag{display:inline-block;margin:3px 5px 0 0;padding:2px 8px;border-radius:11px;background:#101a28;border:1px solid var(--line);font-size:11.5px;color:var(--fg)}.mmtag b{color:var(--acc);font-variant-numeric:tabular-nums}
+.mmdiv{color:var(--mut);font-size:11px;margin-top:7px}.mmdiv.ok{color:#7fe9bd}.mmdiv.warn{color:#f0c674}
 /* 主区：面板直接作为网格项（不再包一层 .col —— 那会让窄屏出现"孤儿第三列"）
    行情榜跨两行，其余 4 个面板各占一格：三列时是 3×2、两列时是 2×3，任何宽度都填满且对称 */
 .big{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:stretch}
@@ -1522,7 +1531,7 @@ document.getElementById('cards').innerHTML=
    '<div class="card"><div class="k">敞口名义</div><div class="v b" id="c-inv">$0</div></div>',
    '<div class="card"><div class="k">真实盘口</div><div class="v b" id="c-live">0</div></div>',
    '<div class="card"><div class="k">做市市场</div><div class="v b" id="c-mm">0</div></div>',
-   '<div class="card" title="做市标的按类别分散（每类上限 MM_N_PER_CAT），避免集中在单一类别"><div class="k">做市类别分布</div><div class="v sm" id="c-mmcat" style="font-size:12px;font-weight:400;line-height:1.7;margin-top:6px">—</div></div>',
+   '<div class="card" title="做市标的按类别分散（每类上限 MM_N_PER_CAT），避免集中在单一类别"><div class="k">做市类别分布</div><div class="v sm" id="c-mmcat" style="font-size:12px;font-weight:400;line-height:1.7;margin-top:6px">—</div><div class="mmdiv" id="c-mmdiv"></div></div>',
    '<div class="card"><div class="k">真实成交率(LIVE)</div><div class="v b" id="c-livefill">—</div></div>'].join('');
 let seen=new Set(), prevRound=0;
 function flashBeat(id){const b=document.getElementById(id); if(!b)return; b.classList.add('hot'); setTimeout(()=>b.classList.remove('hot'),650);}
@@ -1656,6 +1665,12 @@ function tickState(){
     if(mcel && s.mm_cats){
       const me=Object.entries(s.mm_cats).sort((a,b)=>b[1]-a[1]);
       mcel.innerHTML=me.length?me.map(([k,v])=>`<span class="mmtag">${k} <b>${v}</b></span>`).join(''):'—';
+    }
+    const mdiv=document.getElementById('c-mmdiv');
+    if(mdiv && s.mm_div){
+      const d=s.mm_div;
+      mdiv.className='mmdiv '+(d.well_div?'ok':'warn');
+      mdiv.textContent=`覆盖 ${d.n_cats} 类 · 最大类占比 ${Math.round(d.max_share*100)}% · HHI ${d.hhi}（越低越分散）${d.well_div?' ✅健康':' ⚠️偏集中'}`;
     }
     setMoney('c-unreal',(s.unrealized||0),true);
     setMoney('c-inv',(s.inv_notional||0),false);
@@ -1871,6 +1886,7 @@ class H(BaseHTTPRequestHandler):
                     "mode": STATE.get("mode", "pairs"), "fill": STATE.get("fill", {}),
                     "live_count": STATE["live_count"], "mm_count": STATE["mm_count"],
                     "mm_cats": STATE.get("mm_cats", {}),
+                    "mm_div": STATE.get("mm_div", {}),
                     "live_fill": dict(LIVE_FILL, by_token={k: dict(v) for k, v in LIVE_FILL.get("by_token", {}).items()}),
                     "live_orders_pending": sum(1 for o in LIVE_ORDERS if not o["filled"]),
                     "params": STATE["params"], "quotes": STATE["quotes"],
