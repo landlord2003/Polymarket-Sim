@@ -250,6 +250,9 @@ FILL_BASE = float(os.environ.get("FILL_BASE", "0.30"))
 # NB 省部署（无合规风险）可设 COMPLIANCE_FILTER=0 整体关闭合规红线过滤；
 # 默认开（中国部署必须过滤政治/地缘/军事敏感市场）。
 COMPLIANCE_FILTER = os.environ.get("COMPLIANCE_FILTER", "1") == "1"
+# NB 实盘开关：LIVE_MODE=1 时策略循环的意图挂单会真实发到 CLOB（经风控闸门）；
+# 默认 0=DRY_RUN，live_dispatch 不调用，零副作用，当前北京模拟盘行为不变。
+LIVE_MODE = os.environ.get("LIVE_MODE", "0") == "1"
 FILL_GAMMA = float(os.environ.get("FILL_GAMMA", "1.0"))
 APPLY_FILL = os.environ.get("APPLY_FILL", "1") != "0"   # 0 = 关闭概率，退回 100% 成交
 # 成交率校准（P0-2）：基础成交率由市场流动性归一化得到（高流动性盘口排队消化快→成交率高）
@@ -719,6 +722,24 @@ FILL_ATTEMPTS = [0]
 FILL_HITS = [0]
 
 
+def live_dispatch(token_id, side, price, size):
+    """P3-7 / LIVE_MODE 守护：把策略意图的做市挂单真实发到 CLOB（过风控闸门）。
+    仅 LIVE_MODE=1 生效；默认 DRY_RUN 不调用，零副作用。异常被吞掉，绝不影响模拟盘主循环。"""
+    if not LIVE_MODE:
+        return None
+    try:
+        from clob_exec import ClobExec
+    except Exception as ex:
+        print("[live] clob_exec 导入失败: %s" % ex, file=sys.stderr)
+        return None
+    try:
+        ex = ClobExec()                      # 读 env（PM_BOT_PK / LIVE_MODE）
+        return ex.place_maker_order(token_id, side, price, size)
+    except Exception as e:
+        print("[live] 实盘下单异常 %s: %s" % (token_id, e), file=sys.stderr)
+        return None
+
+
 def step():
     """跑一轮：刷新真实盘口(每~90s) -> 对固定做市标的集各调一次真实 market_make。"""
     global MARKETS_LIVE, MM_SET
@@ -782,6 +803,10 @@ def step():
                 if random.random() >= _p:
                     continue          # 挂单没被打掉，本腿不成交
                 FILL_HITS[0] += 1
+            if LIVE_MODE:
+                _lv_side = "SELL" if book.inventory.get(tok, 0) else "BUY"
+                _lv_price = ya if _lv_side == "SELL" else yb
+                live_dispatch(tok, _lv_side, _lv_price, size)
             try:
                 r = book.market_make(opp, size)
             except Exception:
