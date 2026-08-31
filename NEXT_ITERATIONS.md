@@ -77,6 +77,10 @@
 - 现状：P0-4 用 train vs oos 横截面 Spearman IC 证明确实 edge 可复现，但样本外市场数/区间有限。
 - 建议：扩更多市场、更长 OOS 窗口、加成本/容量敏感性的稳定性区间报告。
 
+### P2-E 部署加固（一键启动器 + 系统守护）✅（2026-09-01 完成）
+- **已做**：新增 `start_nb.py`（跨平台启动器：venv 自动建 + `pip install -r requirements_nb.txt` + `.env` 缺失则复制 `.env.nb`→`.env` + env 校验 SHUTDOWN_TOKEN 必设/LIVE_MODE=1 必设 PM_BOT_PK + 崩溃自动重启 MAX_RETRIES=10 退避 3s）；`polymarket-sim.service`（Linux systemd，Restart=always）；`start_nb.bat`（Windows ASCII 入口）；`DEPLOY_NB.md` §5 补启动器与 systemd 安装说明。验证 `py_compile` OK、`--check` 退出 0、`.gitignore` 含 `.venv/`。
+- **价值**：伙伴在 NB 机器 `cp .env.nb .env && python start_nb.py --setup` 即一键拉起，崩溃自愈，无需手动 export 环境变量；部署链路零隐式坑。
+
 ---
 
 ## ⛔ 明确搁置 / 已决策
@@ -98,5 +102,16 @@
 | P1-D CLOB 冗余源 | 🟡 | 中 | 抗限流 |
 | P2-A 可观测升级 ✅ | 🟢 | 中 | 监控 |
 | P2-B 旧文档清理 ✅ | 🟢 | 小 | 防混淆 |
-| P2-C 多策略并行 | 🟢 | 大 | 对比 |
-| P2-D 回测加厚 | 🟢 | 中 | 稳健性 |
+| P2-C 多策略并行 | 🟢 | 大 | 对比（评估非必需，跳过） |
+| P2-D 回测加厚 | 🟢 | 中 | 稳健性（A股 edge，Polymarket 非急需，跳过） |
+| P2-E 部署加固 ✅ | 🟢 | 小 | NB 一键启动+守护 |
+
+---
+
+## 🏁 项目最终交付态（2026-09-01）
+
+- **P0/P1/P2(P2-A/P2-B/P2-E)/P3 全部落地并推 GitHub**（latest `1526281`）。
+- P2-C（多策略并行，架构大改）、P2-D（walk-forward 回测，A股 edge）经评估非必需，已明确跳过。
+- 代码 + 文档 + 实盘能力（WS/L2 签名/风控/kill switch/只读探针/校准/可观测 /metrics/一键启动/系统守护）全齐，**已完全可交付 NB 伙伴部署实操**。
+- **唯一真卡点**：NB 伙伴首跑反馈（真实成交率回填 `FILL_BASE` 才算实盘收益定论），北京无法推进 → 等项目交付 NB 后等伙伴实测。
+- **Gitee**：按用户 2026-09-01 决策，本项目不推 Gitee，仅留 GitHub `landlord2003/Polymarket-Sim`。
