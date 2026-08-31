@@ -309,14 +309,45 @@ def _persist_quotes(quotes):
         pass
 
 
+def _derive_quotes_from_snapshot(snap_markets, limit=300):
+    """把快照的 markets 数组（{token_id,question,yes_bid,yes_ask,liquidity,...}）转换为
+    统一 Quote 列表（推导 no_bid/no_ask），并做合规/有效性过滤。"""
+    out = []
+    for m in snap_markets:
+        if not isinstance(m, dict):
+            continue
+        q = m.get("question") or ""
+        if _is_blocked(q, m.get("tags")):
+            continue
+        yb = _to_num(m.get("yes_bid"))
+        ya = _to_num(m.get("yes_ask"))
+        if not yb or not ya or yb <= 0 or ya <= 0 or ya >= 1:
+            continue
+        out.append({
+            "platform": "poly",
+            "id": m.get("token_id"),
+            "token_id": m.get("token_id"),
+            "event_id": m.get("event_id"),
+            "question": q,
+            "yes_bid": round(yb, 4), "yes_ask": round(ya, 4),
+            "no_bid": round(1 - ya, 4), "no_ask": round(1 - yb, 4),
+            "end_date": m.get("end_date"),
+            "liquidity": round(_to_num(m.get("liquidity")) or 0.0, 2),
+            "ts": float(m.get("ts") or time.time()),
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _load_persisted_quotes():
     """加载 last-good 盘口（Gamma/CLOB 全失败时的离线兜底）。
 
     优先级：
-      1) quotes_cache.json 的 data（最近一次成功拉取写回）
-      2) quotes_ts/quotes_*.jsonl 最新快照的 markets 数组（本机曾成功抓过的真实盘口）
-    两者皆空才返回 []。这样即便当前环境无外网，模拟盘也能用最近一次真实快照续跑，
-    而不是卡在 quotes={}。
+      1) quotes_cache.json 的 data（最近一次成功拉取写回，最快）
+      2) quotes_ts/quotes_*.jsonl 中「有效市场数最多」的快照（本机曾成功抓过的真实盘口）
+    两者皆空才返回 []。选市场数最多的一份，让离线模拟盘尽可能活跃（如 300 个全量盘口），
+    而不是卡在 18 个市场的稀疏快照。
     """
     try:
         with open(_QUOTES_CACHE_PATH, "r", encoding="utf-8") as f:
@@ -326,57 +357,36 @@ def _load_persisted_quotes():
             return cached
     except Exception:
         pass
-    # 兜底：扫描 quotes_ts 目录，取文件名最大（最新日期）的快照
+    # 兜底：扫描 quotes_ts 全部快照，挑有效市场数最多的一份
+    best = []
     try:
         import glob
         ts_dir = os.path.join(os.path.dirname(_QUOTES_CACHE_PATH), "quotes_ts")
-        files = sorted(glob.glob(os.path.join(ts_dir, "quotes_*.jsonl")))
-        if not files:
-            return []
-        latest = files[-1]
-        snap_markets = []
-        with open(latest, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except Exception:
-                    continue
-                markets = obj.get("markets") if isinstance(obj, dict) else None
-                if isinstance(markets, list):
-                    snap_markets = markets
-                elif isinstance(obj, dict) and "token_id" in obj:
-                    snap_markets = [obj]
-        out = []
-        for m in snap_markets:
-            if not isinstance(m, dict):
+        for fp in sorted(glob.glob(os.path.join(ts_dir, "quotes_*.jsonl"))):
+            try:
+                snap_markets = []
+                with open(fp, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                        except Exception:
+                            continue
+                        markets = obj.get("markets") if isinstance(obj, dict) else None
+                        if isinstance(markets, list):
+                            snap_markets = markets
+                        elif isinstance(obj, dict) and "token_id" in obj:
+                            snap_markets = [obj]
+                out = _derive_quotes_from_snapshot(snap_markets)
+                if len(out) > len(best):
+                    best = out
+            except Exception:
                 continue
-            q = m.get("question") or ""
-            if _is_blocked(q, m.get("tags")):
-                continue
-            yb = _to_num(m.get("yes_bid"))
-            ya = _to_num(m.get("yes_ask"))
-            if not yb or not ya or yb <= 0 or ya <= 0 or ya >= 1:
-                continue
-            out.append({
-                "platform": "poly",
-                "id": m.get("token_id"),
-                "token_id": m.get("token_id"),
-                "event_id": m.get("event_id"),
-                "question": q,
-                "yes_bid": round(yb, 4), "yes_ask": round(ya, 4),
-                "no_bid": round(1 - ya, 4), "no_ask": round(1 - yb, 4),
-                "end_date": m.get("end_date"),
-                "liquidity": round(_to_num(m.get("liquidity")) or 0.0, 2),
-                "ts": float(m.get("ts") or time.time()),
-            })
-            if len(out) >= 300:
-                break
-        return out
     except Exception:
-        return []
+        pass
+    return best
 
 
 def fetch_poly_quotes_clob(limit: int = 300) -> list:
@@ -520,6 +530,7 @@ def fetch_poly_quotes(limit: int = 300, force: bool = False) -> list:
     # CLOB 也失败 -> 用持久化 last-good 缓存/快照（降级，保证模拟不中断）
     cached = _load_persisted_quotes()
     if cached:
+        _persist_quotes(cached)  # 写回 quotes_cache.json，后续刷新秒级读取不再扫 37MB
         _FETCH_QUOTES_SOURCE = "cache"
         print("[quotes] Gamma 为空，降级使用持久化 last-good 盘口(%d 个)" % len(cached))
         return cached
