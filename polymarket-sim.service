@@ -1,0 +1,25 @@
+[Unit]
+Description=Polymarket Sim Trading (NB 部署)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 部署目录：git clone 后放这里；.env 由 start_nb.py 自动从 .env.nb 复制并填值
+WorkingDirectory=/opt/polymarket-sim
+# sim_server 启动时会自动加载本目录的 .env（stdlib 解析），无需在此重复设 Environment
+ExecStart=/opt/polymarket-sim/.venv/bin/python a_share/sim_server.py
+Restart=always
+RestartSec=5
+# 优雅停止：systemctl stop 发 SIGTERM，sim_server 的 _on_term 会 save + 释放锁 + shutdown
+KillSignal=SIGTERM
+TimeoutStopSec=15
+# 建议用专用低权用户运行；实盘私钥仅在 .env(PM_BOT_PK)，勿提交
+User=polymarket
+Group=polymarket
+# 日志走 journald：journalctl -u polymarket-sim -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

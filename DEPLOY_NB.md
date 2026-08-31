@@ -119,6 +119,38 @@ python a_share/calibrate_fill.py --live --markets 30 --size 3 --window 600 --rou
 
 ---
 
+## 5. 一键启动器（start_nb.py）—— 推荐
+
+手动 export 易漏，建议用启动器：自动建 venv + 装依赖 + 检查 `.env` + 校验关键变量 + **崩溃自动拉起**。
+
+```bash
+# Linux / macOS
+python start_nb.py --setup     # 首次：建 .venv + pip install -r requirements_nb.txt
+python start_nb.py            # 之后：直接起（崩溃自动重试，最多 10 次）
+
+# 仅做环境校验（不起服务）：python start_nb.py --check
+# Windows：start_nb.bat 等价于上述（保持 ASCII，中文提示由 python 输出）
+```
+
+- `--setup` 会建 `.venv` 并装 `requirements_nb.txt`（websockets / py-clob-client / web3）。
+- 启动前校验：`SHUTDOWN_TOKEN` 是否设（未设给弱默认告警）；`LIVE_MODE=1` 时 **必须** `PM_BOT_PK`，缺失则拒绝启动。
+- `.env` 不存在时自动 `cp .env.nb .env` 并提示填值。
+- 子进程异常退出自动退避重试；`/api/shutdown` 优雅退出（rc=0）不重试；Ctrl+C 转发优雅停止。
+
+### Linux 守护进程（systemd，崩了自动拉起 + 开机自启）
+
+```bash
+sudo cp polymarket-sim.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now polymarket-sim
+journalctl -u polymarket-sim -f     # 看日志
+sudo systemctl stop polymarket-sim  # 优雅停止（SIGTERM -> sim_server 释放锁 + 退出）
+```
+
+> `polymarket-sim.service` 里 `WorkingDirectory=/opt/polymarket-sim`、用 `.venv/bin/python`；sim_server 启动会自动加载该目录 `.env`，无需在 unit 里重复设 `Environment`。请改用专用低权用户 `polymarket` 运行。
+
+---
+
 ## 6. 关键提醒
 
 - ⚠️ **不要挂 VPN**；本机直连，出口 IP 即 NB。
