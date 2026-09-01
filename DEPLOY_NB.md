@@ -4,7 +4,7 @@
 > 本文件只讲「怎么把项目拉下来、配好、先模拟跑通、再小资金实盘」。
 > 模拟盘主线文档见 `DEPLOY_POLYMARKET.md`；本文件是其实盘增强版。
 
-> **文档时效**：反映至 2026-09-01 迭代，代码 latest `3a39e01`（GitHub `landlord2003/Polymarket-Sim` master）。北京实例为 DRY_RUN 模拟盘（零真钱、行情为缓存快照非实时）；NB 开放省部署后自动转实时 `gamma` 盘口。
+> **文档时效**：反映至 2026-09-01 迭代，代码 latest `a5d8a52`（GitHub `landlord2003/Polymarket-Sim` master）。北京实例为 DRY_RUN 模拟盘（零真钱、行情为缓存快照非实时）；NB 开放省部署后自动转实时 `gamma` 盘口。
 
 ---
 
