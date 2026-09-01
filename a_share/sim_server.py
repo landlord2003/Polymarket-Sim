@@ -1459,7 +1459,7 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
 </style></head>
 <body>
 <div class="ticker"><div class="run" id="tick">正在加载真实 Polymarket 盘口…</div></div>
-<div id="conn-hint" class="conn-hint">⚠️ 看板无法连接后端（状态一直「连接中」）。请在本机用 <b>外部浏览器（Chrome / Edge）</b> 打开 <b>http://127.0.0.1:8787/</b> —— WorkBuddy 内置预览面板的沙箱浏览器访问不到宿主机的 127.0.0.1:8787，属正常现象，不影响模拟盘运行。</div>
+<div id="conn-hint" class="conn-hint">⚠️ 看板连不上后端（一直「连接中」/「正在加载真实盘口」）。原因：你正通过 <b>WorkBuddy 内置预览面板</b> 打开本页，其沙箱浏览器访问不到宿主机的 127.0.0.1:8787（这是设计隔离，<b>非服务故障</b>）。请用本机 <b>Chrome / Edge</b> 在地址栏粘贴 <b>http://127.0.0.1:8787/</b> 打开；模拟盘本身一直在正常跑（不影响交易）。也可直接双击项目里的「打开交易大屏.url」。</div>
 <header>
   <span class="beat" id="beat"></span>
   <h1 class="gtitle">Polymarket 实时模拟交易大屏</h1>
@@ -1876,7 +1876,7 @@ function tickState(){
     _failCount++;
     const st=document.getElementById('status');
     if(st && _failCount>=3){ st.className='badge err'; st.textContent='⚠ 连接失败'; }
-    if(_failCount>=3){ const h=document.getElementById('conn-hint'); if(h) h.style.display='block'; }
+    if(_failCount>=1){ const h=document.getElementById('conn-hint'); if(h) h.style.display='block'; }
   });
   fetch('/api/stats').then(r=>r.json()).then(renderStats).catch(()=>{});  fetch('/api/sensitivity').then(r=>r.json()).then(renderSensitivity).catch(()=>{});
   fetch('/api/attribution').then(r=>r.json()).then(renderAttribution).catch(()=>{});
