@@ -1632,6 +1632,14 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
     </div>
   </div>
 </div>
+
+<div class="mmodal" id="mm-modal" onclick="if(event.target===this)closeMM()">
+  <div class="mmodal-box">
+    <div class="mmodal-h">🎯 做市标的 · 全部信息 <button class="mmodal-x" onclick="closeMM()">✕</button></div>
+    <div class="mmodal-body" id="mm-modal-body"></div>
+    <div class="mmodal-f">数据来自选标快照 MM_DETAIL，每 MM_REFRESH 轮随盘口刷新一次。完整题目为 Polymarket 原始市场问题。</div>
+  </div>
+</div>
 <script>
 function fmt(n){return (n==null)?'-':Number(n).toLocaleString('en-US',{maximumFractionDigits:2})}
 function money(n){return '$'+Number(n).toLocaleString('en-US',{maximumFractionDigits:2})}
@@ -2031,13 +2039,6 @@ tickState(); tickLive();
     setTimeout(function(){btn.textContent='📥 下载成交CSV'; btn.disabled=false;}, 4000);
   };
 })();
-<div class="mmodal" id="mm-modal" onclick="if(event.target===this)closeMM()">
-  <div class="mmodal-box">
-    <div class="mmodal-h">🎯 做市标的 · 全部信息 <button class="mmodal-x" onclick="closeMM()">✕</button></div>
-    <div class="mmodal-body" id="mm-modal-body"></div>
-    <div class="mmodal-f">数据来自选标快照 MM_DETAIL，每 MM_REFRESH 轮随盘口刷新一次。完整题目为 Polymarket 原始市场问题。</div>
-  </div>
-</div>
 </script></body></html>"""
 
 
