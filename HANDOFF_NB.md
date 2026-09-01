@@ -3,6 +3,7 @@
 > 面向 **加拿大 New Brunswick 等开放省** 的部署伙伴。逐行打勾，走完即具备「模拟跑通 → 小资金实盘」条件。
 > 详细步骤见 `DEPLOY_NB.md`（实盘 SOP）与 `DEPLOY_POLYMARKET.md`（跨机部署）。本清单只做勾选锚点。
 > 代码 latest `a5d8a52`（GitHub `landlord2003/Polymarket-Sim` master，2026-09-01）。
+> 开户 / KYC / 接真钱 / 平台接入全步骤另见 [POLYMARKET_ONBOARDING.md](./POLYMARKET_ONBOARDING.md)。
 
 ---
 
