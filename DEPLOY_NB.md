@@ -4,7 +4,7 @@
 > 本文件只讲「怎么把项目拉下来、配好、先模拟跑通、再小资金实盘」。
 > 模拟盘主线文档见 `DEPLOY_POLYMARKET.md`；本文件是其实盘增强版。
 
-> **文档时效**：反映至 2026-08-31 迭代，代码 latest `b4e15e8`（GitHub `landlord2003/Polymarket-Sim` master）。北京实例为 DRY_RUN 模拟盘（零真钱、行情为缓存快照非实时）；NB 开放省部署后自动转实时 `gamma` 盘口。
+> **文档时效**：反映至 2026-08-31 迭代，代码 latest `69e7235`（GitHub `landlord2003/Polymarket-Sim` master）。北京实例为 DRY_RUN 模拟盘（零真钱、行情为缓存快照非实时）；NB 开放省部署后自动转实时 `gamma` 盘口。
 
 ---
 
@@ -163,7 +163,61 @@ sudo systemctl stop polymarket-sim  # 优雅停止（SIGTERM -> sim_server 释�
 
 ---
 
-## 6. 关键提醒
+## 6. 审计与导出（成交数据取数）
+
+> 系统**全程落盘**每一笔交易（含市场 / 类别 / 方向 / 价格 / 量 / 锁利 / 滑点 / 成交后现金 / 原始问题文本），供审计、报税、复盘。以下四路取数方式任选，NB 伙伴一眼可查。
+
+### 6.1 落盘文件（机器可读、最全）
+
+| 文件 | 内容 | 说明 |
+|------|------|------|
+| `a_share/data/trades.jsonl` | 每笔成交全字段（JSONL，一行一笔） | 主流水；满 60MB 自动轮转归档（`trades.jsonl.1`…） |
+| `a_share/data/equity.jsonl` | 每轮权益曲线（round / equity / cash / realized） | 资金曲线与回撤分析 |
+| `a_share/data/run_meta.json` | 运行元数据（启动时间 / 版本 / 配置摘要） | 起止锚点 |
+
+> 字段示例（一行）：`time, ts, round, mkt, tag, side, entry, size, pnl, slip, cash_after, q`
+> 其中 `tag` = 治本分类后的真实类目（见 §6.5）。
+
+### 6.2 看板「📥 下载成交 CSV」按钮（最省事）
+
+- 入口：看板 header 右侧「📥 下载成交 CSV」按钮。
+- 输入框：「起始轮次」（`since_round`，只导该轮及之后）、「日期 `YYYY-MM-DD`」（`date`，只导当天）。两框留空 = 全量。
+- 实现：前端拼 `?since_round=&date=` → 后端 `/api/trades_csv` 过滤并作附件下载。
+
+### 6.3 独立脚本 `sim_report.py`（命令行 / 定时任务）
+
+```bash
+# 导出最近 100 笔成交 CSV（默认）
+python a_share/sim_report.py --trades 100 --csv
+
+# 导出全部成交（N=0 = 全量）
+python a_share/sim_report.py --trades 0 --csv
+
+# 带区间 / 日期过滤
+python a_share/sim_report.py --trades 0 --csv \
+    --since-round 50 --until-round 120 --date 2026-08-31
+
+# 仅生成可读报告（HTML + MD，含「最近成交明细」逐笔表）
+python a_share/sim_report.py --trades 100
+```
+
+- 端点等价：`GET /api/trades_csv?since_round=50&until_round=120&date=2026-08-31`（与按钮同链路）。
+- CSV 表头：`time,ts,round,mkt,tag,side,entry,size,pnl,slip,cash_after,q`。
+
+### 6.4 导出报告「最近成交明细」章节
+
+- 看板顶部的「导出报告」按钮（或 `sim_report.py --trades N`）生成的 HTML/MD 报告，含「最近成交明细」逐笔表：时间 / 市场 / 类别 / 方向 / 入场价 / 量 / 锁利 / 滑点 / 现金。
+- `--trades N`：指定最近 N 笔（N=0 全量）；按钮默认含最近 100 笔明细。
+
+### 6.5 治本分类（让 `tag` 真实可信）
+
+- 类目来自 **Gamma 市场原生 `category` 字段**（`fetch_poly_quotes` 直接取，优先于关键词回退）。
+- 仅当原生字段缺失 / 空 / `other` 时，回退 `classify(question)` 关键词匹配。
+- **NB 有网生效**：NB 实时 `gamma` 盘口带回真实 `category`（politics / world / crypto / economy / sports …），分类覆盖齐全；北京 `DRY_RUN` 行情为离线缓存快照（无 `category`），会走关键词回退，本地可能只见 crypto/economy 等少量类——这是缓存边界，**非 bug**，NB 部署即正常。
+
+---
+
+## 7. 关键提醒
 
 - ⚠️ **不要挂 VPN**；本机直连，出口 IP 即 NB。
 - 🔴 **私钥只在 `.env`**，`.env` 已被 gitignore，永不提交。
@@ -183,4 +237,5 @@ sudo systemctl stop polymarket-sim  # 优雅停止（SIGTERM -> sim_server 释�
 | `ws_polymarket.py` | CLOB WebSocket 实时盘口（实盘低延迟；`pip install websockets`） |
 | `probe_polymarket.py` | 只读探针（概率 → 情报，北京也可用） |
 | `calibrate_fill.py` | **真实成交率校准**（NB 真挂单+轮询，输出回填 FILL_BASE 的 recommended_base） |
+| `sim_report.py` | **审计与导出**：读 `trades.jsonl` 生成可读报告 + 全量/区间成交 CSV（`--trades/--csv/--since-round/--until-round/--date`） |
 | `compliance.py` | 合规过滤（NB 下由 `COMPLIANCE_FILTER=0` 关闭） |
