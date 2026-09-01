@@ -35,7 +35,7 @@ from sim_rigor import RigorVirtualBook, rigor_params_from_config  # noqa: E402
 import sim_rigor as R  # noqa: E402  (P1-2 敏感性分析用 R.mm_param_sensitivity)
 import polymarket as P  # noqa: E402
 # 复用 sim_report 的已验证报告渲染函数（HTML/Markdown），避免双重实现
-from sim_report import build_html, build_md, load_trades, write_trades_csv  # noqa: E402
+from sim_report import build_html, build_md, load_trades, write_trades_csv, filter_trades  # noqa: E402
 from notify import send_markdown as ding_send_markdown  # noqa: E402  (P0-C 周期报告自动推钉钉)
 import risk_control as RC  # noqa: E402  (P3-4 金融风控层：仓位/日亏/kill switch)
 
@@ -1313,6 +1313,9 @@ header h1{margin:0;font-size:19px}
 /* 导出报告按钮 */
 .rptbtn{cursor:pointer;font-size:13px;background:#0e1c2b;border:1px solid var(--acc);color:var(--acc);
   border-radius:8px;padding:5px 13px;font-weight:600;transition:all .2s;font-family:inherit}
+.csv-in{background:#101a28;color:var(--ink);border:1px solid var(--line);border-radius:6px;
+  padding:4px 8px;font-size:12px;width:92px;font-family:inherit}
+.csv-in::placeholder{color:var(--mut)}
 .rptbtn:hover{background:var(--acc);color:#06121f}
 .rptbtn:disabled{opacity:.6;cursor:wait}
 .banner{background:linear-gradient(90deg,#0e1b14,#0c1813);border:1px solid #1d3a2a;color:#9fe3c4;padding:8px 14px;margin:12px 22px 0;border-radius:8px;font-size:12.5px}
@@ -1426,6 +1429,8 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
   <span class="sndbtn" id="snd" title="成交音效开关（默认关）">🔇 音效</span>
   <button class="rptbtn" id="export" title="生成并打开实况与统计报告">📤 导出报告</button>
   <button class="rptbtn" id="exportcsv" title="下载全量成交 CSV（审计用，含全部历史成交）" style="border-color:var(--mut);color:var(--mut)">📥 下载成交CSV</button>
+  <input id="csv-since-round" class="csv-in" type="number" min="0" placeholder="起始轮次" title="只导出该轮次之后的成交">
+  <input id="csv-date" class="csv-in" type="text" placeholder="日期YYYY-MM-DD" title="只导出该日期成交">
   <span class="badge">引擎: RigorVirtualBook.market_make</span>
 </header>
 <div class="banner"><span id="qsr">✅ 行情来自<b>真实 Polymarket 盘口</b>（urllib 直连 Gamma，已合规过滤政治/地缘/军事等敏感类）</span>。
@@ -1911,14 +1916,19 @@ tickState(); tickLive();
   };
 })();
 
-// 下载全量成交 CSV 按钮：点一下触发浏览器下载（端点返回 attachment）
+// 下载全量成交 CSV 按钮：点一下触发浏览器下载（端点返回 attachment，支持区间/日期过滤）
 (function(){
   var btn=document.getElementById('exportcsv');
   if(!btn) return;
   btn.onclick=function(){
     btn.disabled=true; btn.textContent='⏳ 生成中…';
+    var q=[];
+    var sr=document.getElementById('csv-since-round').value.trim();
+    if(sr) q.push('since_round='+encodeURIComponent(sr));
+    var dt=document.getElementById('csv-date').value.trim();
+    if(dt) q.push('date='+encodeURIComponent(dt));
     var a=document.createElement('a');
-    a.href='/api/trades_csv';
+    a.href='/api/trades_csv'+(q.length?'?'+q.join('&'):'');
     a.download='trades_export.csv';
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(function(){btn.textContent='📥 下载成交CSV'; btn.disabled=false;}, 4000);
@@ -2140,12 +2150,34 @@ class H(BaseHTTPRequestHandler):
                 self.wfile.write(body)
         elif u.path == "/api/trades_csv":
             # 全量成交 CSV 下载（审计用）：从 trades.jsonl 生成并作为附件返回
+            # 支持 query 过滤：since_round / until_round / date(YYYY-MM-DD)
             try:
-                _stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-                _csv_path = os.path.join(os.path.dirname(_HERE), "output",
-                                        "trades_export_%s.csv" % _stamp)
+                _qs = parse_qs(u.query)
+                def _qi(k):
+                    v = _qs.get(k)
+                    if v:
+                        try:
+                            return int(v[0])
+                        except Exception:
+                            return None
+                    return None
+                _since = _qi("since_round")
+                _until = _qi("until_round")
+                _date = (_qs.get("date") or [None])[0]
                 _all = load_trades(0)
-                if not write_trades_csv(_all, _csv_path):
+                _rows = filter_trades(_all, since_round=_since,
+                                      until_round=_until, date=_date)
+                _stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+                _filt_hint = ""
+                if _since is not None:
+                    _filt_hint += "_r%d+" % _since
+                if _until is not None:
+                    _filt_hint += "_r%d-" % _until
+                if _date:
+                    _filt_hint += "_%s" % _date
+                _csv_path = os.path.join(os.path.dirname(_HERE), "output",
+                                        "trades_export%s_%s.csv" % (_filt_hint, _stamp))
+                if not write_trades_csv(_rows, _csv_path):
                     raise RuntimeError("CSV 写入失败")
                 with open(_csv_path, "rb") as f:
                     data = f.read()
@@ -2153,7 +2185,8 @@ class H(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "text/csv; charset=utf-8")
                 self.send_header("Content-Length", str(len(data)))
                 self.send_header("Content-Disposition",
-                                 "attachment; filename=trades_export_%s.csv" % _stamp)
+                                 "attachment; filename=trades_export%s_%s.csv"
+                                 % (_filt_hint, _stamp))
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(data)

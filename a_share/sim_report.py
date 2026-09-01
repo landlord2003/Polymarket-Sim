@@ -112,6 +112,31 @@ def write_trades_csv(trades, path):
         return False
 
 
+def _date_of(ts):
+    """Unix 时间戳 -> 本地日期字符串 YYYY-MM-DD（解析失败返回空）。"""
+    try:
+        return datetime.datetime.fromtimestamp(float(ts or 0)).strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
+
+def filter_trades(trades, since_round=None, until_round=None, date=None):
+    """按轮次区间 / 日期过滤成交流水。某参数为 None 则不过滤该项。
+
+    - since_round: 仅保留 round >= since_round（某轮之后）
+    - until_round: 仅保留 round <= until_round
+    - date:        仅保留成交本地日期 == date(YYYY-MM-DD) 的成交
+    """
+    out = trades
+    if since_round is not None:
+        out = [t for t in out if (t.get("round") or 0) >= since_round]
+    if until_round is not None:
+        out = [t for t in out if (t.get("round") or 0) <= until_round]
+    if date:
+        out = [t for t in out if _date_of(t.get("ts")) == date]
+    return out
+
+
 # ------------------------------ HTML ------------------------------
 CSS = """
 :root{--bg:#070a0f;--panel:#111824;--ink:#dfe7f2;--mut:#7e8aa0;--line:#1c2738;
@@ -524,6 +549,12 @@ def main():
                     help="报告内逐笔成交明细条数（0=全部，从 trades.jsonl 读取）")
     ap.add_argument("--csv", action="store_true",
                     help="额外导出全量成交 CSV（trades_export_<时间戳>.csv）")
+    ap.add_argument("--since-round", type=int, default=None,
+                    help="CSV/报告仅含该轮次之后的成交")
+    ap.add_argument("--until-round", type=int, default=None,
+                    help="CSV/报告仅含该轮次之前的成交")
+    ap.add_argument("--date", default=None,
+                    help="CSV/报告仅含该日期成交(YYYY-MM-DD)")
     args = ap.parse_args()
 
     base = args.base.rstrip("/")
@@ -543,8 +574,9 @@ def main():
     html_path = os.path.join(args.out_dir, "sim_report_%s.html" % stamp)
     md_path = os.path.join(args.out_dir, "sim_report_%s.md" % stamp)
 
-    # 读取成交流水（--trades 控制报告内条数；0=全部）
-    trades = load_trades(args.trades)
+    # 读取成交流水（--trades 控制报告内条数；0=全部），并按区间/日期过滤
+    _flt = dict(since_round=args.since_round, until_round=args.until_round, date=args.date)
+    trades = filter_trades(load_trades(args.trades), **_flt)
 
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(build_html(st, s, mkts, args.top, ts, trades=trades))
@@ -556,14 +588,15 @@ def main():
     print("  HTML     %s  (%.0f KB)" % (html_path, os.path.getsize(html_path) / 1024))
     print("  Markdown %s  (%.0f KB)" % (md_path, os.path.getsize(md_path) / 1024))
     if args.trades and args.trades > 0:
-        print("  逐笔明细  最近 %d 笔（共读入 %d 笔）" % (min(args.trades, len(trades)), len(trades)))
+        print("  逐笔明细  最近 %d 笔（筛选后 %d 笔）" % (min(args.trades, len(trades)), len(trades)))
     else:
-        print("  逐笔明细  全部 %d 笔" % len(trades))
+        print("  逐笔明细  全部 %d 笔（筛选后）" % len(trades))
     if args.csv:
         csv_path = os.path.join(args.out_dir, "trades_export_%s.csv" % stamp)
-        if write_trades_csv(load_trades(0), csv_path):
-            print("  CSV      %s  (%.0f KB, 全量 %d 笔)"
-                  % (csv_path, os.path.getsize(csv_path) / 1024, len(load_trades(0))))
+        _csv_rows = filter_trades(load_trades(0), **_flt)
+        if write_trades_csv(_csv_rows, csv_path):
+            print("  CSV      %s  (%.0f KB, 筛选后 %d 笔)"
+                  % (csv_path, os.path.getsize(csv_path) / 1024, len(_csv_rows)))
     print()
     print("  运行起点 %s | 轮次 %s | 权益 %s | 累计锁利 %s | 成交率 %.1f%%"
           % (s.get("run_start"), s.get("round"), _money(st.get("equity")),
