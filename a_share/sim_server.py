@@ -1525,7 +1525,10 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
 
     <!-- 实时成交 -->
     <div class="panel">
-      <h2>🤖 实时成交（过程与结果）</h2>
+      <h2>🤖 实时成交（过程与结果）
+        <select id="trd-cat" style="margin-left:auto"><option value="all">全部类别</option><option value="crypto">crypto</option><option value="economy">economy</option><option value="finance">finance</option><option value="sports">sports</option><option value="tech">tech</option><option value="science">science</option><option value="entertainment">entertainment</option><option value="business">business</option><option value="other">other</option></select>
+        <select id="trd-side" style="margin-left:8px"><option value="all">双向</option><option value="buy">仅买 BUY</option><option value="sell">仅卖 SELL</option></select>
+      </h2>
       <div class="latest"><span class="beat" id="beat2"></span><span style="color:var(--mut)">最新成交：</span><span id="latest-txt">等待第一笔…</span></div>
       <div class="scroll"><table id="trd"><thead><tr><th>时间</th><th>市场</th><th>类别</th><th>方向</th><th>成交价</th><th>量</th><th>本笔锁利</th><th>滑点</th><th>现金</th><th class="c-det">详情</th></tr></thead><tbody></tbody></table></div>
       <div class="note">BUY=建仓（锁利 0），SELL=平仓（显示本笔锁利）；每笔在真实盘口价位成交。新成交行红/绿闪光。</div>
@@ -1859,24 +1862,9 @@ function tickState(){
       +' · 挂单成交模型'+(s.fill.on?'开':'关');}
     // 本轮/累计锁利已在顶部 KPI 卡片(c-rpnl/c-real)展示，锁利汇总面板不再重复，避免"两张累计锁利卡片"
     drawCandles(s.equity_curve);
-    const t2=document.getElementById('trd').querySelector('tbody');
-    window._trdRows = s.positions||[];
-    let fresh=0, freshTrade=null;
-    const rows=s.positions.map((t,i)=>{
-      const key=t.ts+'|'+t.mkt+'|'+t.side+'|'+t.entry;
-      const isNew=!seen.has(key); if(isNew){seen.add(key);fresh++; if(!freshTrade)freshTrade=t;}
-      if(seen.size>400)seen.clear();
-      const cls=(t.side==='buy'?'flash-up':'flash-dn');
-      return `<tr class="trdrow ${isNew?'row-new '+cls:cls}" data-i="${i}"><td>${t.ts}</td><td class="l">${t.mkt}</td><td>${t.tag||'-'}</td>`+
-        `<td class="${t.side==='buy'?'buy':'sell'}">${(t.side||'').toUpperCase()}</td>`+
-        `<td>${t.entry!=null?Number(t.entry).toFixed(4):'-'}</td><td>${t.size}</td>`+
-        `<td class="${col((t.pnl||0))}">${t.pnl!=null?'$'+fmt(t.pnl):'-'}</td>`+
-        `<td>${t.slip!=null?Number(t.slip).toFixed(4):'-'}</td><td>$${fmt(t.cash_after)}</td><td class="c-det"><span class="more">›</span></td></tr>`;
-    }).join('');
-    t2.innerHTML=rows;
-    Array.prototype.forEach.call(t2.querySelectorAll('.trdrow'),function(tr){
-      tr.onclick=function(){showTradeDetail(Number(tr.getAttribute('data-i')));};
-    });
+    window._trdAllRows=s.positions||[];
+    const _rt=renderTrades();
+    const fresh=_rt.fresh, freshTrade=_rt.freshTrade;
     if(fresh>0){
       flashBeat('beat2');
       const t=freshTrade||s.positions[0];
@@ -2038,6 +2026,32 @@ function showTradeDetail(i){
   document.getElementById('mm-modal').classList.add('show');
 }
 function closeMM(){const el=document.getElementById('mm-modal'); if(el) el.classList.remove('show');}
+function renderTrades(){
+  const t2=document.getElementById('trd');
+  if(!t2) return {fresh:0, freshTrade:null};
+  const tb=t2.querySelector('tbody');
+  const tf=window._trdFilter||{tag:'all',side:'all'};
+  const all=window._trdAllRows||[];
+  const src=all.filter(t=>(tf.tag==='all'||(t.tag||'-')===tf.tag)&&(tf.side==='all'||(t.side||'')===tf.side));
+  window._trdRows=src;
+  let fresh=0, freshTrade=null;
+  const html=src.map((t,i)=>{
+    const key=t.ts+'|'+t.mkt+'|'+t.side+'|'+t.entry;
+    const isNew=!seen.has(key); if(isNew){seen.add(key);fresh++; if(!freshTrade)freshTrade=t;}
+    if(seen.size>400)seen.clear();
+    const cls=(t.side==='buy'?'flash-up':'flash-dn');
+    return `<tr class="trdrow ${isNew?'row-new '+cls:cls}" data-i="${i}"><td>${t.ts}</td><td class="l">${t.mkt}</td><td>${t.tag||'-'}</td>`+
+      `<td class="${t.side==='buy'?'buy':'sell'}">${(t.side||'').toUpperCase()}</td>`+
+      `<td>${t.entry!=null?Number(t.entry).toFixed(4):'-'}</td><td>${t.size}</td>`+
+      `<td class="${col((t.pnl||0))}">${t.pnl!=null?'$'+fmt(t.pnl):'-'}</td>`+
+      `<td>${t.slip!=null?Number(t.slip).toFixed(4):'-'}</td><td>$${fmt(t.cash_after)}</td><td class="c-det"><span class="more">›</span></td></tr>`;
+  }).join('');
+  tb.innerHTML=html;
+  Array.prototype.forEach.call(tb.querySelectorAll('.trdrow'),function(tr){
+    tr.onclick=function(){showTradeDetail(Number(tr.getAttribute('data-i')));};
+  });
+  return {fresh:fresh, freshTrade:freshTrade};
+}
 document.addEventListener('keydown',function(e){if(e.key==='Escape') closeMM();});
 function renderCompliance(c){
   if(!c||c.error) return;
@@ -2079,6 +2093,9 @@ function renderLive(){
   });
 }
 document.getElementById('cat').onchange=renderLive;
+window._trdFilter={tag:'all',side:'all'};
+document.getElementById('trd-cat').onchange=function(){window._trdFilter.tag=this.value; renderTrades();};
+document.getElementById('trd-side').onchange=function(){window._trdFilter.side=this.value; renderTrades();};
 // 窗口尺寸变化后重画 K 线（位图尺寸跟着 CSS 尺寸走，否则会被拉伸变形）
 let _rz=null;
 window.addEventListener('resize',()=>{clearTimeout(_rz);_rz=setTimeout(()=>drawCandles(null),180);});
