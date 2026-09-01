@@ -314,7 +314,8 @@ python a_share/backfill_tags.py --map-file map.json
 - **三表点击弹详情**：做市标的 / 真实行情 / 实时成交三张表行均点开详情弹窗，含「📋 复制 Token ID / 复制题目」「🔗 在 Polymarket 搜索」按钮。
 - **实时成交表筛选**：按类别 + 方向筛选。
 - **钉钉周期报告降频为 2 小时**：`AUTO_REPORT_MIN` 默认 30→120（§6 / DEPLOY_POLYMARKET.md §6）。
-- **回归测试 13 项**：`a_share/test_export_range.py` 覆盖范围筛选与横幅渲染，`run_tests.py` 共 20 项全过。
+- **组合级风控熔断（自动 kill switch）**：新增 `risk_control.evaluate_portfolio_guard()` + `sim_server.risk_monitor_loop()` 守护线程（每 `RISK_CHECK_SEC`≈30s 巡检）。日亏 `DAILY_LOSS_LIMIT` / 回撤 `DRAWDOWN_LIMIT`(默认 0.15) / 本金下限 `BANKROLL_FLOOR_FRAC`(默认 0.70) 任一触限即**自动触发 kill switch + 钉钉告警**；看板 `#riskbadge` 转红「⚠ 风控熔断」并顶部横幅提示。已熔断幂等（不再重复触发），需人工 `/api/kill_switch?action=off` 复位。`/api/state` 增 `risk_guard`、`/api/risk` 增 `guards`、`/metrics` 增 `polymarket_sim_risk_guard`。DRY_RUN 权益远高于阈值不会误触发（护栏为 NB 实盘硬前置）。
+- **回归测试 20 项**：`a_share/test_export_range.py` + 新增 `a_share/test_risk_guard.py`(7 项覆盖三类熔断 + 幂等 + 复位) 全过，`run_tests.py` 共 20 项。
 
 ## 9. 交接清单（NB 伙伴勾选）
 

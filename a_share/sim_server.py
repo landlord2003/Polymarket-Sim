@@ -158,6 +158,7 @@ _load_dotenv()
 
 # ============ P2-3 报告自动化 ============
 AUTO_REPORT_MIN = int(os.environ.get("AUTO_REPORT_MIN", "120") or 120)  # 0=关闭自动报告；默认120=每2小时推一次钉钉周期报告
+RISK_CHECK_SEC = int(os.environ.get("RISK_CHECK_SEC", "30") or 30)  # 组合级风控熔断巡检间隔(秒)
 
 
 def _scope_note(tf, n_filt, n_all):
@@ -296,6 +297,24 @@ def auto_report_loop():
             _push_report_ding(r)
         except Exception as ex:
             print("[auto_report] 周期报告失败：%s" % ex)
+
+
+def risk_monitor_loop():
+    """组合级风控熔断巡检：每 RISK_CHECK_SEC 秒评估日亏/回撤/本金下限，触限自动 kill switch。"""
+    while True:
+        with LOCK:
+            if not STATE.get("running", True):
+                break
+        try:
+            with LOCK:
+                s = compute_stats()
+                eq = STATE["equity"]
+                cash = STATE["cash"]
+                peak = s.get("peak") or eq
+            RC.evaluate_portfolio_guard(eq, peak, cash, INITIAL_CAPITAL)
+        except Exception as ex:
+            print("[risk_monitor] 评估失败：%s" % ex)
+        time.sleep(RISK_CHECK_SEC)
 
 
 def save_persistence():
@@ -981,6 +1000,8 @@ def prometheus_metrics():
     _g("polymarket_sim_blocked_live", _blocked, "实时盘口中被合规红线拦截的市场数")
     _ks = RC.status().get("kill_switch", {}) or {}
     _g("polymarket_sim_kill_switch", 1 if _ks.get("on") else 0, "风控 kill switch 状态(1=触发)")
+    _gv = RC.guard_view()
+    _g("polymarket_sim_risk_guard", 1 if _gv.get("guarded") else 0, "组合级风控熔断状态(1=日亏/回撤/本金下限触限停新单)")
     _qs = P.quotes_source() if hasattr(P, "quotes_source") else "gamma"
     _g("polymarket_sim_quotes_source_gamma", 1 if _qs == "gamma" else 0, "盘口主源=Gamma(1/0)")
     _g("polymarket_sim_quotes_source_clob", 1 if _qs == "clob" else 0, "盘口主源=CLOB(1/0)")
@@ -1345,6 +1366,9 @@ header h1{margin:0;font-size:19px}
 .badge{font-size:12px;padding:3px 10px;border-radius:20px;background:#101a28;color:var(--mut);border:1px solid var(--line);transition:all .3s}
 .conn-hint{display:none;margin:8px 22px 0;padding:10px 14px;border-radius:8px;background:#2a1414;color:#ffb4b4;border:1px solid #5a2a2a;font-size:13px;line-height:1.6}
 .conn-hint b{color:#ffd2d2}
+.risk-banner{display:none;margin:8px 22px 0;padding:10px 14px;border-radius:8px;background:#2a0e12;color:#ff9aa8;border:1px solid #6a222e;font-size:13px;line-height:1.6}
+.risk-banner b{color:#ffd2d2}
+.badge.risk{background:#2a0e12;color:#ff9aa8;border-color:#6a222e}
 .badge.live{background:#0e2419;color:#7fe9bd;border-color:#1c503a}
 .badge.warn{background:#2a2310;color:#f0c674;border-color:#5a4a1c}
 .badge.err{background:#2a1014;color:#ff8a9a;border-color:#5a1c24}
@@ -1502,6 +1526,7 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
 <body>
 <div class="ticker"><div class="run" id="tick">正在加载真实 Polymarket 盘口…</div></div>
 <div id="conn-hint" class="conn-hint">⚠️ 看板连不上后端（一直「连接中」/「正在加载真实盘口」）。原因：你正通过 <b>WorkBuddy 内置预览面板</b> 打开本页，其沙箱浏览器访问不到宿主机的 127.0.0.1:8787（这是设计隔离，<b>非服务故障</b>）。请用本机 <b>Chrome / Edge</b> 在地址栏粘贴 <b>http://127.0.0.1:8787/</b> 打开；模拟盘本身一直在正常跑（不影响交易）。也可直接双击项目里的「打开交易大屏.url」。</div>
+<div id="risk-banner" class="risk-banner" style="display:none"></div>
 <header>
   <span class="beat" id="beat"></span>
   <h1 class="gtitle">Polymarket 实时模拟交易大屏</h1>
@@ -1512,6 +1537,7 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
   <span class="badge mode" id="modebadge">—</span>
   <span class="badge" id="qsrc">行情源 —</span>
   <span class="badge" id="compbadge">合规 —</span>
+  <span class="badge" id="riskbadge">风控 —</span>
   <span class="sndbtn" id="snd" title="成交音效开关（默认关）">🔇 音效</span>
   <button class="rptbtn" id="export" title="生成并打开实况与统计报告">📤 导出报告</button>
   <button class="rptbtn" id="exportcsv" title="下载成交 CSV（审计用，可按范围筛选）" style="border-color:var(--mut);color:var(--mut)">📥 下载成交CSV</button>
@@ -1858,6 +1884,17 @@ function tickState(){
     } else {
       if(qb){qb.className='badge err'; qb.textContent='行情源 · 获取失败';}
       if(qsr){qsr.innerHTML='❌ 行情获取失败（请检查网络/代理）';}
+    }
+    // 组合级风控红灯：guard 触限 → 红灯 + 横幅
+    const rg=s.risk_guard||{};
+    const rb=document.getElementById('riskbadge');
+    const rbn=document.getElementById('risk-banner');
+    if(rg.guarded){
+      if(rb){rb.className='badge risk'; rb.textContent='⚠ 风控熔断'; rb.title='组合级风控已熔断：'+(rg.reason||'')+'。已停止一切新单，须 /api/kill_switch?action=off 复位。';}
+      if(rbn){rbn.style.display='block'; rbn.innerHTML='🔴 <b>组合级风控已熔断</b>（'+(rg.reason||'未知')+'）：日亏≤-'+rg.daily_loss_limit+' / 回撤≥'+rg.drawdown_limit_pct+'% / 本金<'+rg.bankroll_floor_pct+'%。已停止一切新单，请到 /api/risk 查看并手动复位 kill switch。';}
+    } else {
+      if(rb){rb.className='badge live'; rb.textContent='风控 正常'; rb.title='日亏限 '+rg.daily_loss_limit+' / 回撤限 '+rg.drawdown_limit_pct+'% / 本金下限 '+rg.bankroll_floor_pct+'% ；当前回撤 '+rg.dd_pct+'% ，本金 '+rg.bankroll_pct+'%';}
+      if(rbn){rbn.style.display='none';}
     }
     const st=document.getElementById('status');
     if(s.round!==prevRound){prevRound=s.round; st.textContent='● 撮合中 · round '+s.round; flashBeat('beat');}
@@ -2332,6 +2369,7 @@ class H(BaseHTTPRequestHandler):
                     "positions": STATE["positions"], "equity_curve": STATE["equity_curve"],
                     "quotes_source": (getattr(P, "quotes_source", None)() if hasattr(P, "quotes_source") else "gamma"),
                     "compliance_filter": COMPLIANCE_FILTER,
+                    "risk_guard": RC.guard_view(),
                     "live_mode": LIVE_MODE,
                     "persistence": {
                         "run_start": RUN_META.get("run_start"),
@@ -2725,6 +2763,7 @@ def main():
     t = threading.Thread(target=loop, daemon=True)
     t.start()
     threading.Thread(target=auto_report_loop, daemon=True).start()  # P2-3 报告自动化
+    threading.Thread(target=risk_monitor_loop, daemon=True).start()  # 组合级风控熔断巡检
     # P3-7+ 真实成交异步轮询（仅 LIVE_MODE=1 启动；DRY_RUN 不启动，北京模拟盘零额外开销）
     if LIVE_MODE:
         global _LIVE_POLL_STOP

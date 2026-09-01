@@ -73,7 +73,8 @@
 ## ☐ 阶段 8 · 风控红线（务必知悉）
 
 - [ ] 金融风控自动拒单：`MAX_POS_PER_MARKET` / `MAX_TOTAL_POS` / `DAILY_LOSS_LIMIT`（见 `risk_control.py`）
-- [ ] 日亏 / 回撤 / bankroll floor 触限即停一切新单（北京迭代计划增强，当前已有日亏硬停）
+- [x] 组合级自动熔断（2026-09-01 已实现）：`risk_control.evaluate_portfolio_guard()` 由 `sim_server.risk_monitor_loop()` 每 `RISK_CHECK_SEC`(≈30s) 巡检——**日亏 `DAILY_LOSS_LIMIT` / 回撤 `DRAWDOWN_LIMIT`(0.15) / 本金下限 `BANKROLL_FLOOR_FRAC`(0.70) 任一触限即自动 kill switch + 钉钉告警**；看板 `#riskbadge` 转红 + 顶部横幅。已熔断幂等，需 `/api/kill_switch?action=off` 人工复位（详见 DEPLOY_NB.md §8）。
+- [ ] 看板红灯自检：实盘前人为制造一次触限（或读 `/api/risk` 的 `guards` 字段）确认 `#riskbadge` 显示「⚠ 风控熔断」、钉钉收到告警
 - [ ] kill switch：`/api/kill_switch?token=<SHUTDOWN_TOKEN>` 立即停新单并钉钉告警；`?action=off` 解除
 
 ## ☐ 阶段 9 · 合规与税务（属人义务不豁免）
