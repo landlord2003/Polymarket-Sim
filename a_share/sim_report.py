@@ -265,7 +265,7 @@ footer{margin-top:34px;padding-top:14px;border-top:1px solid var(--line);color:v
 """
 
 
-def build_html(st, s, mkts, top_n, ts, trades=None, tag_trades=None):
+def build_html(st, s, mkts, top_n, ts, trades=None, tag_trades=None, scope_note=""):
     f = st.get("fill") or {}
     mode_txt = "真实做市（库存管理）" if st.get("mode") == "inv" else "同轮双边建平（乐观对照）"
     fills_on = f.get("on", False)
@@ -348,6 +348,9 @@ def build_html(st, s, mkts, top_n, ts, trades=None, tag_trades=None):
     else:
         tag_summary_html = ("<h2>按类别锁利汇总（成交流水 trades.jsonl）</h2>"
             "<div class='note'>（暂无成交流水，先跑出成交后才有数据）</div>")
+    if scope_note:
+        tag_summary_html = ('<div class="warn" style="margin:14px 0">⚠ 导出范围：%s</div>'
+                            % scope_note) + tag_summary_html
     for t in trades:
         side = (t.get("side") or "").upper()
         sc = "up" if side == "BUY" else "dn"
@@ -510,7 +513,7 @@ FILL_BASE 是拍的参数。真实的成交率<b>只能用真钱小额挂单测�
 
 
 # ------------------------------ Markdown ------------------------------
-def build_md(st, s, mkts, top_n, ts, trades=None, tag_trades=None):
+def build_md(st, s, mkts, top_n, ts, trades=None, tag_trades=None, scope_note=""):
     f = st.get("fill") or {}
     fills_on = f.get("on", False)
     fill_rate = f.get("rate", 0) if fills_on else 100.0
@@ -633,6 +636,9 @@ def build_md(st, s, mkts, top_n, ts, trades=None, tag_trades=None):
     else:
         A("（暂无成交流水，先跑出成交后才有数据）")
     A("")
+    if scope_note:
+        A("> ⚠ **导出范围**：%s" % scope_note)
+        A("")
     A("## 最近成交明细（最近 %d 笔）" % n_trades)
     A("")
     if trades:

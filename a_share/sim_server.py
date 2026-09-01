@@ -160,8 +160,35 @@ _load_dotenv()
 AUTO_REPORT_MIN = int(os.environ.get("AUTO_REPORT_MIN", "30") or 30)  # 0=关闭自动报告
 
 
-def build_and_write_report(top_n=15, stamp=None):
-    """复用 sim_report 已验证渲染，生成 HTML/MD 报告并落盘（供 /api/export_report 与自动报告线程共用）。"""
+def _scope_note(tf, n_filt, n_all):
+    """把 trades_filter 渲染成可读的范围说明（用于报告顶部横幅）。"""
+    if not tf:
+        return ""
+    parts = []
+    if tf.get("since_round") is not None:
+        parts.append("轮次≥%d" % tf["since_round"])
+    if tf.get("until_round") is not None:
+        parts.append("轮次≤%d" % tf["until_round"])
+    if tf.get("date"):
+        parts.append("日期=%s" % tf["date"])
+    if tf.get("since_ts") is not None:
+        parts.append("起=%s" % _dt.datetime.fromtimestamp(tf["since_ts"]).strftime("%Y-%m-%d %H:%M"))
+    if tf.get("until_ts") is not None:
+        parts.append("止=%s" % _dt.datetime.fromtimestamp(tf["until_ts"]).strftime("%Y-%m-%d %H:%M"))
+    if tf.get("limit"):
+        parts.append("最近%d笔" % tf["limit"])
+    scope = "、".join(parts) if parts else "全部历史"
+    return ("本报告「最近成交明细」与「按类别锁利汇总」仅含筛选范围：<b>%s</b>"
+            "（命中 %d / 全量 %d 笔）。顶部核心指标（累计锁利/盯市权益等）仍为全段运行口径，不受范围影响。"
+            % (scope, n_filt, n_all))
+
+
+def build_and_write_report(top_n=15, stamp=None, trades_filter=None):
+    """复用 sim_report 已验证渲染，生成 HTML/MD 报告并落盘（供 /api/export_report 与自动报告线程共用）。
+
+    trades_filter: 可选 dict（since_round/until_round/date/since_ts/until_ts/limit），
+    用于把「最近成交明细」与「按类别锁利汇总」限定到某一时间/笔数范围；为 None 则全量历史。
+    """
     with LOCK:
         st = {
             "round": STATE["round"], "cash": STATE["cash"],
@@ -200,16 +227,23 @@ def build_and_write_report(top_n=15, stamp=None):
     md_name = "sim_report_%s.md" % stamp
     html_path = os.path.join(out_dir, html_name)
     md_path = os.path.join(out_dir, md_name)
-    # 逐笔成交明细：优先从 trades.jsonl 读最近 100 笔（全量历史），回退 STATE.positions
-    _trades = load_trades(100)
-    if not _trades:
-        _trades = STATE.get("positions") or []
-    # 类别锁利汇总用全量历史（与报告明细样本解耦），让「按类别锁利汇总」覆盖整段运行
-    _all = load_trades(0) or _trades
+    # 全量历史成交流水（单一真实源 trades.jsonl）
+    _all = load_trades(0)
+    # 按导出范围过滤（无 trades_filter = 全量）
+    _scope = ""
+    if trades_filter:
+        _ft = filter_trades(_all, **trades_filter)
+        _scope = _scope_note(trades_filter, len(_ft), len(_all))
+    else:
+        _ft = _all
+    # 逐笔成交明细：过滤后最近 100 笔（或全量，回退 STATE.positions）
+    _trades = _ft[-100:] if _ft else (STATE.get("positions") or [])
+    # 类别锁利汇总用同一过滤窗口（与明细一致），让范围选择同时作用于两节
+    _tag_src = _ft if _ft else _trades
     with open(html_path, "w", encoding="utf-8") as f:
-        f.write(build_html(st, s, mkts, top_n, ts, trades=_trades, tag_trades=_all))
+        f.write(build_html(st, s, mkts, top_n, ts, trades=_trades, tag_trades=_tag_src, scope_note=_scope))
     with open(md_path, "w", encoding="utf-8") as f:
-        f.write(build_md(st, s, mkts, top_n, ts, trades=_trades, tag_trades=_all))
+        f.write(build_md(st, s, mkts, top_n, ts, trades=_trades, tag_trades=_tag_src, scope_note=_scope))
     return {"html": html_path, "md": md_path, "html_name": html_name,
             "md_name": md_name, "stamp": stamp, "ts": ts,
             "equity": st["equity"], "realized": st["realized"], "round": st["round"]}
@@ -1481,7 +1515,7 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
   <span class="sndbtn" id="snd" title="成交音效开关（默认关）">🔇 音效</span>
   <button class="rptbtn" id="export" title="生成并打开实况与统计报告">📤 导出报告</button>
   <button class="rptbtn" id="exportcsv" title="下载成交 CSV（审计用，可按范围筛选）" style="border-color:var(--mut);color:var(--mut)">📥 下载成交CSV</button>
-  <select id="csv-mode" class="csv-in" title="选择导出范围">
+  <select id="csv-mode" class="csv-in" title="导出范围（「导出报告」与「下载成交CSV」共用同一选择）">
     <option value="all">全部</option>
     <option value="last">最近 N 笔</option>
     <option value="time">按时间区间</option>
@@ -2142,13 +2176,37 @@ window.addEventListener('resize',()=>{clearTimeout(_rz);_rz=setTimeout(()=>drawC
 setInterval(tickState,2000); setInterval(tickLive,15000);
 tickState(); tickLive();
 
-// 导出报告按钮：点一下生成并打开
+// 范围选择器（与 CSV 下载共享）：把「导出范围」下拉 + 对应输入框拼成 query 数组
+function buildRangeQuery(){
+  var q=[]; var m=document.getElementById('csv-mode')?document.getElementById('csv-mode').value:'all';
+  if(m==='last'){
+    var lim=document.getElementById('csv-limit').value.trim();
+    if(lim) q.push('limit='+encodeURIComponent(lim));
+  }else if(m==='time'){
+    var st=document.getElementById('csv-since-time').value.trim();
+    var et=document.getElementById('csv-until-time').value.trim();
+    if(st) q.push('since_time='+encodeURIComponent(st));
+    if(et) q.push('until_time='+encodeURIComponent(et));
+  }else if(m==='date'){
+    var dt=document.getElementById('csv-date').value.trim();
+    if(dt) q.push('date='+encodeURIComponent(dt));
+  }else if(m==='round'){
+    var sr=document.getElementById('csv-since-round').value.trim();
+    var ur=document.getElementById('csv-until-round').value.trim();
+    if(sr) q.push('since_round='+encodeURIComponent(sr));
+    if(ur) q.push('until_round='+encodeURIComponent(ur));
+  }
+  return q;
+}
+
+// 导出报告按钮：点一下生成并打开（范围与 CSV 下载共享同一下拉）
 (function(){
   var btn=document.getElementById('export');
   if(!btn) return;
   btn.onclick=function(){
     btn.disabled=true; btn.textContent='⏳ 生成中…';
-    fetch('/api/export_report').then(function(r){return r.json();}).then(function(d){
+    var q=buildRangeQuery();
+    fetch('/api/export_report'+(q.length?'?'+q.join('&'):'')).then(function(r){return r.json();}).then(function(d){
       if(d&&d.ok){
         var w=window.open(d.url,'_blank');
         if(!w){ // 弹窗被拦截时退化为跳转
@@ -2183,24 +2241,7 @@ tickState(); tickLive();
   if(mode){ mode.onchange=syncCtl; syncCtl(); }
   btn.onclick=function(){
     btn.disabled=true; btn.textContent='⏳ 生成中…';
-    var q=[]; var m=mode?mode.value:'all';
-    if(m==='last'){
-      var lim=document.getElementById('csv-limit').value.trim();
-      if(lim) q.push('limit='+encodeURIComponent(lim));
-    }else if(m==='time'){
-      var st=document.getElementById('csv-since-time').value.trim();
-      var et=document.getElementById('csv-until-time').value.trim();
-      if(st) q.push('since_time='+encodeURIComponent(st));
-      if(et) q.push('until_time='+encodeURIComponent(et));
-    }else if(m==='date'){
-      var dt=document.getElementById('csv-date').value.trim();
-      if(dt) q.push('date='+encodeURIComponent(dt));
-    }else if(m==='round'){
-      var sr=document.getElementById('csv-since-round').value.trim();
-      var ur=document.getElementById('csv-until-round').value.trim();
-      if(sr) q.push('since_round='+encodeURIComponent(sr));
-      if(ur) q.push('until_round='+encodeURIComponent(ur));
-    }
+    var q=buildRangeQuery();
     var a=document.createElement('a');
     a.href='/api/trades_csv'+(q.length?'?'+q.join('&'):'');
     a.download='trades_export.csv';
@@ -2401,8 +2442,30 @@ class H(BaseHTTPRequestHandler):
             self.wfile.write(body)
         elif u.path == "/api/export_report":
             # P2-3 复用 build_and_write_report：生成 HTML/MD 报告并打开（与自动报告线程共用）
+            # 支持与 /api/trades_csv 同款的 range 过滤（导出范围下拉共享）
             try:
-                r = build_and_write_report(15)
+                _qs = parse_qs(u.query)
+                def _qi(k):
+                    v = _qs.get(k)
+                    if v:
+                        try:
+                            return int(v[0])
+                        except Exception:
+                            return None
+                    return None
+                _tf = {}
+                _sr = _qi("since_round"); _ur = _qi("until_round")
+                _dtf = (_qs.get("date") or [None])[0]
+                _st = parse_time_to_ts((_qs.get("since_time") or [None])[0])
+                _et = parse_time_to_ts((_qs.get("until_time") or [None])[0])
+                _lim = _qi("limit")
+                if _sr is not None: _tf["since_round"] = _sr
+                if _ur is not None: _tf["until_round"] = _ur
+                if _dtf: _tf["date"] = _dtf
+                if _st is not None: _tf["since_ts"] = _st
+                if _et is not None: _tf["until_ts"] = _et
+                if _lim and _lim > 0: _tf["limit"] = _lim
+                r = build_and_write_report(15, trades_filter=_tf or None)
                 payload = {
                     "ok": True, "stamp": r["stamp"], "ts": r["ts"],
                     "html": r["html_name"], "md": r["md_name"],
