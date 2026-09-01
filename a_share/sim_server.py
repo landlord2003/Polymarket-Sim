@@ -1372,6 +1372,11 @@ header h1{margin:0;font-size:19px}
 .mk .k{color:var(--mut);width:84px;flex:none}
 .mk .v{flex:1;text-align:right;word-break:break-word}
 .mk.col{flex-direction:column;gap:5px}.mk.col .v{text-align:left;line-height:1.55}
+.mk-actions{display:flex;gap:8px;margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
+.mk-btn{background:#101a28;border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:6px 12px;font-size:12.5px;cursor:pointer}
+.mk-btn:hover{border-color:var(--acc);color:var(--ink)}
+.toast{position:fixed;left:50%;bottom:40px;transform:translateX(-50%) translateY(20px);background:#101a28;border:1px solid var(--acc);color:#cdd8e8;padding:8px 16px;border-radius:10px;font-size:13px;opacity:0;pointer-events:none;transition:.2s;z-index:80}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 .mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;word-break:break-all}
 /* 主区：面板直接作为网格项（不再包一层 .col —— 那会让窄屏出现"孤儿第三列"）
    行情榜跨两行，其余 4 个面板各占一格：三列时是 3×2、两列时是 2×3，任何宽度都填满且对称 */
@@ -1922,6 +1927,28 @@ function renderAttribution(a){
   if(netel){netel.textContent='净锁利: $'+net.toFixed(2)+'（各分量之和，恒等式闭合）';}
 }
 function escapeHtml(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function copyText(txt){
+  txt=String(txt==null?'':txt);
+  function ok(){toast('已复制到剪贴板');}
+  function fail(){toast('复制失败，请手动选择');}
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(txt).then(ok,function(){fallbackCopy(txt,ok,fail);});
+  } else { fallbackCopy(txt,ok,fail); }
+}
+function fallbackCopy(txt,ok,fail){
+  try{
+    var ta=document.createElement('textarea'); ta.value=txt; ta.style.position='fixed'; ta.style.opacity='0';
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    var done=document.execCommand('copy'); document.body.removeChild(ta);
+    if(done) ok(); else fail();
+  }catch(e){ fail(); }
+}
+function toast(msg){
+  var t=document.getElementById('toast');
+  if(!t){ t=document.createElement('div'); t.id='toast'; t.className='toast'; document.body.appendChild(t); }
+  t.textContent=msg; t.classList.add('show');
+  clearTimeout(window._toastT); window._toastT=setTimeout(function(){t.classList.remove('show');},1600);
+}
 function renderMMMarkets(list){
   window._mmList = list||[];
   const tb=document.getElementById('mm-tbl'); if(!tb) return;
@@ -1954,6 +1981,7 @@ function showMMDetail(i){
   ];
   let html=rows.map(r=>`<div class="mk"><span class="k">${r[0]}</span><span class="v">${r[1]}</span></div>`).join('');
   html+=`<div class="mk col"><span class="k">完整题目</span><span class="v">${escapeHtml(m.question||'')}</span></div>`;
+  html+=`<div class="mk-actions"><button class="mk-btn" onclick="copyText(${JSON.stringify(m.token_id||'')})">📋 复制 Token ID</button><button class="mk-btn" onclick="copyText(${JSON.stringify(m.question||'')})">📋 复制题目</button></div>`;
   document.getElementById('mm-modal-body').innerHTML=html;
   document.getElementById('mm-modal-title').innerHTML='🎯 做市标的 · 全部信息';
   document.getElementById('mm-modal-f').textContent='数据来自选标快照 MM_DETAIL，每 MM_REFRESH 轮随盘口刷新一次。完整题目为 Polymarket 原始市场问题。';
@@ -1975,6 +2003,7 @@ function showLiveDetail(i){
   ];
   let html=rows.map(r=>`<div class="mk"><span class="k">${r[0]}</span><span class="v">${r[1]}</span></div>`).join('');
   html+=`<div class="mk col"><span class="k">完整题目</span><span class="v">${escapeHtml(m.q_full||m.question||'')}</span></div>`;
+  html+=`<div class="mk-actions"><button class="mk-btn" onclick="copyText(${JSON.stringify(m.token_id||'')})">📋 复制 Token ID</button><button class="mk-btn" onclick="copyText(${JSON.stringify(m.q_full||m.question||'')})">📋 复制题目</button></div>`;
   document.getElementById('mm-modal-title').innerHTML='📡 真实行情 · 全部信息';
   document.getElementById('mm-modal-f').textContent='数据来自 Gamma 真实盘口快照，每 15s 随 /api/markets 刷新。完整题目为 Polymarket 原始市场问题。';
   document.getElementById('mm-modal-body').innerHTML=html;
