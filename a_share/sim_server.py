@@ -35,7 +35,7 @@ from sim_rigor import RigorVirtualBook, rigor_params_from_config  # noqa: E402
 import sim_rigor as R  # noqa: E402  (P1-2 敏感性分析用 R.mm_param_sensitivity)
 import polymarket as P  # noqa: E402
 # 复用 sim_report 的已验证报告渲染函数（HTML/Markdown），避免双重实现
-from sim_report import build_html, build_md, load_trades, write_trades_csv, filter_trades  # noqa: E402
+from sim_report import build_html, build_md, load_trades, write_trades_csv, filter_trades, parse_time_to_ts  # noqa: E402
 from notify import send_markdown as ding_send_markdown  # noqa: E402  (P0-C 周期报告自动推钉钉)
 import risk_control as RC  # noqa: E402  (P3-4 金融风控层：仓位/日亏/kill switch)
 
@@ -1322,6 +1322,7 @@ header h1{margin:0;font-size:19px}
 .csv-in{background:#101a28;color:var(--ink);border:1px solid var(--line);border-radius:6px;
   padding:4px 8px;font-size:12px;width:92px;font-family:inherit}
 .csv-in::placeholder{color:var(--mut)}
+.csv-ctl{display:inline-flex;gap:4px;align-items:center}
 .rptbtn:hover{background:var(--acc);color:#06121f}
 .rptbtn:disabled{opacity:.6;cursor:wait}
 .banner{background:linear-gradient(90deg,#0e1b14,#0c1813);border:1px solid #1d3a2a;color:#9fe3c4;padding:8px 14px;margin:12px 22px 0;border-radius:8px;font-size:12.5px}
@@ -1478,9 +1479,19 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
   <span class="badge" id="compbadge">合规 —</span>
   <span class="sndbtn" id="snd" title="成交音效开关（默认关）">🔇 音效</span>
   <button class="rptbtn" id="export" title="生成并打开实况与统计报告">📤 导出报告</button>
-  <button class="rptbtn" id="exportcsv" title="下载全量成交 CSV（审计用，含全部历史成交）" style="border-color:var(--mut);color:var(--mut)">📥 下载成交CSV</button>
-  <input id="csv-since-round" class="csv-in" type="number" min="0" placeholder="起始轮次" title="只导出该轮次之后的成交">
-  <input id="csv-date" class="csv-in" type="text" placeholder="日期YYYY-MM-DD" title="只导出该日期成交">
+  <button class="rptbtn" id="exportcsv" title="下载成交 CSV（审计用，可按范围筛选）" style="border-color:var(--mut);color:var(--mut)">📥 下载成交CSV</button>
+  <select id="csv-mode" class="csv-in" title="选择导出范围">
+    <option value="all">全部</option>
+    <option value="last">最近 N 笔</option>
+    <option value="time">按时间区间</option>
+    <option value="date">按日期</option>
+    <option value="round">按轮次</option>
+  </select>
+  <span id="csv-ctl-all" class="csv-ctl"></span>
+  <span id="csv-ctl-last" class="csv-ctl" style="display:none"><input id="csv-limit" class="csv-in" type="number" min="1" placeholder="笔数 N"></span>
+  <span id="csv-ctl-time" class="csv-ctl" style="display:none"><input id="csv-since-time" class="csv-in" type="datetime-local" title="起始时间（本地）"> <input id="csv-until-time" class="csv-in" type="datetime-local" title="结束时间（本地）"></span>
+  <span id="csv-ctl-date" class="csv-ctl" style="display:none"><input id="csv-date" class="csv-in" type="date" title="只导出该日期成交"></span>
+  <span id="csv-ctl-round" class="csv-ctl" style="display:none"><input id="csv-since-round" class="csv-in" type="number" min="0" placeholder="起始轮次"> <input id="csv-until-round" class="csv-in" type="number" min="0" placeholder="结束轮次"></span>
   <span class="badge">引擎: RigorVirtualBook.market_make</span>
 </header>
 <div class="banner"><span id="qsr">✅ 行情来自<b>真实 Polymarket 盘口</b>（urllib 直连 Gamma，已合规过滤政治/地缘/军事等敏感类）</span>。
@@ -2128,17 +2139,40 @@ tickState(); tickLive();
   };
 })();
 
-// 下载全量成交 CSV 按钮：点一下触发浏览器下载（端点返回 attachment，支持区间/日期过滤）
+// 下载成交 CSV 按钮：按「范围模式」选择全部/最近N笔/时间区间/日期/轮次，点一下触发浏览器下载
 (function(){
   var btn=document.getElementById('exportcsv');
   if(!btn) return;
+  var mode=document.getElementById('csv-mode');
+  var ctls={
+    all:document.getElementById('csv-ctl-all'),
+    last:document.getElementById('csv-ctl-last'),
+    time:document.getElementById('csv-ctl-time'),
+    date:document.getElementById('csv-ctl-date'),
+    round:document.getElementById('csv-ctl-round')
+  };
+  function syncCtl(){ for(var k in ctls){ if(ctls[k]) ctls[k].style.display=(k===mode.value)?'':'none'; } }
+  if(mode){ mode.onchange=syncCtl; syncCtl(); }
   btn.onclick=function(){
     btn.disabled=true; btn.textContent='⏳ 生成中…';
-    var q=[];
-    var sr=document.getElementById('csv-since-round').value.trim();
-    if(sr) q.push('since_round='+encodeURIComponent(sr));
-    var dt=document.getElementById('csv-date').value.trim();
-    if(dt) q.push('date='+encodeURIComponent(dt));
+    var q=[]; var m=mode?mode.value:'all';
+    if(m==='last'){
+      var lim=document.getElementById('csv-limit').value.trim();
+      if(lim) q.push('limit='+encodeURIComponent(lim));
+    }else if(m==='time'){
+      var st=document.getElementById('csv-since-time').value.trim();
+      var et=document.getElementById('csv-until-time').value.trim();
+      if(st) q.push('since_time='+encodeURIComponent(st));
+      if(et) q.push('until_time='+encodeURIComponent(et));
+    }else if(m==='date'){
+      var dt=document.getElementById('csv-date').value.trim();
+      if(dt) q.push('date='+encodeURIComponent(dt));
+    }else if(m==='round'){
+      var sr=document.getElementById('csv-since-round').value.trim();
+      var ur=document.getElementById('csv-until-round').value.trim();
+      if(sr) q.push('since_round='+encodeURIComponent(sr));
+      if(ur) q.push('until_round='+encodeURIComponent(ur));
+    }
     var a=document.createElement('a');
     a.href='/api/trades_csv'+(q.length?'?'+q.join('&'):'');
     a.download='trades_export.csv';
@@ -2364,6 +2398,7 @@ class H(BaseHTTPRequestHandler):
         elif u.path == "/api/trades_csv":
             # 全量成交 CSV 下载（审计用）：从 trades.jsonl 生成并作为附件返回
             # 支持 query 过滤：since_round / until_round / date(YYYY-MM-DD)
+            #   / since_time / until_time(本地时间区间) / limit(最近 N 笔)
             try:
                 _qs = parse_qs(u.query)
                 def _qi(k):
@@ -2377,9 +2412,13 @@ class H(BaseHTTPRequestHandler):
                 _since = _qi("since_round")
                 _until = _qi("until_round")
                 _date = (_qs.get("date") or [None])[0]
+                _since_ts = parse_time_to_ts((_qs.get("since_time") or [None])[0])
+                _until_ts = parse_time_to_ts((_qs.get("until_time") or [None])[0])
+                _limit = _qi("limit")
                 _all = load_trades(0)
-                _rows = filter_trades(_all, since_round=_since,
-                                      until_round=_until, date=_date)
+                _rows = filter_trades(_all, since_round=_since, until_round=_until,
+                                      date=_date, since_ts=_since_ts,
+                                      until_ts=_until_ts, limit=_limit)
                 _stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
                 _filt_hint = ""
                 if _since is not None:
@@ -2388,6 +2427,12 @@ class H(BaseHTTPRequestHandler):
                     _filt_hint += "_r%d-" % _until
                 if _date:
                     _filt_hint += "_%s" % _date
+                if _since_ts is not None:
+                    _filt_hint += "_t%d+" % int(_since_ts)
+                if _until_ts is not None:
+                    _filt_hint += "_t%d-" % int(_until_ts)
+                if _limit and _limit > 0:
+                    _filt_hint += "_last%d" % _limit
                 _csv_path = os.path.join(os.path.dirname(_HERE), "output",
                                         "trades_export%s_%s.csv" % (_filt_hint, _stamp))
                 if not write_trades_csv(_rows, _csv_path):

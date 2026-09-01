@@ -120,12 +120,33 @@ def _date_of(ts):
         return ""
 
 
-def filter_trades(trades, since_round=None, until_round=None, date=None):
-    """按轮次区间 / 日期过滤成交流水。某参数为 None 则不过滤该项。
+def parse_time_to_ts(s):
+    """把时间字符串解析为 unix 秒（本地时区）。支持：
+    'YYYY-MM-DDTHH:MM' / 'YYYY-MM-DD HH:MM:SS' / 'YYYY-MM-DD'。
+    解析失败或为空返回 None。
+    """
+    if not s:
+        return None
+    s = str(s).strip().replace("T", " ")
+    fmts = ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"]
+    for fmt in fmts:
+        try:
+            return datetime.datetime.strptime(s, fmt).timestamp()
+        except Exception:
+            pass
+    return None
+
+
+def filter_trades(trades, since_round=None, until_round=None, date=None,
+                  since_ts=None, until_ts=None, limit=None):
+    """按轮次区间 / 日期 / 时间区间 / 最近 N 笔 过滤成交流水。某参数为 None 则不过滤该项。
 
     - since_round: 仅保留 round >= since_round（某轮之后）
     - until_round: 仅保留 round <= until_round
     - date:        仅保留成交本地日期 == date(YYYY-MM-DD) 的成交
+    - since_ts:    仅保留 ts >= since_ts（unix 秒，本地时间区间起点）
+    - until_ts:    仅保留 ts <= until_ts（unix 秒，本地时间区间终点）
+    - limit:       取过滤结果中最后 limit 笔（即「最近 N 笔」）；<=0 或 None 不过滤
     """
     out = trades
     if since_round is not None:
@@ -134,6 +155,12 @@ def filter_trades(trades, since_round=None, until_round=None, date=None):
         out = [t for t in out if (t.get("round") or 0) <= until_round]
     if date:
         out = [t for t in out if _date_of(t.get("ts")) == date]
+    if since_ts is not None:
+        out = [t for t in out if (t.get("ts") or 0) >= since_ts]
+    if until_ts is not None:
+        out = [t for t in out if (t.get("ts") or 0) <= until_ts]
+    if limit and limit > 0:
+        out = out[-limit:]
     return out
 
 
