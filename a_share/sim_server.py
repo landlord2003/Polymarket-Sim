@@ -978,7 +978,8 @@ def step():
             yb = m.get("yes_bid") or 0
             ya = m.get("yes_ask") or 0
             MM_DETAIL[m["token_id"]] = {
-                "question": (m.get("question") or "")[:80],
+                "token_id": m["token_id"],
+                "question": m.get("question") or "",
                 "tag": market_cat(m) or "other",
                 "mid": round((yb + ya) / 2.0, 4) if (yb and ya) else 0,
                 "liquidity": float(m.get("liquidity") or 0),
@@ -1333,6 +1334,41 @@ header h1{margin:0;font-size:19px}
 .mmtag{display:inline-block;margin:3px 5px 0 0;padding:2px 8px;border-radius:11px;background:#101a28;border:1px solid var(--line);font-size:11.5px;color:var(--fg)}.mmtag b{color:var(--acc);font-variant-numeric:tabular-nums}
 .mmdiv{color:var(--mut);font-size:11px;margin-top:7px}.mmdiv.ok{color:#7fe9bd}.mmdiv.warn{color:#f0c674}
 .mmbox{margin-top:6px;border-top:1px dashed var(--line);padding-top:11px}
+/* 数据流图（单一真实源） */
+.flowwrap{background:linear-gradient(160deg,var(--panel),#0c131d);border:1px solid var(--line);border-radius:12px;padding:12px 16px;margin:12px 22px 0}
+.flowwrap summary{cursor:pointer;color:#cdd8e8;font-size:14px;font-weight:600;list-style:none;user-select:none}
+.flowwrap summary::-webkit-details-marker{display:none}
+.flowwrap summary::before{content:"▾ ";color:var(--mut)}
+.flowwrap:not([open]) summary::before{content:"▸ "}
+.flow{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px}
+.fnode{background:#0e1826;border:1px solid var(--line);border-radius:10px;padding:9px 14px;min-width:118px;text-align:center;font-weight:600}
+.fnode small{display:block;color:var(--mut);font-size:10.5px;margin-top:3px;font-weight:400}
+.fnode.src{border-color:#2a3c57;color:#cdd8e8}
+.fnode.store{background:#0c1f17;border-color:#1d3a2a;color:#9fe3c4}
+.fnode.rd{border-color:#243a52;color:#cdd8e8}
+.farrow{display:flex;align-items:center;color:var(--mut);font-size:12px;white-space:nowrap;font-weight:600}
+.fbranch{display:flex;gap:10px;flex-wrap:wrap}
+.flow-note{color:var(--mut);font-size:11.5px;margin-top:9px;line-height:1.5}
+.flow-note code{background:#101a28;padding:1px 6px;border-radius:5px;color:var(--gold)}
+/* 当前做市标的：可点击行 + modal */
+#mm-tbl tbody tr{cursor:pointer;transition:background .15s}
+#mm-tbl tbody tr:hover{background:#14202f}
+#mm-tbl th.c-det,#mm-tbl td.c-det{width:46px;color:var(--mut);text-align:center}
+#mm-tbl td .more{color:var(--mut);font-weight:700;font-size:15px}
+.mmodal{position:fixed;inset:0;background:rgba(4,8,14,.72);display:none;align-items:center;justify-content:center;z-index:60;padding:20px}
+.mmodal.show{display:flex}
+.mmodal-box{background:linear-gradient(160deg,var(--panel),#0c131d);border:1px solid var(--acc);border-radius:14px;max-width:640px;width:100%;max-height:84vh;overflow:auto;box-shadow:0 16px 50px rgba(0,0,0,.5);animation:fade .2s ease}
+.mmodal-h{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--line);font-weight:700;color:#cdd8e8;font-size:14.5px}
+.mmodal-x{cursor:pointer;background:#101a28;border:1px solid var(--line);color:var(--mut);border-radius:8px;padding:2px 11px;font-size:14px}
+.mmodal-x:hover{color:var(--ink);border-color:var(--acc)}
+.mmodal-body{padding:14px 18px}
+.mmodal-f{padding:10px 18px 14px;color:var(--mut);font-size:11px;border-top:1px solid var(--line)}
+.mk{display:flex;gap:12px;padding:8px 0;border-bottom:1px dashed var(--line);font-size:13px;align-items:flex-start}
+.mk:last-child{border-bottom:none}
+.mk .k{color:var(--mut);width:84px;flex:none}
+.mk .v{flex:1;text-align:right;word-break:break-word}
+.mk.col{flex-direction:column;gap:5px}.mk.col .v{text-align:left;line-height:1.55}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;word-break:break-all}
 /* 主区：面板直接作为网格项（不再包一层 .col —— 那会让窄屏出现"孤儿第三列"）
    行情榜跨两行，其余 4 个面板各占一格：三列时是 3×2、两列时是 2×3，任何宽度都填满且对称 */
 .big{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:stretch}
@@ -1382,7 +1418,9 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
 .tag{font-size:11px;padding:1px 7px;border-radius:10px;background:#172231;color:var(--mut)}
 .up{color:var(--up)}.dn{color:var(--dn)}
 /* 统计中心 */
-.statbox{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.statbox{display:flex;flex-wrap:wrap;gap:14px;align-items:stretch}
+.statgrp{display:flex;flex-direction:column;gap:10px;flex:1;min-width:160px;background:#0a121c;border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.statgrp .gh{color:var(--acc);font-size:11px;font-weight:700;letter-spacing:.5px;border-bottom:1px solid var(--line);padding-bottom:5px;margin-bottom:2px}
 .stat{background:#0a121c;border:1px solid var(--line);border-radius:10px;padding:10px 12px}
 .stat .k{color:var(--mut);font-size:11.5px}.stat .v{font-size:16px;font-weight:700;margin-top:3px;font-variant-numeric:tabular-nums}
 /* 统计明细：三列对称 -> 两列 -> 单列 */
@@ -1440,6 +1478,21 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
 <b>未平敞口跨轮持有</b>，承担真实价格波动，受止损(5%)与全局库存上限约束，权益按市价盯市。
 全程 <b>模拟盘·零真钱</b>（影子账本，绝不真发单）。因此<b>无链上真实成交率</b>——顶部「成交率」徽章显示的是模型假设成交率；仅当 LIVE_MODE=1 真钱实盘时该徽章才变「实盘成交率」。配色按中国习惯：<b style="color:var(--up)">红=涨/盈利</b>，<b style="color:var(--dn)">绿=跌/亏损</b>。
 数据自 <b id="run-start">—</b> 起落盘累计。</div>
+<details class="flowwrap" open>
+  <summary>📊 数据流向 · 单一真实源（点此收起 / 展开）</summary>
+  <div class="flow">
+    <div class="fnode src">成交发生<small>每笔全字段落盘</small></div>
+    <div class="farrow">➜ 写入</div>
+    <div class="fnode store">trades.jsonl<small>唯一真实源 · 60MB 轮转</small></div>
+    <div class="farrow">➜ 同源读取</div>
+    <div class="fbranch">
+      <div class="fnode rd">📥 看板 CSV 按钮<small>起始轮次 / 日期过滤</small></div>
+      <div class="fnode rd">📄 sim_report.py<small>--trades/--csv/--archive</small></div>
+      <div class="fnode rd">📤 报告·成交明细<small>逐笔 + 类别锁利汇总</small></div>
+    </div>
+  </div>
+  <div class="flow-note">三路读取均来自同一份 <b>trades.jsonl</b>，数据天然一致、无多源分歧。详见 <code>DEPLOY_NB.md §6</code>。</div>
+</details>
 <div class="wrap">
   <div class="cards" id="cards"></div>
 
@@ -1468,38 +1521,44 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
       <div class="note">BUY=建仓（锁利 0），SELL=平仓（显示本笔锁利）；每笔在真实盘口价位成交。新成交行红/绿闪光。</div>
     </div>
 
-    <!-- 锁利汇总 · 做市分布（合并：实盘成交率 LIVE / 做市类别分布 / 本轮·累计锁利） -->
+    <!-- 实盘成交率 · 做市分布（合并面板：原锁利卡片已归并到顶部 KPI 行，避免重复） -->
     <div class="panel">
-      <h2>💰 锁利汇总 · 做市分布</h2>
+      <h2>💰 实盘成交率 · 做市分布</h2>
       <div class="cards" style="grid-template-columns:repeat(3,minmax(0,1fr));margin:0 0 12px">
-        <div class="card"><div class="k">本轮锁利</div><div class="v b" id="ninv">$0</div></div>
-        <div class="card"><div class="k">累计锁利</div><div class="v" id="invn">$0</div></div>
         <div class="card" title="仅在 LIVE_MODE=1（真钱实盘）时才有链上真实成交观测；当前 DRY_RUN 模拟盘不挂真单，故无实盘成交率"><div class="k">实盘成交率(LIVE)</div><div class="v b" id="c-livefill">—</div></div>
+        <div class="card"><div class="k">做市类别数</div><div class="v b" id="n-mmcat">0</div></div>
+        <div class="card"><div class="k">做市标的数</div><div class="v b" id="n-mmnum">0</div></div>
       </div>
       <div class="mmbox">
         <div class="k" style="margin-bottom:5px">做市类别分布<span class="sub" style="font-weight:400;margin-left:5px">每类上限 MM_N_PER_CAT，从 300 盘口挑 20</span></div>
         <div class="v sm" id="c-mmcat" style="font-size:12px;font-weight:400;line-height:1.7">—</div>
         <div class="mmdiv" id="c-mmdiv"></div>
       </div>
-      <div class="note">累计锁利 = 全部平仓笔锁利之和（落盘累计，重启不丢）；实盘成交率仅 LIVE_MODE=1 真钱实盘才有链上真实观测。</div>
+      <div class="note">累计锁利 / 本轮锁利 已在<b>顶部 KPI 卡片</b>与<b>统计中心</b>展示（单一口径，避免重复）。实盘成交率仅 LIVE_MODE=1 真钱实盘才有链上真实观测。</div>
     </div>
     <!-- 统计中心 -->
     <div class="panel">
       <h2>📊 统计中心（实时）</h2>
       <div class="statbox">
-        <div class="stat"><div class="k">运行时长</div><div class="v" id="st-dur">—</div></div>
-        <div class="stat"><div class="k">轮次</div><div class="v" id="st-round">0</div></div>
-        <div class="stat"><div class="k">总成交</div><div class="v" id="st-tot">0</div></div>
-        <div class="stat"><div class="k">胜率(平仓)</div><div class="v" id="st-win">0%</div></div>
-        <div class="stat"><div class="k">成交频率</div><div class="v" id="st-rate">0</div></div>
-        <div class="stat"><div class="k">累计锁利</div><div class="v" id="st-real">$0</div></div>
-        <div class="stat"><div class="k">逆向选择损耗</div><div class="v dn" id="st-asel">$0</div></div>
-        <div class="stat"><div class="k">已结算锁利</div><div class="v b" id="st-settled">$0</div></div>
-        <div class="stat"><div class="k">结算敞口(风险)</div><div class="v dn" id="st-settlexp">$0</div></div>
-        <div class="stat"><div class="k">峰值盈利</div><div class="v" id="st-pk">$0</div></div>
-        <div class="stat"><div class="k">权益峰值</div><div class="v" id="st-peak">$0</div></div>
-        <div class="stat"><div class="k">当前回撤</div><div class="v" id="st-dd">0%</div></div>
-        <div class="stat"><div class="k">历史最大回撤</div><div class="v" id="st-mdd">0%</div></div>
+        <div class="statgrp"><div class="gh">运行</div>
+          <div class="stat"><div class="k">运行时长</div><div class="v" id="st-dur">—</div></div>
+          <div class="stat"><div class="k">轮次</div><div class="v" id="st-round">0</div></div>
+          <div class="stat"><div class="k">总成交</div><div class="v" id="st-tot">0</div></div>
+          <div class="stat"><div class="k">成交频率</div><div class="v" id="st-rate">0</div></div>
+        </div>
+        <div class="statgrp"><div class="gh">盈亏</div>
+          <div class="stat"><div class="k">累计锁利</div><div class="v" id="st-real">$0</div></div>
+          <div class="stat"><div class="k">胜率(平仓)</div><div class="v" id="st-win">0%</div></div>
+          <div class="stat"><div class="k">已结算锁利</div><div class="v b" id="st-settled">$0</div></div>
+          <div class="stat"><div class="k">峰值盈利</div><div class="v" id="st-pk">$0</div></div>
+        </div>
+        <div class="statgrp"><div class="gh">风险 / 回撤</div>
+          <div class="stat"><div class="k">逆向选择损耗</div><div class="v dn" id="st-asel">$0</div></div>
+          <div class="stat"><div class="k">结算敞口(风险)</div><div class="v dn" id="st-settlexp">$0</div></div>
+          <div class="stat"><div class="k">权益峰值</div><div class="v" id="st-peak">$0</div></div>
+          <div class="stat"><div class="k">当前回撤</div><div class="v" id="st-dd">0%</div></div>
+          <div class="stat"><div class="k">历史最大回撤</div><div class="v" id="st-mdd">0%</div></div>
+        </div>
       </div>
       <div class="note" id="st-note">—</div>
     </div>
@@ -1538,11 +1597,11 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
       </details>
     </div>
 
-    <!-- 当前做市标的（智能筛选结果透明化） -->
+    <!-- 当前做市标的（智能筛选结果透明化 · 可点击查看全部信息） -->
     <div class="panel">
       <h2>🎯 当前做市标的（智能筛选结果）<span class="sub">流动性×价差综合分 + 每类上限 MM_N_PER_CAT，从 300 盘口挑 20</span></h2>
-      <div class="note">以下为当前实际在做市的 20 个标的（每类上限保证多样性）。点「做市类别分布」卡片看分散度。</div>
-      <div class="scroll"><table id="mm-tbl"><thead><tr><th>类别</th><th>市场题目</th><th>中间价</th><th>流动性</th><th>价差</th></tr></thead><tbody></tbody></table></div>
+      <div class="note">以下为当前实际在做市的标的（每类上限保证多样性）。<b style="color:var(--gold)">点击任意一行</b>查看标的全部信息（token_id / 完整题目 / 盘口等）。</div>
+      <div class="scroll"><table id="mm-tbl"><thead><tr><th>类别</th><th>市场题目</th><th>中间价</th><th>流动性</th><th>价差</th><th class="c-det">详情</th></tr></thead><tbody></tbody></table></div>
     </div>
   </div>
 
@@ -1739,6 +1798,8 @@ function tickState(){
       mdiv.className='mmdiv '+(d.well_div?'ok':'warn');
       mdiv.textContent=`覆盖 ${d.n_cats} 类 · 最大类占比 ${Math.round(d.max_share*100)}% · HHI ${d.hhi}（越低越分散）${d.well_div?' ✅健康':' ⚠️偏集中'}`;
     }
+    const nmc=document.getElementById('n-mmcat'); if(nmc && s.mm_cats) nmc.textContent=Object.keys(s.mm_cats).length;
+    const nmn=document.getElementById('n-mmnum'); if(nmn) nmn.textContent=(s.mm_count||0);
     renderMMMarkets(s.mm_markets);
     setMoney('c-unreal',(s.unrealized||0),true);
     setMoney('c-inv',(s.inv_notional||0),false);
@@ -1777,8 +1838,7 @@ function tickState(){
     const mb=document.getElementById('modebadge');
     if(mb&&s.fill){mb.textContent=(s.mode==='inv'?'真实做市(库存管理)':'同轮双边建平')
       +' · 挂单成交模型'+(s.fill.on?'开':'关');}
-    document.getElementById('ninv').textContent=(s.round_pnl>=0?'+$':'-$')+fmt(Math.abs(s.round_pnl));
-    document.getElementById('invn').textContent=(s.realized>=0?'+$':'-$')+fmt(Math.abs(s.realized));
+    // 本轮/累计锁利已在顶部 KPI 卡片(c-rpnl/c-real)展示，锁利汇总面板不再重复，避免"两张累计锁利卡片"
     drawCandles(s.equity_curve);
     const t2=document.getElementById('trd').querySelector('tbody');
     let fresh=0, freshTrade=null;
@@ -1839,18 +1899,44 @@ function renderAttribution(a){
   const netel=document.getElementById('attr-net');
   if(netel){netel.textContent='净锁利: $'+net.toFixed(2)+'（各分量之和，恒等式闭合）';}
 }
+function escapeHtml(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function renderMMMarkets(list){
+  window._mmList = list||[];
   const tb=document.getElementById('mm-tbl'); if(!tb) return;
   const tbody=tb.querySelector('tbody');
   if(!tbody) return;
-  if(!list||!list.length){tbody.innerHTML='<tr><td colspan="5" style="color:var(--mut)">暂无做市标的</td></tr>'; return;}
-  tbody.innerHTML=list.map(m=>{
+  if(!list||!list.length){tbody.innerHTML='<tr><td colspan="6" style="color:var(--mut)">暂无做市标的</td></tr>'; return;}
+  tbody.innerHTML=list.map((m,i)=>{
     const liq=Number(m.liquidity||0);
     const liqS=liq>=1000?(liq/1000).toFixed(1)+'k':liq.toFixed(0);
-    return `<tr><td><span class="mmtag">${m.tag}</span></td><td class="l">${(m.question||'').slice(0,52)}</td>`+
-      `<td>${Number(m.mid||0).toFixed(3)}</td><td>$${liqS}</td><td>${Number(m.spread||0).toFixed(3)}</td></tr>`;
+    return `<tr class="mmrow" data-i="${i}">`+
+      `<td><span class="mmtag">${escapeHtml(m.tag)}</span></td>`+
+      `<td class="l">${(m.question||'').slice(0,52)}</td>`+
+      `<td>${Number(m.mid||0).toFixed(3)}</td>`+
+      `<td>$${liqS}</td>`+
+      `<td>${Number(m.spread||0).toFixed(3)}</td>`+
+      `<td class="c-det"><span class="more">›</span></td></tr>`;
   }).join('');
+  Array.prototype.forEach.call(tbody.querySelectorAll('.mmrow'),function(tr){
+    tr.onclick=function(){showMMDetail(Number(tr.getAttribute('data-i')));};
+  });
 }
+function showMMDetail(i){
+  const m=window._mmList[i]; if(!m) return;
+  const rows=[
+    ['Token ID', '<span class="mono">'+(m.token_id||'-')+'</span>'],
+    ['类别', '<span class="mmtag">'+escapeHtml(m.tag)+'</span>'],
+    ['中间价', Number(m.mid||0).toFixed(4)],
+    ['流动性', '$'+fmt(m.liquidity)],
+    ['价差', Number(m.spread||0).toFixed(4)],
+  ];
+  let html=rows.map(r=>`<div class="mk"><span class="k">${r[0]}</span><span class="v">${r[1]}</span></div>`).join('');
+  html+=`<div class="mk col"><span class="k">完整题目</span><span class="v">${escapeHtml(m.question||'')}</span></div>`;
+  document.getElementById('mm-modal-body').innerHTML=html;
+  document.getElementById('mm-modal').classList.add('show');
+}
+function closeMM(){const el=document.getElementById('mm-modal'); if(el) el.classList.remove('show');}
+document.addEventListener('keydown',function(e){if(e.key==='Escape') closeMM();});
 function renderCompliance(c){
   if(!c||c.error) return;
   const se=document.getElementById('comp-scanned'); if(se){se.className='v b'; se.textContent=c.n_scanned;}
@@ -1936,6 +2022,13 @@ tickState(); tickLive();
     setTimeout(function(){btn.textContent='📥 下载成交CSV'; btn.disabled=false;}, 4000);
   };
 })();
+<div class="mmodal" id="mm-modal" onclick="if(event.target===this)closeMM()">
+  <div class="mmodal-box">
+    <div class="mmodal-h">🎯 做市标的 · 全部信息 <button class="mmodal-x" onclick="closeMM()">✕</button></div>
+    <div class="mmodal-body" id="mm-modal-body"></div>
+    <div class="mmodal-f">数据来自选标快照 MM_DETAIL，每 MM_REFRESH 轮随盘口刷新一次。完整题目为 Polymarket 原始市场问题。</div>
+  </div>
+</div>
 </script></body></html>"""
 
 
