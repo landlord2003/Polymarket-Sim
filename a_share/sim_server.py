@@ -1356,8 +1356,9 @@ header h1{margin:0;font-size:19px}
 /* 当前做市标的：可点击行 + modal */
 #mm-tbl tbody tr{cursor:pointer;transition:background .15s}
 #mm-tbl tbody tr:hover{background:#14202f}
-#mm-tbl th.c-det,#mm-tbl td.c-det{width:46px;color:var(--mut);text-align:center}
-#mm-tbl td .more{color:var(--mut);font-weight:700;font-size:15px}
+#mm-tbl th.c-det,#mm-tbl td.c-det,#mkt th.c-det,#mkt td.c-det{width:46px;color:var(--mut);text-align:center}
+#mm-tbl td .more,#mkt td .more{color:var(--mut);font-weight:700;font-size:15px}
+.liverow{cursor:pointer}.liverow:hover{background:rgba(34,197,194,.07)}
 .mmodal{position:fixed;inset:0;background:rgba(4,8,14,.72);display:none;align-items:center;justify-content:center;z-index:60;padding:20px}
 .mmodal.show{display:flex}
 .mmodal-box{background:linear-gradient(160deg,var(--panel),#0c131d);border:1px solid var(--acc);border-radius:14px;max-width:640px;width:100%;max-height:84vh;overflow:auto;box-shadow:0 16px 50px rgba(0,0,0,.5);animation:fade .2s ease}
@@ -1506,7 +1507,7 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
       <h2>📡 Polymarket 真实行情
         <select id="cat" style="margin-left:auto"><option value="all">全部类别</option><option value="crypto">crypto</option><option value="economy">economy</option><option value="finance">finance</option><option value="sports">sports</option><option value="tech">tech</option><option value="science">science</option><option value="entertainment">entertainment</option><option value="other">other</option></select>
       </h2>
-      <div class="scroll"><table id="mkt"><thead><tr><th>市场(问题)</th><th>类别</th><th>YES 买</th><th>YES 卖</th><th>NO 买</th><th>NO 卖</th><th>流动性</th></tr></thead><tbody></tbody></table></div>
+      <div class="scroll"><table id="mkt"><thead><tr><th>市场(问题)</th><th>类别</th><th>YES 买</th><th>YES 卖</th><th>NO 买</th><th>NO 卖</th><th>流动性</th><th class="c-det">详情</th></tr></thead><tbody></tbody></table></div>
       <div class="note">YES=结果代币隐含概率；买/卖为 Gamma 真实最优买卖盘口；<b style="color:var(--up)">买价红</b>、<b style="color:var(--dn)">卖价绿</b>；流动性为该市场 USDC 深度。</div>
     </div>
 
@@ -1635,9 +1636,9 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
 
 <div class="mmodal" id="mm-modal" onclick="if(event.target===this)closeMM()">
   <div class="mmodal-box">
-    <div class="mmodal-h">🎯 做市标的 · 全部信息 <button class="mmodal-x" onclick="closeMM()">✕</button></div>
+    <div class="mmodal-h"><span id="mm-modal-title">🎯 做市标的 · 全部信息</span> <button class="mmodal-x" onclick="closeMM()">✕</button></div>
     <div class="mmodal-body" id="mm-modal-body"></div>
-    <div class="mmodal-f">数据来自选标快照 MM_DETAIL，每 MM_REFRESH 轮随盘口刷新一次。完整题目为 Polymarket 原始市场问题。</div>
+    <div class="mmodal-f" id="mm-modal-f">数据来自选标快照 MM_DETAIL，每 MM_REFRESH 轮随盘口刷新一次。完整题目为 Polymarket 原始市场问题。</div>
   </div>
 </div>
 <script>
@@ -1950,6 +1951,29 @@ function showMMDetail(i){
   let html=rows.map(r=>`<div class="mk"><span class="k">${r[0]}</span><span class="v">${r[1]}</span></div>`).join('');
   html+=`<div class="mk col"><span class="k">完整题目</span><span class="v">${escapeHtml(m.question||'')}</span></div>`;
   document.getElementById('mm-modal-body').innerHTML=html;
+  document.getElementById('mm-modal-title').innerHTML='🎯 做市标的 · 全部信息';
+  document.getElementById('mm-modal-f').textContent='数据来自选标快照 MM_DETAIL，每 MM_REFRESH 轮随盘口刷新一次。完整题目为 Polymarket 原始市场问题。';
+  document.getElementById('mm-modal').classList.add('show');
+}
+function showLiveDetail(i){
+  const m=window._liveRows[i]; if(!m) return;
+  const yb=Number(m.yes_bid||0), ya=Number(m.yes_ask||0);
+  const nb=Number(m.no_bid||0), na=Number(m.no_ask||0);
+  const ymid=(yb+ya)/2, nmid=(nb+na)/2;
+  const rows=[
+    ['Token ID', '<span class="mono">'+(m.token_id||'-')+'</span>'],
+    ['类别', '<span class="mmtag">'+escapeHtml(m.tag)+'</span>'],
+    ['YES 中间价', ymid.toFixed(4)+' <span style="color:var(--mut)">（隐含概率）</span>'],
+    ['YES 买/卖', yb.toFixed(4)+' / '+ya.toFixed(4)],
+    ['NO 买/卖', nb.toFixed(4)+' / '+na.toFixed(4)],
+    ['NO 中间价', nmid.toFixed(4)],
+    ['流动性', '$'+fmt(m.liquidity)],
+  ];
+  let html=rows.map(r=>`<div class="mk"><span class="k">${r[0]}</span><span class="v">${r[1]}</span></div>`).join('');
+  html+=`<div class="mk col"><span class="k">完整题目</span><span class="v">${escapeHtml(m.q_full||m.question||'')}</span></div>`;
+  document.getElementById('mm-modal-title').innerHTML='📡 真实行情 · 全部信息';
+  document.getElementById('mm-modal-f').textContent='数据来自 Gamma 真实盘口快照，每 15s 随 /api/markets 刷新。完整题目为 Polymarket 原始市场问题。';
+  document.getElementById('mm-modal-body').innerHTML=html;
   document.getElementById('mm-modal').classList.add('show');
 }
 function closeMM(){const el=document.getElementById('mm-modal'); if(el) el.classList.remove('show');}
@@ -1982,11 +2006,16 @@ function renderLive(){
   if(!liveCache) return;
   const cat=document.getElementById('cat').value;
   const rows=liveCache.markets.filter(m=>cat==='all'||m.tag===cat).slice(0,150);
-  document.getElementById('mkt').querySelector('tbody').innerHTML=rows.map(m=>
-    `<tr><td class="l">${m.question}</td><td><span class="tag">${m.tag}</span></td>`+
+  window._liveRows = rows;
+  const tb=document.getElementById('mkt').querySelector('tbody');
+  tb.innerHTML=rows.map((m,i)=>
+    `<tr class="liverow" data-i="${i}"><td class="l">${m.question}</td><td><span class="tag">${m.tag}</span></td>`+
     `<td class="buy">${Number(m.yes_bid).toFixed(4)}</td><td class="sell">${Number(m.yes_ask).toFixed(4)}</td>`+
     `<td class="buy">${Number(m.no_bid).toFixed(4)}</td><td class="sell">${Number(m.no_ask).toFixed(4)}</td>`+
-    `<td>$${fmt(m.liquidity)}</td></tr>`).join('');
+    `<td>$${fmt(m.liquidity)}</td><td class="c-det"><span class="more">›</span></td></tr>`).join('');
+  Array.prototype.forEach.call(tb.querySelectorAll('.liverow'),function(tr){
+    tr.onclick=function(){showLiveDetail(Number(tr.getAttribute('data-i')));};
+  });
 }
 document.getElementById('cat').onchange=renderLive;
 // 窗口尺寸变化后重画 K 线（位图尺寸跟着 CSS 尺寸走，否则会被拉伸变形）
@@ -2158,6 +2187,7 @@ class H(BaseHTTPRequestHandler):
                     "no_bid": m.get("no_bid"), "no_ask": m.get("no_ask"),
                     "liquidity": round(float(m.get("liquidity") or 0), 0),
                     "token_id": str(m.get("token_id")),
+                    "q_full": q,
                 })
             body = json.dumps({"ts": time.time(), "count": len(out),
                                "markets": out}, ensure_ascii=False).encode("utf-8")
