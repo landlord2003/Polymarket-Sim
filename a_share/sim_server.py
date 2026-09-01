@@ -204,10 +204,12 @@ def build_and_write_report(top_n=15, stamp=None):
     _trades = load_trades(100)
     if not _trades:
         _trades = STATE.get("positions") or []
+    # 类别锁利汇总用全量历史（与报告明细样本解耦），让「按类别锁利汇总」覆盖整段运行
+    _all = load_trades(0) or _trades
     with open(html_path, "w", encoding="utf-8") as f:
-        f.write(build_html(st, s, mkts, top_n, ts, trades=_trades))
+        f.write(build_html(st, s, mkts, top_n, ts, trades=_trades, tag_trades=_all))
     with open(md_path, "w", encoding="utf-8") as f:
-        f.write(build_md(st, s, mkts, top_n, ts, trades=_trades))
+        f.write(build_md(st, s, mkts, top_n, ts, trades=_trades, tag_trades=_all))
     return {"html": html_path, "md": md_path, "html_name": html_name,
             "md_name": md_name, "stamp": stamp, "ts": ts,
             "equity": st["equity"], "realized": st["realized"], "round": st["round"]}

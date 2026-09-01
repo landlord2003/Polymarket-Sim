@@ -167,6 +167,23 @@ sudo systemctl stop polymarket-sim  # 优雅停止（SIGTERM -> sim_server 释�
 
 > 系统**全程落盘**每一笔交易（含市场 / 类别 / 方向 / 价格 / 量 / 锁利 / 滑点 / 成交后现金 / 原始问题文本），供审计、报税、复盘。以下四路取数方式任选，NB 伙伴一眼可查。
 
+### 6.0 端到端数据流（一张图建立心智模型）
+
+> 关键认知：**只有「一个写入」**——每笔成交落盘到 `trades.jsonl`（唯一真实源）；**§6.2 / §6.3 / §6.4 是三个读取入口**，都从同一份文件取数。别当成 4 套系统，而是一份文件 + 三个视图，数据天然一致、无多源分歧。
+
+```mermaid
+flowchart LR
+    A[成交发生<br/>做市 · 撮合] -->|写入 每笔全字段| B[(trades.jsonl<br/>唯一真实源<br/>全字段 · 60MB 轮转)]
+    B -->|读| C[看板 下载成交CSV<br/>起止轮次 · 日期过滤]
+    B -->|读| D[sim_report.py<br/>CLI / /api/trades_csv]
+    B -->|读| E[报告 最近成交明细表<br/>HTML / MD 逐笔]
+    style B fill:#E1F5EE,stroke:#0F6E56,color:#04342C
+    style A fill:#E6F1FB,stroke:#185FA5,color:#042C53
+    style C fill:#E6F1FB,stroke:#185FA5,color:#042C53
+    style D fill:#E6F1FB,stroke:#185FA5,color:#042C53
+    style E fill:#E6F1FB,stroke:#185FA5,color:#042C53
+```
+
 ### 6.1 落盘文件（机器可读、最全）
 
 | 文件 | 内容 | 说明 |
@@ -215,6 +232,26 @@ python a_share/sim_report.py --trades 100
 - 仅当原生字段缺失 / 空 / `other` 时，回退 `classify(question)` 关键词匹配。
 - **NB 有网生效**：NB 实时 `gamma` 盘口带回真实 `category`（politics / world / crypto / economy / sports …），分类覆盖齐全；北京 `DRY_RUN` 行情为离线缓存快照（无 `category`），会走关键词回退，本地可能只见 crypto/economy 等少量类——这是缓存边界，**非 bug**，NB 部署即正常。
 
+### 6.6 定时自动归档（免手动导出，可选）
+
+> 把成交流水按**日期**切成独立 CSV，落到 `output/audit/`，便于按日审计 / 报税留存。已存在的日期文件自动跳过（幂等，重复跑不覆盖）。
+
+```bash
+# 全量归档：每个出现过的日期写一个 trades_YYYY-MM-DD.csv
+python a_share/sim_report.py --archive
+
+# 每日归档前一天（配合 cron / 计划任务，零手动）
+python a_share/sim_report.py --archive-daily
+```
+
+- 输出目录：`output/audit/`（可用 `--archive-dir <路径>` 改）。
+- 定时示例（Linux crontab，每天 00:05 归档前一天）：
+  ```cron
+  5 0 * * * cd /opt/polymarket-sim && /opt/polymarket-sim/.venv/bin/python a_share/sim_report.py --archive-daily >> output/audit/cron.log 2>&1
+  ```
+- Windows：任务计划程序触发器"每天"，操作为启动 `python a_share/sim_report.py --archive-daily`。
+- 与 §6.3 的一次性 `--csv` 导出不同，**归档是持续化留存**，建议常开；审计时直接进 `output/audit/` 取对应日期文件即可。
+
 ---
 
 ## 7. 关键提醒
@@ -237,5 +274,5 @@ python a_share/sim_report.py --trades 100
 | `ws_polymarket.py` | CLOB WebSocket 实时盘口（实盘低延迟；`pip install websockets`） |
 | `probe_polymarket.py` | 只读探针（概率 → 情报，北京也可用） |
 | `calibrate_fill.py` | **真实成交率校准**（NB 真挂单+轮询，输出回填 FILL_BASE 的 recommended_base） |
-| `sim_report.py` | **审计与导出**：读 `trades.jsonl` 生成可读报告 + 全量/区间成交 CSV（`--trades/--csv/--since-round/--until-round/--date`） |
+| `sim_report.py` | **审计与导出**：读 `trades.jsonl` 生成可读报告（含按类别锁利汇总）+ 全量/区间成交 CSV（`--trades/--csv/--since-round/--until-round/--date`）+ 定时归档（`--archive` 全量按日 / `--archive-daily` 前一天） |
 | `compliance.py` | 合规过滤（NB 下由 `COMPLIANCE_FILTER=0` 关闭） |

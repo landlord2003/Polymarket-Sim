@@ -137,6 +137,69 @@ def filter_trades(trades, since_round=None, until_round=None, date=None):
     return out
 
 
+def summarize_by_tag(trades):
+    """按类别 tag 汇总锁利（治本分类，与 §6.5 同源）。
+
+    返回 [(tag, n, total_pnl, avg_pnl, pct)] 按 total_pnl 降序。
+    tag 为空归入 (未分类)；占比 = 该类别锁利 / 全部锁利合计（合计为 0 时记 0）。
+    """
+    agg = {}
+    total = 0.0
+    for t in trades:
+        tag = (t.get("tag") or "").strip() or "(未分类)"
+        try:
+            p = float(t.get("pnl") or 0)
+        except Exception:
+            p = 0.0
+        a = agg.setdefault(tag, {"n": 0, "pnl": 0.0})
+        a["n"] += 1
+        a["pnl"] += p
+        total += p
+    rows = []
+    for tag, a in agg.items():
+        n = a["n"]
+        pnl = a["pnl"]
+        avg = pnl / n if n else 0.0
+        pct = (pnl / total * 100.0) if total else 0.0
+        rows.append((tag, n, pnl, avg, pct))
+    rows.sort(key=lambda r: -r[2])
+    return rows
+
+
+def archive_trades(trades, out_dir, mode="all", days_back=1):
+    """把成交流水按日期归档为 CSV（供审计留存，免手动导出）。
+
+    - mode='all'  : 对每个出现的日期写一个 trades_YYYY-MM-DD.csv（已存在则跳过，幂等）
+    - mode='daily': 仅写 (今天-days_back) 那一天；当天无成交返回 []
+    返回写入/跳过的文件路径列表。
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    if mode == "daily":
+        target = (datetime.datetime.now() - datetime.timedelta(days=days_back)).strftime("%Y-%m-%d")
+        rows = [t for t in trades if _date_of(t.get("ts")) == target]
+        if not rows:
+            return []
+        path = os.path.join(out_dir, "trades_%s.csv" % target)
+        if os.path.exists(path):
+            return [path]  # 幂等：已归档则跳过
+        write_trades_csv(rows, path)
+        return [path]
+    by_date = {}
+    for t in trades:
+        d = _date_of(t.get("ts"))
+        if d:
+            by_date.setdefault(d, []).append(t)
+    res = []
+    for d in sorted(by_date):
+        path = os.path.join(out_dir, "trades_%s.csv" % d)
+        if os.path.exists(path):
+            res.append(path)
+            continue
+        if write_trades_csv(by_date[d], path):
+            res.append(path)
+    return res
+
+
 # ------------------------------ HTML ------------------------------
 CSS = """
 :root{--bg:#070a0f;--panel:#111824;--ink:#dfe7f2;--mut:#7e8aa0;--line:#1c2738;
@@ -175,7 +238,7 @@ footer{margin-top:34px;padding-top:14px;border-top:1px solid var(--line);color:v
 """
 
 
-def build_html(st, s, mkts, top_n, ts, trades=None):
+def build_html(st, s, mkts, top_n, ts, trades=None, tag_trades=None):
     f = st.get("fill") or {}
     mode_txt = "真实做市（库存管理）" if st.get("mode") == "inv" else "同轮双边建平（乐观对照）"
     fills_on = f.get("on", False)
@@ -238,6 +301,26 @@ def build_html(st, s, mkts, top_n, ts, trades=None):
     trades = trades if trades is not None else (st.get("positions") or [])
     n_trades = len(trades)
     trade_rows = ""
+
+    # 按类别锁利汇总（治本分类 tag，源自成交流水 trades.jsonl；全量历史，不限于上方明细样本）
+    _tag_src = tag_trades if tag_trades is not None else trades
+    _tag_summary = summarize_by_tag(_tag_src)
+    tag_summary_rows = ""
+    for _tg, _tn, _tp, _ta, _tpct in _tag_summary:
+        tag_summary_rows += ("<tr><td>%s</td><td>%s</td><td class='%s'>%s</td>"
+                              "<td>%.1f%%</td><td class='%s'>%s</td></tr>"
+                              % (_tg, _num(_tn), _cls(_tp), _sgn(_tp),
+                                 _tpct, _cls(_ta), _sgn(_ta)))
+    if tag_summary_rows:
+        tag_summary_html = ("<h2>按类别锁利汇总（成交流水 trades.jsonl）</h2>"
+            "<table><thead><tr><th>类别</th><th>成交笔数</th><th>锁利合计</th>"
+            "<th>占总额比</th><th>笔均锁利</th></tr></thead><tbody>%s</tbody></table>"
+            "<div class='note'>按成交流水 trades.jsonl 的治本分类 tag 汇总（与 §6.5 同源）。"
+            "占比 = 该类别锁利 / 全部锁利合计；颜色按中国习惯：红=盈利、绿=亏损。</div>"
+            % tag_summary_rows)
+    else:
+        tag_summary_html = ("<h2>按类别锁利汇总（成交流水 trades.jsonl）</h2>"
+            "<div class='note'>（暂无成交流水，先跑出成交后才有数据）</div>")
     for t in trades:
         side = (t.get("side") or "").upper()
         sc = "up" if side == "BUY" else "dn"
@@ -332,6 +415,8 @@ def build_html(st, s, mkts, top_n, ts, trades=None):
 <table><thead><tr><th>市场</th><th>类别</th><th>YES 买</th><th>YES 卖</th><th>NO 买</th><th>流动性</th></tr></thead><tbody>%s</tbody></table>
 <div class="note">数据来自 Polymarket Gamma 实时接口，已过滤政治/地缘/军事等敏感市场（本次合规 %d 个）。</div>
 
+%s
+
 <h2>最近成交明细（最近 %d 笔）</h2>
 <table><thead><tr><th>时间</th><th>市场</th><th>类别</th><th>方向</th><th>成交价</th><th>量</th><th>本笔锁利</th><th>滑点</th><th>现金</th></tr></thead><tbody>%s</tbody></table>
 <div class="note">逐笔来自服务器侧 TRADES 落盘流水（完整记录含全部字段与类别，存于 data/trades.jsonl，自动轮转归档）。
@@ -386,7 +471,7 @@ FILL_BASE 是拍的参数。真实的成交率<b>只能用真钱小额挂单测�
         _sgn(bt.get("pnl")), str(bt.get("mkt"))[:26],
         _sgn(wt.get("pnl")), str(wt.get("mkt"))[:26],
         inv_rows,
-        top_n, mkt_rows, len(mkts.get("markets") or []), n_trades, trade_rows,
+        top_n, mkt_rows, len(mkts.get("markets") or []), tag_summary_html, n_trades, trade_rows,
         mode_txt,
         ("开（按价格改善幅度判定）" if fills_on else "关（假设必然成交）"),
         f.get("base"), (st.get("params") or {}).get("adverse"),
@@ -398,7 +483,7 @@ FILL_BASE 是拍的参数。真实的成交率<b>只能用真钱小额挂单测�
 
 
 # ------------------------------ Markdown ------------------------------
-def build_md(st, s, mkts, top_n, ts, trades=None):
+def build_md(st, s, mkts, top_n, ts, trades=None, tag_trades=None):
     f = st.get("fill") or {}
     fills_on = f.get("on", False)
     fill_rate = f.get("rate", 0) if fills_on else 100.0
@@ -408,6 +493,8 @@ def build_md(st, s, mkts, top_n, ts, trades=None):
     A = L.append
     trades = trades if trades is not None else (st.get("positions") or [])
     n_trades = len(trades)
+    _tag_src = tag_trades if tag_trades is not None else trades
+    _tag_summary = summarize_by_tag(_tag_src)
     A("# Polymarket 模拟盘 · 实况与统计报告")
     A("")
     A("- 生成时间：%s" % ts)
@@ -507,6 +594,18 @@ def build_md(st, s, mkts, top_n, ts, trades=None):
                                                _num(m.get("yes_bid"), 4), _num(m.get("yes_ask"), 4),
                                                _num(m.get("no_bid"), 4), _money(m.get("liquidity"))))
     A("")
+    A("## 按类别锁利汇总（成交流水 trades.jsonl）")
+    A("")
+    if _tag_summary:
+        A("按成交流水 trades.jsonl 的治本分类 tag 汇总（与 §6.5 同源）；占比 = 该类别锁利 / 全部锁利合计。")
+        A("")
+        A("| 类别 | 成交笔数 | 锁利合计 | 占总额比 | 笔均锁利 |")
+        A("|---|---|---|---|---|")
+        for _tg, _tn, _tp, _ta, _tpct in _tag_summary:
+            A("| %s | %s | %s | %.1f%% | %s |" % (_tg, _num(_tn), _sgn(_tp), _tpct, _sgn(_ta)))
+    else:
+        A("（暂无成交流水，先跑出成交后才有数据）")
+    A("")
     A("## 最近成交明细（最近 %d 笔）" % n_trades)
     A("")
     if trades:
@@ -555,6 +654,12 @@ def main():
                     help="CSV/报告仅含该轮次之前的成交")
     ap.add_argument("--date", default=None,
                     help="CSV/报告仅含该日期成交(YYYY-MM-DD)")
+    ap.add_argument("--archive-dir", default=os.path.join(ROOT, "output", "audit"),
+                    help="定时归档输出目录（默认 output/audit）")
+    ap.add_argument("--archive", action="store_true",
+                    help="按日期归档全量成交 CSV 到 --archive-dir（已存在则跳过，幂等）")
+    ap.add_argument("--archive-daily", action="store_true",
+                    help="仅归档前一天成交 CSV（配合 cron/计划任务每日跑）")
     args = ap.parse_args()
 
     base = args.base.rstrip("/")
@@ -577,11 +682,13 @@ def main():
     # 读取成交流水（--trades 控制报告内条数；0=全部），并按区间/日期过滤
     _flt = dict(since_round=args.since_round, until_round=args.until_round, date=args.date)
     trades = filter_trades(load_trades(args.trades), **_flt)
+    # 类别锁利汇总用全量历史（同样按区间/日期过滤），不限于上方明细样本
+    tag_trades = filter_trades(load_trades(0), **_flt)
 
     with open(html_path, "w", encoding="utf-8") as f:
-        f.write(build_html(st, s, mkts, args.top, ts, trades=trades))
+        f.write(build_html(st, s, mkts, args.top, ts, trades=trades, tag_trades=tag_trades))
     with open(md_path, "w", encoding="utf-8") as f:
-        f.write(build_md(st, s, mkts, args.top, ts, trades=trades))
+        f.write(build_md(st, s, mkts, args.top, ts, trades=trades, tag_trades=tag_trades))
 
     print()
     print("已生成报告：")
@@ -597,6 +704,15 @@ def main():
         if write_trades_csv(_csv_rows, csv_path):
             print("  CSV      %s  (%.0f KB, 筛选后 %d 笔)"
                   % (csv_path, os.path.getsize(csv_path) / 1024, len(_csv_rows)))
+    # 定时归档（每日打包前一日 / 全量按日期）
+    if args.archive or args.archive_daily:
+        _all_tr = load_trades(0)
+        if args.archive_daily:
+            _w = archive_trades(_all_tr, args.archive_dir, mode="daily", days_back=1)
+            print("  每日归档  %s" % (_w if _w else "（前一天无成交 / 已归档，跳过）"))
+        if args.archive:
+            _w = archive_trades(_all_tr, args.archive_dir, mode="all")
+            print("  全量归档  %d 个日期文件 -> %s" % (len(_w), args.archive_dir))
     print()
     print("  运行起点 %s | 轮次 %s | 权益 %s | 累计锁利 %s | 成交率 %.1f%%"
           % (s.get("run_start"), s.get("round"), _money(st.get("equity")),
