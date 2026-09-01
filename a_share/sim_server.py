@@ -1949,6 +1949,12 @@ function toast(msg){
   t.textContent=msg; t.classList.add('show');
   clearTimeout(window._toastT); window._toastT=setTimeout(function(){t.classList.remove('show');},1600);
 }
+function openPolymarket(q){
+  q=String(q==null?'':q).trim();
+  if(!q){ toast('无题目可搜索'); return; }
+  var url='https://polymarket.com/markets?q='+encodeURIComponent(q.slice(0,80));
+  window.open(url,'_blank');
+}
 function renderMMMarkets(list){
   window._mmList = list||[];
   const tb=document.getElementById('mm-tbl'); if(!tb) return;
@@ -1981,7 +1987,7 @@ function showMMDetail(i){
   ];
   let html=rows.map(r=>`<div class="mk"><span class="k">${r[0]}</span><span class="v">${r[1]}</span></div>`).join('');
   html+=`<div class="mk col"><span class="k">完整题目</span><span class="v">${escapeHtml(m.question||'')}</span></div>`;
-  html+=`<div class="mk-actions"><button class="mk-btn" onclick="copyText(${JSON.stringify(m.token_id||'')})">📋 复制 Token ID</button><button class="mk-btn" onclick="copyText(${JSON.stringify(m.question||'')})">📋 复制题目</button></div>`;
+  html+=`<div class="mk-actions"><button class="mk-btn" onclick="copyText(${JSON.stringify(m.token_id||'')})">📋 复制 Token ID</button><button class="mk-btn" onclick="copyText(${JSON.stringify(m.question||'')})">📋 复制题目</button><button class="mk-btn" onclick="openPolymarket(${JSON.stringify(m.question||'')})">🔗 Polymarket 搜索</button></div>`;
   document.getElementById('mm-modal-body').innerHTML=html;
   document.getElementById('mm-modal-title').innerHTML='🎯 做市标的 · 全部信息';
   document.getElementById('mm-modal-f').textContent='数据来自选标快照 MM_DETAIL，每 MM_REFRESH 轮随盘口刷新一次。完整题目为 Polymarket 原始市场问题。';
@@ -2003,7 +2009,7 @@ function showLiveDetail(i){
   ];
   let html=rows.map(r=>`<div class="mk"><span class="k">${r[0]}</span><span class="v">${r[1]}</span></div>`).join('');
   html+=`<div class="mk col"><span class="k">完整题目</span><span class="v">${escapeHtml(m.q_full||m.question||'')}</span></div>`;
-  html+=`<div class="mk-actions"><button class="mk-btn" onclick="copyText(${JSON.stringify(m.token_id||'')})">📋 复制 Token ID</button><button class="mk-btn" onclick="copyText(${JSON.stringify(m.q_full||m.question||'')})">📋 复制题目</button></div>`;
+  html+=`<div class="mk-actions"><button class="mk-btn" onclick="copyText(${JSON.stringify(m.token_id||'')})">📋 复制 Token ID</button><button class="mk-btn" onclick="copyText(${JSON.stringify(m.q_full||m.question||'')})">📋 复制题目</button><button class="mk-btn" onclick="openPolymarket(${JSON.stringify(m.q_full||m.question||'')})">🔗 Polymarket 搜索</button></div>`;
   document.getElementById('mm-modal-title').innerHTML='📡 真实行情 · 全部信息';
   document.getElementById('mm-modal-f').textContent='数据来自 Gamma 真实盘口快照，每 15s 随 /api/markets 刷新。完整题目为 Polymarket 原始市场问题。';
   document.getElementById('mm-modal-body').innerHTML=html;
