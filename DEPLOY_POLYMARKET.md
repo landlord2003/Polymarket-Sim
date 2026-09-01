@@ -97,7 +97,7 @@ SIM_MODE=inv FILL_BASE=0.30 PRICE_REFRESH_SEC=150 AUTO_REPORT_MIN=30 python a_sh
 | `APPLY_FILL` | `1` | `0`=关闭概率成交，退回 100% 成交（仅调试用） |
 | `LIQ_REF` | `30000.0` | 流动性参考值，达到时基础成交率 → ~0.92 |
 | `PRICE_REFRESH_SEC` | `150` | 真实盘口刷新间隔（秒）；一次全量拉取约 20s，**切勿设太小以免被 Gamma 限流** |
-| `AUTO_REPORT_MIN` | `30` | 自动报告间隔（分钟）；`0`=关闭自动报告 |
+| `AUTO_REPORT_MIN` | `120` | 自动报告间隔（分钟）；`0`=关闭自动报告。**默认 120 = 每 2 小时推一次钉钉周期报告**（2026-09-01 由 30 改 120，降频避免刷屏） |
 | `SIM_RESET` | （不设） | 设为 `1` 启动时清空模拟账本重来 |
 | `SHUTDOWN_TOKEN` | `sim-stop-8787`（弱默认） | **关停端点鉴权**（P0-A）：`/api/shutdown` 必须带此 token（query `?token=` 或 `Authorization: Bearer`）。局域网部署强烈建议设为随机长串，否则任意同网主机可关停服务 |
 | `FILL_CALIBRATE_APPLY` | `0` | **成交率影子标定应用开关**（P1-A）：`1`=把测量出的 `recommended_base` 应用到 `FILL_BASE`；默认 `0`=仅测量、不改成交假设 |
@@ -145,7 +145,7 @@ SIM_MODE=inv FILL_BASE=0.30 PRICE_REFRESH_SEC=150 AUTO_REPORT_MIN=30 python a_sh
 ## 9. 报告与数据落盘
 
 - 报告 / 账本 / 日志均在 `output/`（已 `.gitignore`，**不入库**）。
-- 自动报告每 `AUTO_REPORT_MIN` 分钟生成 `output/sim_report_*.html` / `.md`；启动即先出一份。**每份报告生成后自动推钉钉**（P0-C 闭环，未配机器人则静默跳过）。
+- 自动报告每 `AUTO_REPORT_MIN` 分钟生成 `output/sim_report_*.html` / `.md`（默认 120 = 每 2 小时）；启动即先出一份。**每份报告生成后自动推钉钉**（P0-C 闭环，未配机器人则静默跳过）。另有一条独立的 `sim_pipeline.py --runs 1 --push-dingtalk` 自动化（每 6 小时跑完整流水线+反馈，用途不同，不在此 2 小时间隔内）。
 - 手动导出：看板「📤 导出报告」按钮，或调 `/api/export_report`。
 
 ---

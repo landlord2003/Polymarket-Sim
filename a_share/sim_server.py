@@ -157,7 +157,7 @@ _load_dotenv()
 
 
 # ============ P2-3 报告自动化 ============
-AUTO_REPORT_MIN = int(os.environ.get("AUTO_REPORT_MIN", "30") or 30)  # 0=关闭自动报告
+AUTO_REPORT_MIN = int(os.environ.get("AUTO_REPORT_MIN", "120") or 120)  # 0=关闭自动报告；默认120=每2小时推一次钉钉周期报告
 
 
 def _scope_note(tf, n_filt, n_all):
