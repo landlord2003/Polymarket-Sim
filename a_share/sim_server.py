@@ -35,7 +35,7 @@ from sim_rigor import RigorVirtualBook, rigor_params_from_config  # noqa: E402
 import sim_rigor as R  # noqa: E402  (P1-2 敏感性分析用 R.mm_param_sensitivity)
 import polymarket as P  # noqa: E402
 # 复用 sim_report 的已验证报告渲染函数（HTML/Markdown），避免双重实现
-from sim_report import build_html, build_md, load_trades  # noqa: E402
+from sim_report import build_html, build_md, load_trades, write_trades_csv  # noqa: E402
 from notify import send_markdown as ding_send_markdown  # noqa: E402  (P0-C 周期报告自动推钉钉)
 import risk_control as RC  # noqa: E402  (P3-4 金融风控层：仓位/日亏/kill switch)
 
@@ -1425,6 +1425,7 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
   <span class="badge" id="compbadge">合规 —</span>
   <span class="sndbtn" id="snd" title="成交音效开关（默认关）">🔇 音效</span>
   <button class="rptbtn" id="export" title="生成并打开实况与统计报告">📤 导出报告</button>
+  <button class="rptbtn" id="exportcsv" title="下载全量成交 CSV（审计用，含全部历史成交）" style="border-color:var(--mut);color:var(--mut)">📥 下载成交CSV</button>
   <span class="badge">引擎: RigorVirtualBook.market_make</span>
 </header>
 <div class="banner"><span id="qsr">✅ 行情来自<b>真实 Polymarket 盘口</b>（urllib 直连 Gamma，已合规过滤政治/地缘/军事等敏感类）</span>。
@@ -1909,6 +1910,20 @@ tickState(); tickLive();
     });
   };
 })();
+
+// 下载全量成交 CSV 按钮：点一下触发浏览器下载（端点返回 attachment）
+(function(){
+  var btn=document.getElementById('exportcsv');
+  if(!btn) return;
+  btn.onclick=function(){
+    btn.disabled=true; btn.textContent='⏳ 生成中…';
+    var a=document.createElement('a');
+    a.href='/api/trades_csv';
+    a.download='trades_export.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function(){btn.textContent='📥 下载成交CSV'; btn.disabled=false;}, 4000);
+  };
+})();
 </script></body></html>"""
 
 
@@ -2118,6 +2133,33 @@ class H(BaseHTTPRequestHandler):
                 self.wfile.write(body)
             except Exception as ex:
                 body = json.dumps({"ok": False, "error": str(ex)}, ensure_ascii=False).encode("utf-8")
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+        elif u.path == "/api/trades_csv":
+            # 全量成交 CSV 下载（审计用）：从 trades.jsonl 生成并作为附件返回
+            try:
+                _stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+                _csv_path = os.path.join(os.path.dirname(_HERE), "output",
+                                        "trades_export_%s.csv" % _stamp)
+                _all = load_trades(0)
+                if not write_trades_csv(_all, _csv_path):
+                    raise RuntimeError("CSV 写入失败")
+                with open(_csv_path, "rb") as f:
+                    data = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Content-Disposition",
+                                 "attachment; filename=trades_export_%s.csv" % _stamp)
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(data)
+            except Exception as ex:
+                body = json.dumps({"ok": False, "error": str(ex)},
+                                  ensure_ascii=False).encode("utf-8")
                 self.send_response(500)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
