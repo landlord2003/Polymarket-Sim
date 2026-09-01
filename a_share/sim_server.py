@@ -1333,6 +1333,7 @@ header h1{margin:0;font-size:19px}
 @media(max-width:820px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .card{background:linear-gradient(160deg,var(--panel),#0c131d);border:1px solid var(--line);border-radius:12px;padding:13px 16px;transition:transform .25s,box-shadow .25s,border-color .25s}
 .card:hover{transform:translateY(-3px);box-shadow:0 8px 22px rgba(70,176,255,.16);border-color:#2a3c57}
+.card.click{cursor:pointer}.card.click:hover{border-color:var(--acc);box-shadow:0 8px 22px rgba(70,176,255,.22)}.card.click .k::after{content:' ›';color:var(--acc)}
 .card .k{color:var(--mut);font-size:12px}.card .v{font-size:21px;font-weight:700;margin-top:4px;font-variant-numeric:tabular-nums;transition:color .4s}
 .v.up{color:var(--up)}.v.dn{color:var(--dn)}.v.b{color:var(--acc)}
 .mmtag{display:inline-block;margin:3px 5px 0 0;padding:2px 8px;border-radius:11px;background:#101a28;border:1px solid var(--line);font-size:11.5px;color:var(--fg)}.mmtag b{color:var(--acc);font-variant-numeric:tabular-nums}
@@ -1660,6 +1661,17 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
     <div class="mmodal-f" id="mm-modal-f">数据来自选标快照 MM_DETAIL，每 MM_REFRESH 轮随盘口刷新一次。完整题目为 Polymarket 原始市场问题。</div>
   </div>
 </div>
+
+<div class="mmodal" id="attr-modal" onclick="if(event.target===this)closeAttr()">
+  <div class="mmodal-box">
+    <div class="mmodal-h"><span>🧮 累计锁利 · 盈亏归因（瀑布）</span> <button class="mmodal-x" onclick="closeAttr()">✕</button></div>
+    <div class="mmodal-body">
+      <div class="attr-chart" id="attr-modal-chart"></div>
+      <div class="note" id="attr-modal-net">净锁利: $0（各分量之和，恒等式闭合）</div>
+    </div>
+    <div class="mmodal-f">累计锁利 = 各分量之和：毛价差捕获 − 走簿滑点 − 手续费 − 逆向选择损耗 + 结算净损益（恒等式闭合）。数据来自 /api/attribution，每 2 秒随看板刷新。</div>
+  </div>
+</div>
 <script>
 function fmt(n){return (n==null)?'-':Number(n).toLocaleString('en-US',{maximumFractionDigits:2})}
 function money(n){return '$'+Number(n).toLocaleString('en-US',{maximumFractionDigits:2})}
@@ -1683,7 +1695,7 @@ function setNum(id,val){const el=document.getElementById(id); if(!el)return; el.
 document.getElementById('cards').innerHTML=
   ['<div class="card"><div class="k">轮次</div><div class="v b" id="c-round">0</div></div>',
    '<div class="card" title="cash = 实际现金流，已含未平仓库存名义 + 建模逆向选择损耗；它不等于账户总值，看总值请认「盯市权益」"><div class="k">现金(含未平仓)</div><div class="v b" id="c-cash">$0</div></div>',
-   '<div class="card"><div class="k">累计锁利</div><div class="v b" id="c-real">$0</div></div>',
+   '<div class="card click" title="点击查看盈亏归因（瀑布图）" onclick="showAttributionModal()"><div class="k">累计锁利</div><div class="v b" id="c-real">$0</div></div>',
    '<div class="card"><div class="k">本轮锁利</div><div class="v b" id="c-rpnl">$0</div></div>',
    '<div class="card"><div class="k">盯市权益</div><div class="v b" id="c-eq">$0</div></div>',
    '<div class="card"><div class="k">浮动盈亏</div><div class="v b" id="c-unreal">$0</div></div>',
@@ -1899,8 +1911,8 @@ function tickState(){
   fetch('/api/attribution').then(r=>r.json()).then(renderAttribution).catch(()=>{});
   fetch('/api/compliance').then(r=>r.json()).then(renderCompliance).catch(()=>{});
 }
-function renderAttribution(a){
-  if(!a||a.error) return;
+function buildAttrRows(a){
+  if(!a||a.error) return {rows:'', net:''};
   const items=[
     ['毛价差捕获', a.gross_spread, 'up'],
     ['走簿滑点', a.walk_the_book, 'dn'],
@@ -1910,21 +1922,37 @@ function renderAttribution(a){
   ];
   const net=Number(a.net||0);
   const maxv=Math.max(1e-6, ...items.map(i=>Math.abs(Number(i[1]||0))), Math.abs(net));
-  const el=document.getElementById('attr-chart');
-  if(el){
-    const row=(lbl,v,cls,netRow)=>{
-      const val=Number(v||0);
-      const w=Math.max(2, Math.abs(val)/maxv*100);
-      const sign=val>=0?'+':'−';
-      return `<div class="attr-row${netRow?' net':''}"><div class="lbl">${lbl}</div>`+
-        `<div class="bar-wrap"><div class="bar ${cls}" style="width:${w}%"></div></div>`+
-        `<div class="val ${cls}">${sign}$${Math.abs(val).toFixed(2)}</div></div>`;
-    };
-    el.innerHTML=items.map(it=>row(it[0],it[1],it[2],false)).join('')+row('= 净锁利',net,net>=0?'up':'dn',true);
-  }
-  const netel=document.getElementById('attr-net');
-  if(netel){netel.textContent='净锁利: $'+net.toFixed(2)+'（各分量之和，恒等式闭合）';}
+  const row=(lbl,v,cls,netRow)=>{
+    const val=Number(v||0);
+    const w=Math.max(2, Math.abs(val)/maxv*100);
+    const sign=val>=0?'+':'−';
+    return `<div class="attr-row${netRow?' net':''}"><div class="lbl">${lbl}</div>`+
+      `<div class="bar-wrap"><div class="bar ${cls}" style="width:${w}%"></div></div>`+
+      `<div class="val ${cls}">${sign}$${Math.abs(val).toFixed(2)}</div></div>`;
+  };
+  const rows=items.map(it=>row(it[0],it[1],it[2],false)).join('')+row('= 净锁利',net,net>=0?'up':'dn',true);
+  return {rows:rows, net:'净锁利: $'+net.toFixed(2)+'（各分量之和，恒等式闭合）'};
 }
+function renderAttribution(a){
+  window._attr=a;  // 缓存最新归因，供「累计锁利」卡片点击弹窗复用
+  if(!a||a.error) return;
+  const r=buildAttrRows(a);
+  const el=document.getElementById('attr-chart');
+  if(el) el.innerHTML=r.rows;
+  const netel=document.getElementById('attr-net');
+  if(netel) netel.textContent=r.net;
+}
+function showAttributionModal(){
+  const box=document.getElementById('attr-modal');
+  if(!box) return;
+  const r=buildAttrRows(window._attr);
+  const el=document.getElementById('attr-modal-chart');
+  if(el) el.innerHTML=r.rows || '<div class="note">暂无归因数据，请稍候（看板每 2 秒刷新一次）</div>';
+  const netel=document.getElementById('attr-modal-net');
+  if(netel) netel.textContent=r.net;
+  box.style.display='flex';
+}
+function closeAttr(){ const b=document.getElementById('attr-modal'); if(b) b.style.display='none'; }
 function escapeHtml(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function copyText(txt){
   txt=String(txt==null?'':txt);
@@ -2063,7 +2091,7 @@ function renderTrades(){
   });
   return {fresh:fresh, freshTrade:freshTrade};
 }
-document.addEventListener('keydown',function(e){if(e.key==='Escape') closeMM();});
+document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeMM(); closeAttr();}});
 function renderCompliance(c){
   if(!c||c.error) return;
   const se=document.getElementById('comp-scanned'); if(se){se.className='v b'; se.textContent=c.n_scanned;}
