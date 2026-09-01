@@ -35,7 +35,7 @@ from sim_rigor import RigorVirtualBook, rigor_params_from_config  # noqa: E402
 import sim_rigor as R  # noqa: E402  (P1-2 敏感性分析用 R.mm_param_sensitivity)
 import polymarket as P  # noqa: E402
 # 复用 sim_report 的已验证报告渲染函数（HTML/Markdown），避免双重实现
-from sim_report import build_html, build_md  # noqa: E402
+from sim_report import build_html, build_md, load_trades  # noqa: E402
 from notify import send_markdown as ding_send_markdown  # noqa: E402  (P0-C 周期报告自动推钉钉)
 import risk_control as RC  # noqa: E402  (P3-4 金融风控层：仓位/日亏/kill switch)
 
@@ -185,7 +185,7 @@ def build_and_write_report(top_n=15, stamp=None):
             continue
         mout.append({
             "question": (q[:90] + ("…" if len(q) > 90 else "")),
-            "tag": classify(q),
+            "tag": market_cat(m),
             "yes_bid": m.get("yes_bid"), "yes_ask": m.get("yes_ask"),
             "no_bid": m.get("no_bid"), "no_ask": m.get("no_ask"),
             "liquidity": round(float(m.get("liquidity") or 0), 0),
@@ -200,10 +200,14 @@ def build_and_write_report(top_n=15, stamp=None):
     md_name = "sim_report_%s.md" % stamp
     html_path = os.path.join(out_dir, html_name)
     md_path = os.path.join(out_dir, md_name)
+    # 逐笔成交明细：优先从 trades.jsonl 读最近 100 笔（全量历史），回退 STATE.positions
+    _trades = load_trades(100)
+    if not _trades:
+        _trades = STATE.get("positions") or []
     with open(html_path, "w", encoding="utf-8") as f:
-        f.write(build_html(st, s, mkts, top_n, ts))
+        f.write(build_html(st, s, mkts, top_n, ts, trades=_trades))
     with open(md_path, "w", encoding="utf-8") as f:
-        f.write(build_md(st, s, mkts, top_n, ts))
+        f.write(build_md(st, s, mkts, top_n, ts, trades=_trades))
     return {"html": html_path, "md": md_path, "html_name": html_name,
             "md_name": md_name, "stamp": stamp, "ts": ts,
             "equity": st["equity"], "realized": st["realized"], "round": st["round"]}

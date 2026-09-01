@@ -9,6 +9,7 @@
     .venv/Scripts/python.exe a_share/sim_report.py --out-dir output --top 15
 """
 import argparse
+import csv
 import datetime
 import json
 import os
@@ -56,6 +57,61 @@ def _cls(v):
         return ""
 
 
+# ------------------------------ 成交流水读取 / CSV 导出 ------------------------------
+def load_trades(n, base=None):
+    """从 trades.jsonl 读取成交流水，返回最后 n 笔（n<=0 表示全部）。找不到返回 []。
+
+    优先读 a_share/data/trades.jsonl（服务器落盘位置），回退 output/、data/。
+    """
+    base = base or ROOT
+    cand = [
+        os.path.join(base, "a_share", "data", "trades.jsonl"),
+        os.path.join(base, "output", "trades.jsonl"),
+        os.path.join(base, "data", "trades.jsonl"),
+    ]
+    path = next((p for p in cand if os.path.exists(p)), None)
+    if not path:
+        return []
+    rows = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    pass
+    except Exception:
+        return []
+    if n and n > 0:
+        rows = rows[-n:]
+    return rows
+
+
+def write_trades_csv(trades, path):
+    """把成交流水导出为 CSV（含可读时间列）。成功返回 True。"""
+    cols = ["time", "ts", "round", "mkt", "tag", "side", "entry",
+            "size", "pnl", "slip", "cash_after", "q"]
+    try:
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+            w.writeheader()
+            for t in trades:
+                row = dict(t)
+                try:
+                    row["time"] = datetime.datetime.fromtimestamp(
+                        float(t.get("ts") or 0)).strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    row["time"] = ""
+                w.writerow(row)
+        return True
+    except Exception as e:
+        print("CSV 写入失败: %s" % e)
+        return False
+
+
 # ------------------------------ HTML ------------------------------
 CSS = """
 :root{--bg:#070a0f;--panel:#111824;--ink:#dfe7f2;--mut:#7e8aa0;--line:#1c2738;
@@ -94,7 +150,7 @@ footer{margin-top:34px;padding-top:14px;border-top:1px solid var(--line);color:v
 """
 
 
-def build_html(st, s, mkts, top_n, ts):
+def build_html(st, s, mkts, top_n, ts, trades=None):
     f = st.get("fill") or {}
     mode_txt = "真实做市（库存管理）" if st.get("mode") == "inv" else "同轮双边建平（乐观对照）"
     fills_on = f.get("on", False)
@@ -153,8 +209,8 @@ def build_html(st, s, mkts, top_n, ts):
                         _num(m.get("yes_bid"), 4), _num(m.get("yes_ask"), 4),
                         _num(m.get("no_bid"), 4), _money(m.get("liquidity"))))
 
-    # 最近成交明细（治本补充：逐笔交易详细内容，来自 /api/state['positions']）
-    trades = st.get("positions") or []
+    # 最近成交明细（治本补充：逐笔交易详细内容）
+    trades = trades if trades is not None else (st.get("positions") or [])
     n_trades = len(trades)
     trade_rows = ""
     for t in trades:
@@ -317,7 +373,7 @@ FILL_BASE 是拍的参数。真实的成交率<b>只能用真钱小额挂单测�
 
 
 # ------------------------------ Markdown ------------------------------
-def build_md(st, s, mkts, top_n, ts):
+def build_md(st, s, mkts, top_n, ts, trades=None):
     f = st.get("fill") or {}
     fills_on = f.get("on", False)
     fill_rate = f.get("rate", 0) if fills_on else 100.0
@@ -325,7 +381,7 @@ def build_md(st, s, mkts, top_n, ts):
 
     L = []
     A = L.append
-    trades = st.get("positions") or []
+    trades = trades if trades is not None else (st.get("positions") or [])
     n_trades = len(trades)
     A("# Polymarket 模拟盘 · 实况与统计报告")
     A("")
@@ -464,6 +520,10 @@ def main():
     ap.add_argument("--out-dir", default=os.path.join(ROOT, "output"))
     ap.add_argument("--base", default=BASE)
     ap.add_argument("--top", type=int, default=15, help="盘口样本条数")
+    ap.add_argument("--trades", type=int, default=40,
+                    help="报告内逐笔成交明细条数（0=全部，从 trades.jsonl 读取）")
+    ap.add_argument("--csv", action="store_true",
+                    help="额外导出全量成交 CSV（trades_export_<时间戳>.csv）")
     args = ap.parse_args()
 
     base = args.base.rstrip("/")
@@ -483,15 +543,27 @@ def main():
     html_path = os.path.join(args.out_dir, "sim_report_%s.html" % stamp)
     md_path = os.path.join(args.out_dir, "sim_report_%s.md" % stamp)
 
+    # 读取成交流水（--trades 控制报告内条数；0=全部）
+    trades = load_trades(args.trades)
+
     with open(html_path, "w", encoding="utf-8") as f:
-        f.write(build_html(st, s, mkts, args.top, ts))
+        f.write(build_html(st, s, mkts, args.top, ts, trades=trades))
     with open(md_path, "w", encoding="utf-8") as f:
-        f.write(build_md(st, s, mkts, args.top, ts))
+        f.write(build_md(st, s, mkts, args.top, ts, trades=trades))
 
     print()
     print("已生成报告：")
     print("  HTML     %s  (%.0f KB)" % (html_path, os.path.getsize(html_path) / 1024))
     print("  Markdown %s  (%.0f KB)" % (md_path, os.path.getsize(md_path) / 1024))
+    if args.trades and args.trades > 0:
+        print("  逐笔明细  最近 %d 笔（共读入 %d 笔）" % (min(args.trades, len(trades)), len(trades)))
+    else:
+        print("  逐笔明细  全部 %d 笔" % len(trades))
+    if args.csv:
+        csv_path = os.path.join(args.out_dir, "trades_export_%s.csv" % stamp)
+        if write_trades_csv(load_trades(0), csv_path):
+            print("  CSV      %s  (%.0f KB, 全量 %d 笔)"
+                  % (csv_path, os.path.getsize(csv_path) / 1024, len(load_trades(0))))
     print()
     print("  运行起点 %s | 轮次 %s | 权益 %s | 累计锁利 %s | 成交率 %.1f%%"
           % (s.get("run_start"), s.get("round"), _money(st.get("equity")),
