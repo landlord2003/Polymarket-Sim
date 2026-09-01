@@ -1307,6 +1307,7 @@ header h1{margin:0;font-size:19px}
 .v.up{color:var(--up)}.v.dn{color:var(--dn)}.v.b{color:var(--acc)}
 .mmtag{display:inline-block;margin:3px 5px 0 0;padding:2px 8px;border-radius:11px;background:#101a28;border:1px solid var(--line);font-size:11.5px;color:var(--fg)}.mmtag b{color:var(--acc);font-variant-numeric:tabular-nums}
 .mmdiv{color:var(--mut);font-size:11px;margin-top:7px}.mmdiv.ok{color:#7fe9bd}.mmdiv.warn{color:#f0c674}
+.mmbox{margin-top:6px;border-top:1px dashed var(--line);padding-top:11px}
 /* 主区：面板直接作为网格项（不再包一层 .col —— 那会让窄屏出现"孤儿第三列"）
    行情榜跨两行，其余 4 个面板各占一格：三列时是 3×2、两列时是 2×3，任何宽度都填满且对称 */
 .big{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:stretch}
@@ -1439,14 +1440,20 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
       <div class="note">BUY=建仓（锁利 0），SELL=平仓（显示本笔锁利）；每笔在真实盘口价位成交。新成交行红/绿闪光。</div>
     </div>
 
-    <!-- 本轮 / 累计锁利 -->
+    <!-- 锁利汇总 · 做市分布（合并：实盘成交率 LIVE / 做市类别分布 / 本轮·累计锁利） -->
     <div class="panel">
-      <h2>💰 本轮 / 累计锁利</h2>
-      <div class="cards" style="grid-template-columns:1fr 1fr;margin:0">
+      <h2>💰 锁利汇总 · 做市分布</h2>
+      <div class="cards" style="grid-template-columns:repeat(3,minmax(0,1fr));margin:0 0 12px">
         <div class="card"><div class="k">本轮锁利</div><div class="v b" id="ninv">$0</div></div>
         <div class="card"><div class="k">累计锁利</div><div class="v" id="invn">$0</div></div>
+        <div class="card" title="仅在 LIVE_MODE=1（真钱实盘）时才有链上真实成交观测；当前 DRY_RUN 模拟盘不挂真单，故无实盘成交率"><div class="k">实盘成交率(LIVE)</div><div class="v b" id="c-livefill">—</div></div>
       </div>
-      <div class="note">累计锁利 = 全部平仓笔锁利之和（落盘累计，重启不丢）。</div>
+      <div class="mmbox">
+        <div class="k" style="margin-bottom:5px">做市类别分布<span class="sub" style="font-weight:400;margin-left:5px">每类上限 MM_N_PER_CAT，从 300 盘口挑 20</span></div>
+        <div class="v sm" id="c-mmcat" style="font-size:12px;font-weight:400;line-height:1.7">—</div>
+        <div class="mmdiv" id="c-mmdiv"></div>
+      </div>
+      <div class="note">累计锁利 = 全部平仓笔锁利之和（落盘累计，重启不丢）；实盘成交率仅 LIVE_MODE=1 真钱实盘才有链上真实观测。</div>
     </div>
     <!-- 统计中心 -->
     <div class="panel">
@@ -1564,9 +1571,7 @@ document.getElementById('cards').innerHTML=
    '<div class="card" title="模型假设的成交率：挂单按价格改善幅度判定被打到的概率（FILL_BASE 等参数），非链上真实观测"><div class="k">模拟成交率</div><div class="v b" id="c-fill">0%</div></div>',
    '<div class="card"><div class="k">敞口名义</div><div class="v b" id="c-inv">$0</div></div>',
    '<div class="card"><div class="k">真实盘口</div><div class="v b" id="c-live">0</div></div>',
-   '<div class="card"><div class="k">做市市场</div><div class="v b" id="c-mm">0</div></div>',
-   '<div class="card" title="做市标的按类别分散（每类上限 MM_N_PER_CAT），避免集中在单一类别"><div class="k">做市类别分布</div><div class="v sm" id="c-mmcat" style="font-size:12px;font-weight:400;line-height:1.7;margin-top:6px">—</div><div class="mmdiv" id="c-mmdiv"></div></div>',
-   '<div class="card" title="仅在 LIVE_MODE=1（真钱实盘）时才有链上真实成交观测；当前 DRY_RUN 模拟盘不挂真单，故无实盘成交率"><div class="k">实盘成交率(LIVE)</div><div class="v b" id="c-livefill">—</div></div>'].join('');
+   '<div class="card"><div class="k">做市市场</div><div class="v b" id="c-mm">0</div></div>'].join('');
 let seen=new Set(), prevRound=0;
 function flashBeat(id){const b=document.getElementById(id); if(!b)return; b.classList.add('hot'); setTimeout(()=>b.classList.remove('hot'),650);}
 let audioCtx=null, soundOn=false;
