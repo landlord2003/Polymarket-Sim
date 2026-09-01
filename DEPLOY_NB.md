@@ -4,7 +4,7 @@
 > 本文件只讲「怎么把项目拉下来、配好、先模拟跑通、再小资金实盘」。
 > 模拟盘主线文档见 `DEPLOY_POLYMARKET.md`；本文件是其实盘增强版。
 
-> **文档时效**：反映至 2026-09-01 迭代，代码 latest `0f829cc`（GitHub `landlord2003/Polymarket-Sim` master）。北京实例为 DRY_RUN 模拟盘（零真钱、行情为缓存快照非实时）；NB 开放省部署后自动转实时 `gamma` 盘口。
+> **文档时效**：反映至 2026-09-01 迭代，代码 latest `3a39e01`（GitHub `landlord2003/Polymarket-Sim` master）。北京实例为 DRY_RUN 模拟盘（零真钱、行情为缓存快照非实时）；NB 开放省部署后自动转实时 `gamma` 盘口。
 
 ---
 
@@ -199,9 +199,12 @@ flowchart LR
 
 ### 6.2 看板「📥 下载成交 CSV」按钮（最省事）
 
-- 入口：看板 header 右侧「📥 下载成交 CSV」按钮。
-- 输入框：「起始轮次」（`since_round`，只导该轮及之后）、「日期 `YYYY-MM-DD`」（`date`，只导当天）。两框留空 = 全量。
-- 实现：前端拼 `?since_round=&date=` → 后端 `/api/trades_csv` 过滤并作附件下载。
+- 入口：看板 header 右侧「📥 下载成交 CSV」按钮 + 左侧「导出范围」下拉（**CSV 与报告共用同一选择器**）。
+- 下拉五选一：「全部」（默认）/「最近 N 笔」/「按时间区间」/「按日期」/「按轮次」。选好后两个按钮都按该范围生成：
+  - 「📥 下载成交 CSV」→ 按范围导出 `trades.jsonl`（落盘 `output/` + 浏览器下载）。
+  - 「📤 导出报告」→ 报告内「最近成交明细」+「按类别锁利汇总」只统计该范围（顶部核心指标仍为全段口径，报告内用横幅明示范围）。
+- 范围对应 query：`limit=N` / `since_time=..&until_time=..`（datetime-local 本地时间）/ `date=YYYY-MM-DD` / `since_round=&until_round=`。全留空 = 全量。
+- 实现：前端 `buildRangeQuery()` 拼参 → 后端 `/api/trades_csv`、`/api/export_report` 用 `filter_trades`（时间区间 + limit）过滤。
 
 ### 6.3 独立脚本 `sim_report.py`（命令行 / 定时任务）
 
@@ -299,3 +302,20 @@ python a_share/backfill_tags.py --map-file map.json
 | `sim_report.py` | **审计与导出**：读 `trades.jsonl` 生成可读报告（含按类别锁利汇总）+ 全量/区间成交 CSV（`--trades/--csv/--since-round/--until-round/--date`）+ 定时归档（`--archive` 全量按日 / `--archive-daily` 前一天） |
 | `backfill_tags.py` | **历史 tag 回填**：把旧成交的 `tag` 用 Gamma 真实类目补正（`--gamma` 实时抓 / `--map-file` 离线映射；`--dry-run` 预览、自动备份、幂等） |
 | `compliance.py` | 合规过滤（NB 下由 `COMPLIANCE_FILTER=0` 关闭） |
+
+---
+
+## 8. 看板交互增强（2026-09-01 迭代）
+
+> 本次迭代在看板与导出侧补齐了交互与审计能力，NB 伙伴部署后直接可用：
+
+- **成交 CSV / 报告 范围三选一**：顶部「导出范围」下拉（全部 / 最近 N 笔 / 时间区间 / 日期 / 轮次）同时驱动「下载成交 CSV」与「导出报告」两个按钮（§6.2）。
+- **KPI「累计锁利」卡片点击弹盈亏归因**：点顶部「💰 累计锁利」卡片弹瀑布图，拆解毛价差 / 走簿滑点 / 手续费 / 逆向选择 / 结算 → 净锁利（恒等式闭合）；✕ / 遮罩 / ESC 关闭。
+- **三表点击弹详情**：做市标的 / 真实行情 / 实时成交三张表行均点开详情弹窗，含「📋 复制 Token ID / 复制题目」「🔗 在 Polymarket 搜索」按钮。
+- **实时成交表筛选**：按类别 + 方向筛选。
+- **钉钉周期报告降频为 2 小时**：`AUTO_REPORT_MIN` 默认 30→120（§6 / DEPLOY_POLYMARKET.md §6）。
+- **回归测试 13 项**：`a_share/test_export_range.py` 覆盖范围筛选与横幅渲染，`run_tests.py` 共 20 项全过。
+
+## 9. 交接清单（NB 伙伴勾选）
+
+> 完整勾选表见 **`HANDOFF_NB.md`**（逐项打勾，走完即具备实盘条件）。
