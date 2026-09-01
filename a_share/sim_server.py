@@ -1309,6 +1309,8 @@ header h1{margin:0;font-size:19px}
 .beat.hot{background:var(--amber);box-shadow:0 0 14px var(--amber);animation:beat .42s infinite}
 @keyframes beat{0%,100%{transform:scale(1);opacity:1}30%{transform:scale(1.6);opacity:.5}}
 .badge{font-size:12px;padding:3px 10px;border-radius:20px;background:#101a28;color:var(--mut);border:1px solid var(--line);transition:all .3s}
+.conn-hint{display:none;margin:8px 22px 0;padding:10px 14px;border-radius:8px;background:#2a1414;color:#ffb4b4;border:1px solid #5a2a2a;font-size:13px;line-height:1.6}
+.conn-hint b{color:#ffd2d2}
 .badge.live{background:#0e2419;color:#7fe9bd;border-color:#1c503a}
 .badge.warn{background:#2a2310;color:#f0c674;border-color:#5a4a1c}
 .badge.err{background:#2a1014;color:#ff8a9a;border-color:#5a1c24}
@@ -1457,6 +1459,7 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
 </style></head>
 <body>
 <div class="ticker"><div class="run" id="tick">正在加载真实 Polymarket 盘口…</div></div>
+<div id="conn-hint" class="conn-hint">⚠️ 看板无法连接后端（状态一直「连接中」）。请在本机用 <b>外部浏览器（Chrome / Edge）</b> 打开 <b>http://127.0.0.1:8787/</b> —— WorkBuddy 内置预览面板的沙箱浏览器访问不到宿主机的 127.0.0.1:8787，属正常现象，不影响模拟盘运行。</div>
 <header>
   <span class="beat" id="beat"></span>
   <h1 class="gtitle">Polymarket 实时模拟交易大屏</h1>
@@ -1763,6 +1766,7 @@ function renderSensitivity(sens){
       +`<td class="${cls}">${e>=0?'+':''}$${Number(p.delta_pnl||0).toFixed(3)}</td></tr>`;
   }).join('');
 }
+var _failCount=0;
 function tickState(){
   fetch('/api/state').then(r=>r.json()).then(s=>{
     document.getElementById('rnd').textContent='round '+s.round;
@@ -1868,9 +1872,13 @@ function tickState(){
         else beep(300,0.12,'sawtooth',0.03);
       }
     }
-  }).catch(()=>{});
-  fetch('/api/stats').then(r=>r.json()).then(renderStats).catch(()=>{});
-  fetch('/api/sensitivity').then(r=>r.json()).then(renderSensitivity).catch(()=>{});
+  }).catch(()=>{
+    _failCount++;
+    const st=document.getElementById('status');
+    if(st && _failCount>=3){ st.className='badge err'; st.textContent='⚠ 连接失败'; }
+    if(_failCount>=3){ const h=document.getElementById('conn-hint'); if(h) h.style.display='block'; }
+  });
+  fetch('/api/stats').then(r=>r.json()).then(renderStats).catch(()=>{});  fetch('/api/sensitivity').then(r=>r.json()).then(renderSensitivity).catch(()=>{});
   fetch('/api/attribution').then(r=>r.json()).then(renderAttribution).catch(()=>{});
   fetch('/api/compliance').then(r=>r.json()).then(renderCompliance).catch(()=>{});
 }
