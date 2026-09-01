@@ -1356,9 +1356,9 @@ header h1{margin:0;font-size:19px}
 /* 当前做市标的：可点击行 + modal */
 #mm-tbl tbody tr{cursor:pointer;transition:background .15s}
 #mm-tbl tbody tr:hover{background:#14202f}
-#mm-tbl th.c-det,#mm-tbl td.c-det,#mkt th.c-det,#mkt td.c-det{width:46px;color:var(--mut);text-align:center}
-#mm-tbl td .more,#mkt td .more{color:var(--mut);font-weight:700;font-size:15px}
-.liverow{cursor:pointer}.liverow:hover{background:rgba(34,197,194,.07)}
+#mm-tbl th.c-det,#mm-tbl td.c-det,#mkt th.c-det,#mkt td.c-det,#trd th.c-det,#trd td.c-det{width:46px;color:var(--mut);text-align:center}
+#mm-tbl td .more,#mkt td .more,#trd td .more{color:var(--mut);font-weight:700;font-size:15px}
+.liverow,.trdrow{cursor:pointer}.liverow:hover,.trdrow:hover{background:rgba(34,197,194,.07)}
 .mmodal{position:fixed;inset:0;background:rgba(4,8,14,.72);display:none;align-items:center;justify-content:center;z-index:60;padding:20px}
 .mmodal.show{display:flex}
 .mmodal-box{background:linear-gradient(160deg,var(--panel),#0c131d);border:1px solid var(--acc);border-radius:14px;max-width:640px;width:100%;max-height:84vh;overflow:auto;box-shadow:0 16px 50px rgba(0,0,0,.5);animation:fade .2s ease}
@@ -1522,7 +1522,7 @@ select{background:#101a28;color:var(--ink);border:1px solid var(--line);border-r
     <div class="panel">
       <h2>🤖 实时成交（过程与结果）</h2>
       <div class="latest"><span class="beat" id="beat2"></span><span style="color:var(--mut)">最新成交：</span><span id="latest-txt">等待第一笔…</span></div>
-      <div class="scroll"><table id="trd"><thead><tr><th>时间</th><th>市场</th><th>类别</th><th>方向</th><th>成交价</th><th>量</th><th>本笔锁利</th><th>滑点</th><th>现金</th></tr></thead><tbody></tbody></table></div>
+      <div class="scroll"><table id="trd"><thead><tr><th>时间</th><th>市场</th><th>类别</th><th>方向</th><th>成交价</th><th>量</th><th>本笔锁利</th><th>滑点</th><th>现金</th><th class="c-det">详情</th></tr></thead><tbody></tbody></table></div>
       <div class="note">BUY=建仓（锁利 0），SELL=平仓（显示本笔锁利）；每笔在真实盘口价位成交。新成交行红/绿闪光。</div>
     </div>
 
@@ -1855,19 +1855,23 @@ function tickState(){
     // 本轮/累计锁利已在顶部 KPI 卡片(c-rpnl/c-real)展示，锁利汇总面板不再重复，避免"两张累计锁利卡片"
     drawCandles(s.equity_curve);
     const t2=document.getElementById('trd').querySelector('tbody');
+    window._trdRows = s.positions||[];
     let fresh=0, freshTrade=null;
-    const rows=s.positions.map(t=>{
+    const rows=s.positions.map((t,i)=>{
       const key=t.ts+'|'+t.mkt+'|'+t.side+'|'+t.entry;
       const isNew=!seen.has(key); if(isNew){seen.add(key);fresh++; if(!freshTrade)freshTrade=t;}
       if(seen.size>400)seen.clear();
       const cls=(t.side==='buy'?'flash-up':'flash-dn');
-      return `<tr class="${isNew?'row-new '+cls:cls}"><td>${t.ts}</td><td class="l">${t.mkt}</td><td>${t.tag||'-'}</td>`+
+      return `<tr class="trdrow ${isNew?'row-new '+cls:cls}" data-i="${i}"><td>${t.ts}</td><td class="l">${t.mkt}</td><td>${t.tag||'-'}</td>`+
         `<td class="${t.side==='buy'?'buy':'sell'}">${(t.side||'').toUpperCase()}</td>`+
         `<td>${t.entry!=null?Number(t.entry).toFixed(4):'-'}</td><td>${t.size}</td>`+
         `<td class="${col((t.pnl||0))}">${t.pnl!=null?'$'+fmt(t.pnl):'-'}</td>`+
-        `<td>${t.slip!=null?Number(t.slip).toFixed(4):'-'}</td><td>$${fmt(t.cash_after)}</td></tr>`;
+        `<td>${t.slip!=null?Number(t.slip).toFixed(4):'-'}</td><td>$${fmt(t.cash_after)}</td><td class="c-det"><span class="more">›</span></td></tr>`;
     }).join('');
     t2.innerHTML=rows;
+    Array.prototype.forEach.call(t2.querySelectorAll('.trdrow'),function(tr){
+      tr.onclick=function(){showTradeDetail(Number(tr.getAttribute('data-i')));};
+    });
     if(fresh>0){
       flashBeat('beat2');
       const t=freshTrade||s.positions[0];
@@ -1973,6 +1977,28 @@ function showLiveDetail(i){
   html+=`<div class="mk col"><span class="k">完整题目</span><span class="v">${escapeHtml(m.q_full||m.question||'')}</span></div>`;
   document.getElementById('mm-modal-title').innerHTML='📡 真实行情 · 全部信息';
   document.getElementById('mm-modal-f').textContent='数据来自 Gamma 真实盘口快照，每 15s 随 /api/markets 刷新。完整题目为 Polymarket 原始市场问题。';
+  document.getElementById('mm-modal-body').innerHTML=html;
+  document.getElementById('mm-modal').classList.add('show');
+}
+function showTradeDetail(i){
+  const t=window._trdRows[i]; if(!t) return;
+  const ts=Number(t.ts||0);
+  const tstr=ts? new Date(ts*1000).toLocaleString('zh-CN',{hour12:false}) : (t.ts||'-');
+  const up=t.pnl!=null && t.pnl>0;
+  const rows=[
+    ['时间', escapeHtml(String(tstr))],
+    ['市场', escapeHtml(t.mkt||'')],
+    ['类别', '<span class="mmtag">'+escapeHtml(t.tag||'-')+'</span>'],
+    ['方向', (t.side||'').toUpperCase()],
+    ['成交价', Number(t.entry||0).toFixed(4)],
+    ['数量', t.size],
+    ['本笔锁利', (t.pnl!=null?'$'+fmt(t.pnl):'-')+' <span style="color:var(--mut)">'+(up?'盈利':'亏损')+'</span>'],
+    ['滑点', t.slip!=null?Number(t.slip).toFixed(4):'-'],
+    ['成交后现金', '$'+fmt(t.cash_after)],
+  ];
+  let html=rows.map(r=>`<div class="mk"><span class="k">${r[0]}</span><span class="v">${r[1]}</span></div>`).join('');
+  document.getElementById('mm-modal-title').innerHTML='🤖 实时成交 · 全部信息';
+  document.getElementById('mm-modal-f').textContent='数据来自 /api/state 的 positions 成交流，每 2s 随盘口刷新。';
   document.getElementById('mm-modal-body').innerHTML=html;
   document.getElementById('mm-modal').classList.add('show');
 }
