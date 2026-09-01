@@ -665,12 +665,28 @@ MM_DETAIL = {}        # 当前做市标的明细（可观测：{token_id: {quest
 
 
 def classify(q):
-    """按题目文本把市场分到类别（复用 polymarket 关键词表）。"""
+    """按题目文本把市场分到类别（复用 polymarket 关键词表）。作为 market_cat 的回退。"""
     ql = (q or "").lower()
     for tag, re_ in P._CAT_RE.items():
         if re_.search(ql):
             return tag
     return "other"
+
+
+def market_cat(m):
+    """治本：优先用 Gamma 原生 category 字段（真实分类）；缺失/占位时回退关键词 classify。
+
+    m 为 fetch_poly_quotes 返回的 Quote 字典（含 category 键，可能为空串）。
+    原生类目如 politics/world/crypto/economy/finance/business/tech/science/sports/
+    entertainment/culture/law/health… 直接作为分布类别，使做市类别分布反映真实盘口结构，
+    而非被 9 个死关键词桶压缩（治本前 64% 市场塌进 other）。
+    """
+    if isinstance(m, dict):
+        c = (m.get("category") or "").strip().lower()
+        if c and c != "other":
+            return c
+        return classify(m.get("question", "") or "")
+    return classify(m if isinstance(m, str) else "")
 
 
 # 合规红线（中国部署，必须过滤政治/地缘/军事敏感市场）。polymarket._is_blocked
@@ -738,7 +754,7 @@ def select_mm(rows):
             continue
         if sp < 0.01:
             continue
-        cat = classify(m.get("question", "")) or "other"
+        cat = market_cat(m) or "other"
         score = liq * (1.0 + 2.0 * sp)   # 价差越宽权重越高
         cand.append((cat, score, m))
     cand.sort(key=lambda x: -x[1])
@@ -957,14 +973,14 @@ def step():
             ya = m.get("yes_ask") or 0
             MM_DETAIL[m["token_id"]] = {
                 "question": (m.get("question") or "")[:80],
-                "tag": classify(m.get("question", "")) or "other",
+                "tag": market_cat(m) or "other",
                 "mid": round((yb + ya) / 2.0, 4) if (yb and ya) else 0,
                 "liquidity": float(m.get("liquidity") or 0),
                 "spread": round(ya - yb, 4) if (yb and ya) else 0,
             }
         _mc = {}
         for m in _sel:
-            c = classify(m.get("question", "")) or "other"
+            c = market_cat(m) or "other"
             _mc[c] = _mc.get(c, 0) + 1
         MM_CATS = _mc
     by_tok = {m.get("token_id"): m for m in (MARKETS_LIVE or [])
@@ -1005,7 +1021,7 @@ def step():
         # inv（新）：每轮只尝试一腿（方向由库存决定：有货挂卖单平仓、无货挂买单建仓），
         #           且必须先通过成交概率判定 —— 挂了不等于成交。未平敞口跨轮持有，
         #           承担真实价格波动，受止损(5%)与全局库存上限约束。
-        tag = classify(qtext)
+        tag = market_cat(m) or "other"
         legs = 1 if SIM_MODE == "inv" else 2
         for _leg in range(legs):
             # B：真实做市下挂单不必然成交，按价格改善幅度判定

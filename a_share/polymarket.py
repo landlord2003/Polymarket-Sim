@@ -451,7 +451,9 @@ def fetch_poly_quotes(limit: int = 300, force: bool = False) -> list:
     主侧(outcomes[0]) 视作 YES 等价；补侧 = 1 - 补价推导。
     额外保留 event_id（来自 m["events"][0]["id"]），供同事件多子市场分组套利。
     不调用 CLOB（本环境 CLOB /book 被地域限制 404），Gamma 顶层盘口更稳定。
-    Quote = {platform,id,token_id,event_id,question,yes_bid,yes_ask,no_bid,no_ask,ts}
+    Quote = {platform,id,token_id,event_id,question,category,yes_bid,yes_ask,no_bid,no_ask,end_date,liquidity,ts}
+    其中 category 取自 Gamma 原生类目字段（治本：用 Polymarket 真实分类，不再自造关键词表），
+    缺失时由调用方 classify() 回退。
     """
     global _FETCH_QUOTES_SOURCE
     now = time.time()
@@ -497,6 +499,9 @@ def fetch_poly_quotes(limit: int = 300, force: bool = False) -> list:
                 "yes_bid": round(ob, 4), "yes_ask": round(oa, 4),
                 "no_bid": round(1 - oa, 4), "no_ask": round(1 - ob, 4),
                 "end_date": m.get("endDate"),   # 到期时间，供时间衰减门控使用
+                # 治本：直接取 Gamma 原生类目（真实分类，如 politics/world/crypto/economy…）
+                # 缺失/空串时留空，由 sim_server.market_cat() 回退关键词 classify
+                "category": (m.get("category") or "").strip().lower(),
                 "liquidity": round(_to_num(m.get("liquidityNum"))
                                    or _to_num(m.get("liquidity")) or 0.0, 2),
                 "ts": now,

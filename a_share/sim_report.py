@@ -153,6 +153,20 @@ def build_html(st, s, mkts, top_n, ts):
                         _num(m.get("yes_bid"), 4), _num(m.get("yes_ask"), 4),
                         _num(m.get("no_bid"), 4), _money(m.get("liquidity"))))
 
+    # 最近成交明细（治本补充：逐笔交易详细内容，来自 /api/state['positions']）
+    trades = st.get("positions") or []
+    n_trades = len(trades)
+    trade_rows = ""
+    for t in trades:
+        side = (t.get("side") or "").upper()
+        sc = "up" if side == "BUY" else "dn"
+        trade_rows += ("<tr><td>%s</td><td>%s</td><td>%s</td><td class='%s'>%s</td>"
+                       "<td>%s</td><td>%s</td><td class='%s'>%s</td><td>%s</td><td>%s</td></tr>"
+                       % (str(t.get("ts")), str(t.get("mkt"))[:40], t.get("tag"),
+                          sc, side, _num(t.get("entry"), 4), _num(t.get("size")),
+                          _cls(t.get("pnl")), _sgn(t.get("pnl")),
+                          _num(t.get("slip"), 4), _money(t.get("cash_after"))))
+
     bt = s.get("best_trade") or {}
     wt = s.get("worst_trade") or {}
 
@@ -237,6 +251,11 @@ def build_html(st, s, mkts, top_n, ts):
 <table><thead><tr><th>市场</th><th>类别</th><th>YES 买</th><th>YES 卖</th><th>NO 买</th><th>流动性</th></tr></thead><tbody>%s</tbody></table>
 <div class="note">数据来自 Polymarket Gamma 实时接口，已过滤政治/地缘/军事等敏感市场（本次合规 %d 个）。</div>
 
+<h2>最近成交明细（最近 %d 笔）</h2>
+<table><thead><tr><th>时间</th><th>市场</th><th>类别</th><th>方向</th><th>成交价</th><th>量</th><th>本笔锁利</th><th>滑点</th><th>现金</th></tr></thead><tbody>%s</tbody></table>
+<div class="note">逐笔来自服务器侧 TRADES 落盘流水（完整记录含全部字段与类别，存于 data/trades.jsonl，自动轮转归档）。
+BUY=建仓（锁利 0），SELL=平仓（显示本笔锁利）；颜色按中国习惯：红=盈利/涨、绿=亏损/跌。</div>
+
 <h2>参数与方法</h2>
 <div class="box">
   <div class="kv"><span class="k">模拟模式</span><span class="v">%s</span></div>
@@ -286,7 +305,7 @@ FILL_BASE 是拍的参数。真实的成交率<b>只能用真钱小额挂单测�
         _sgn(bt.get("pnl")), str(bt.get("mkt"))[:26],
         _sgn(wt.get("pnl")), str(wt.get("mkt"))[:26],
         inv_rows,
-        top_n, mkt_rows, len(mkts.get("markets") or []),
+        top_n, mkt_rows, len(mkts.get("markets") or []), n_trades, trade_rows,
         mode_txt,
         ("开（按价格改善幅度判定）" if fills_on else "关（假设必然成交）"),
         f.get("base"), (st.get("params") or {}).get("adverse"),
@@ -306,6 +325,8 @@ def build_md(st, s, mkts, top_n, ts):
 
     L = []
     A = L.append
+    trades = st.get("positions") or []
+    n_trades = len(trades)
     A("# Polymarket 模拟盘 · 实况与统计报告")
     A("")
     A("- 生成时间：%s" % ts)
@@ -404,6 +425,23 @@ def build_md(st, s, mkts, top_n, ts):
         A("| %s | %s | %s | %s | %s | %s |" % (str(m.get("question"))[:46], m.get("tag"),
                                                _num(m.get("yes_bid"), 4), _num(m.get("yes_ask"), 4),
                                                _num(m.get("no_bid"), 4), _money(m.get("liquidity"))))
+    A("")
+    A("## 最近成交明细（最近 %d 笔）" % n_trades)
+    A("")
+    if trades:
+        A("| 时间 | 市场 | 类别 | 方向 | 成交价 | 量 | 本笔锁利 | 滑点 | 现金 |")
+        A("|---|---|---|---|---|---|---|---|---|")
+        for t in trades:
+            side = (t.get("side") or "").upper()
+            A("| %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+                str(t.get("ts")), str(t.get("mkt"))[:34], t.get("tag"), side,
+                _num(t.get("entry"), 4), _num(t.get("size")),
+                _sgn(t.get("pnl")), _num(t.get("slip"), 4), _money(t.get("cash_after"))))
+    else:
+        A("（暂无成交记录）")
+    A("")
+    A("> 逐笔来自服务器侧 TRADES 落盘流水，完整记录存于 `data/trades.jsonl`（自动轮转归档）。"
+      "BUY=建仓（锁利 0），SELL=平仓（显示本笔锁利）。")
     A("")
     A("## 读这份报告时要注意")
     A("")
