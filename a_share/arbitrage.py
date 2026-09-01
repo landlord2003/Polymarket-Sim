@@ -18,13 +18,22 @@ demo_pairs(): 保留「跨平台演示对」概念（明确 demo=True，因 Kals
 """
 from __future__ import annotations
 
+import os
 import re
 from collections import defaultdict
+
+import lp_reward as LP          # #143：LP 奖励半宽 δ 感知定价（纯函数，无网络）
 
 _DEFAULT_MAX_SKEW = 300       # 与 arb_book.DEFAULT_MAX_SKEW 保持一致
 _MIN_SPREAD = 0.003          # 做市：最小价差门槛（每单位）
 _MIN_EVENT_PROFIT = 0.004    # 事件套利：最小无风险利润门槛
 _WIN_RE = re.compile(r"\b(win|beats?|defeat|draw|tie|home|away)\b", re.I)
+
+# #143 LP 奖励参数（假设值，北京无外网；NB 有网后回填真实 δ / 真实年化率）
+_LP_DELTA = float(os.environ.get("LP_REWARD_DELTA", "0.01"))   # 奖励半宽 δ=1%（mid±1%）
+_LP_APR = float(os.environ.get("LP_REWARD_APR", "0.20"))        # 奖励年化率 20%（假设）
+_LP_TIME_H = float(os.environ.get("LP_REWARD_TIME_H", "24.0")) # 区内平均停留 24h
+_LP_ON = os.environ.get("LP_REWARD_ON", "1") != "0"            # 默认开启感知（仅评分，不碰钱）
 
 
 def _norm(text):
@@ -67,8 +76,15 @@ def scan_poly_marketmaking(quotes, top_n=20, min_spread=_MIN_SPREAD,
             continue
         spread_pct = round((ask - bid) / mid * 100, 2) if mid > 0 else 0.0
         unit = round((ask - bid) / 2, 4)   # 库存中性下每单位锁定毛利
+        lp_r = None
+        if _LP_ON:
+            _lp = LP.lp_reward_quote(mid, spread, _LP_DELTA, _LP_APR,
+                                     natural_half=spread / 2.0,
+                                     time_in_band_h=_LP_TIME_H)
+            lp_r = _lp if _lp.get("ok") else None
         out.append({
             "type": "mm",
+            "lp_reward": lp_r,
             "demo": False,
             "need_confirm": False,
             "confidence": 1.0,

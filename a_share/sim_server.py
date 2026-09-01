@@ -2617,6 +2617,34 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif u.path == "/api/lp_reward":
+            # #143 LP 奖励半宽 δ 感知定价：对当前实时盘口跑「纯价差 vs 价差+奖励」对比
+            try:
+                import lp_reward as LP
+                _mkt = MARKETS_LIVE or []
+                _delta = float(os.environ.get("LP_REWARD_DELTA", "0.01"))
+                _apr = float(os.environ.get("LP_REWARD_APR", "0.20"))
+                _c = LP.compare_over_quotes(_mkt, delta=_delta, apr=_apr,
+                                            min_spread=0.002, time_in_band_h=24.0)
+                _lb = json.dumps({
+                    "ok": True, "delta": _delta, "apr": _apr,
+                    "n": _c["n"], "pure_sum": _c["pure_sum"],
+                    "blended_sum": _c["blended_sum"], "lift_pct": _c["lift_pct"],
+                    "note": "δ/apr 为假设值(北京无外网)，NB 有网回填真实值",
+                }, ensure_ascii=False).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(_lb)))
+                self.end_headers()
+                self.wfile.write(_lb)
+            except Exception as _e:
+                _eb = json.dumps({"ok": False, "error": str(_e)},
+                                 ensure_ascii=False).encode("utf-8")
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(_eb)))
+                self.end_headers()
+                self.wfile.write(_eb)
         elif u.path == "/metrics":
             # P2-A 可观测性：Prometheus 文本暴露格式，供 scrape（Grafana/告警）
             _m = prometheus_metrics().encode("utf-8")
