@@ -1054,6 +1054,7 @@ def step():
                         "ts": round(e.get("ts", time.time()), 1),
                         "round": STATE["round"] + 1,
                         "mkt": (e.get("question") or e.get("mkt") or "-")[:40],
+                        "token_id": str(m.get("token_id") or ""),
                         "tag": tag,
                         "side": e.get("side", ""),
                         "entry": e.get("entry"),

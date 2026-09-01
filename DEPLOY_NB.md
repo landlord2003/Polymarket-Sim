@@ -254,6 +254,26 @@ python a_share/sim_report.py --archive-daily
 - Windows：任务计划程序触发器"每天"，操作为启动 `python a_share/sim_report.py --archive-daily`。
 - 与 §6.3 的一次性 `--csv` 导出不同，**归档是持续化留存**，建议常开；审计时直接进 `output/audit/` 取对应日期文件即可。
 
+### 6.7 历史成交 tag 回填（让旧成交也带真实类目，可选）
+
+> 背景：北京 DRY_RUN 行情来自离线缓存、无 Gamma 原生 `category`，历史成交的 `tag` 是关键词回退值（crypto/economy…）。本脚本把每笔成交的 `tag` 用 Gamma 真实类目回填，使「按类别锁利汇总」覆盖**全历史**真实分布。
+
+**回填键优先级**：① 成交记录带 `token_id` → 精确匹配；② 否则用 `mkt`（题目截断 40 字）→ 前缀/包含匹配 Gamma 题目。
+
+```bash
+# 实时抓取 Gamma 回填（需出网：NB 机器或配好代理的北京机）
+python a_share/backfill_tags.py --gamma --dry-run   # 先看会改变多少笔
+python a_share/backfill_tags.py --gamma             # 执行（自动备份 trades.jsonl.bak）
+
+# 离线映射回填（NB 伙伴可先导出映射、再离线跑；也便于无网环境）
+python a_share/backfill_tags.py --map-file map.json --dry-run
+python a_share/backfill_tags.py --map-file map.json
+```
+
+- **安全**：先备份 `trades.jsonl → trades.jsonl.bak`，只改 `tag` 字段；`--dry-run` 不写文件；幂等（新 tag 与旧相同则跳过，`--force` 可强制）。
+- **前置**：必须能触达 Gamma（`--gamma` 走 `fetch_poly_quotes` 全站活跃池）；北京无出网时请用 `--map-file` 或直接在 NB 跑。
+- 新成交记录已自带 `token_id` 字段（2026-09-01 起），回填更精确；更早的旧记录靠 `mkt` 题目匹配。
+
 ---
 
 ## 7. 关键提醒
@@ -277,4 +297,5 @@ python a_share/sim_report.py --archive-daily
 | `probe_polymarket.py` | 只读探针（概率 → 情报，北京也可用） |
 | `calibrate_fill.py` | **真实成交率校准**（NB 真挂单+轮询，输出回填 FILL_BASE 的 recommended_base） |
 | `sim_report.py` | **审计与导出**：读 `trades.jsonl` 生成可读报告（含按类别锁利汇总）+ 全量/区间成交 CSV（`--trades/--csv/--since-round/--until-round/--date`）+ 定时归档（`--archive` 全量按日 / `--archive-daily` 前一天） |
+| `backfill_tags.py` | **历史 tag 回填**：把旧成交的 `tag` 用 Gamma 真实类目补正（`--gamma` 实时抓 / `--map-file` 离线映射；`--dry-run` 预览、自动备份、幂等） |
 | `compliance.py` | 合规过滤（NB 下由 `COMPLIANCE_FILTER=0` 关闭） |
